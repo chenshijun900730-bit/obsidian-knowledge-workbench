@@ -19,7 +19,6 @@ import {
   RetryableAsyncGate,
   runVisibleHostAction,
   SurfacedHostError,
-  surfaceVisibleHostError,
 } from "../adapters/obsidian-workspace-adapter";
 import {
   ClassificationService,
@@ -51,9 +50,15 @@ import { TransactionService } from "../transactions/transaction-service";
 import { UndoService } from "../transactions/undo-service";
 import { WorkbenchController } from "../ui/workbench-controller";
 import { createWorkbenchViewClass } from "../ui/workbench-view";
+import { startCatalogInitialization } from "../runtime/catalog-runtime-lifecycle";
+import {
+  createWorkbenchI18n,
+  type WorkbenchLocaleProvider,
+  type WorkbenchMessageKey,
+} from "../i18n/workbench-i18n";
 
 const systemClock: Clock = { now: () => Date.now() };
-const errorMessage = (error: unknown): string => error instanceof Error ? error.message : String(error);
+type HostActionMessageKey = Extract<WorkbenchMessageKey, `host.action.${string}`>;
 
 export function createKnowledgeWorkbenchPluginClass(runtime: RuntimeComposition) {
   assertRuntimeCompositionCoherence(runtime.policy, runtime.artifact);
@@ -97,6 +102,7 @@ export function createKnowledgeWorkbenchPluginClass(runtime: RuntimeComposition)
         enforcePolicy: (value) => value.enforceRuntimePolicy(runtime.policy),
       });
       if (!this.lifecycle.owns(epoch)) return;
+      const getLocale: WorkbenchLocaleProvider = () => store.settings().locale;
 
       let queueListener: IncrementalIndexQueue | null = null;
       const vaultAdapter = new ObsidianVaultAdapter(
@@ -120,7 +126,25 @@ export function createKnowledgeWorkbenchPluginClass(runtime: RuntimeComposition)
         return;
       }
       const workspace = new ObsidianWorkspaceAdapter(this.app);
-      const quickCapture = runtime.createQuickCapture(this.app);
+      const quickCapture = runtime.createQuickCapture(this.app, getLocale);
+      const catalog = runtime.createCatalog(this.app);
+      const catalogConfirmation = runtime.createCatalogConfirmation(this.app, getLocale);
+      const catalogTxtImportConfirmation = runtime.createCatalogTxtImportConfirmation?.(
+        this.app,
+        getLocale,
+      );
+      const catalogLargeScanConfirmation = runtime.createCatalogLargeScanConfirmation?.(
+        this.app,
+        getLocale,
+      );
+      const catalogDirectoryPicker = runtime.createCatalogDirectoryPicker !== undefined
+        && catalog.directoryDiscovery !== undefined
+        ? runtime.createCatalogDirectoryPicker(
+          this.app,
+          catalog.directoryDiscovery,
+          getLocale,
+        )
+        : undefined;
       const changePlans = new ChangePlanService(vaultAdapter, () => {
         const settings = store.settings();
         return runtime.policy.contentWrites === "allowed"
@@ -154,16 +178,25 @@ export function createKnowledgeWorkbenchPluginClass(runtime: RuntimeComposition)
         map: new MapService(),
         suggestions: new SuggestionService(),
         changePlans,
-        changePreview: runtime.createChangePreview(this.app, changePlans),
+        changePreview: runtime.createChangePreview(this.app, changePlans, getLocale),
         store,
         workspace,
         quickCapture,
         transactions,
         journal,
         undo,
-        historyConfirmation: runtime.createHistoryConfirmation(this.app),
+        historyConfirmation: runtime.createHistoryConfirmation(this.app, getLocale),
         clock: systemClock,
-        ai: runtime.createAi?.(this.app),
+        ai: runtime.createAi?.(this.app, getLocale),
+        catalog,
+        catalogConfirmation,
+        ...(catalogTxtImportConfirmation === undefined
+          ? {}
+          : { catalogTxtImportConfirmation }),
+        ...(catalogLargeScanConfirmation === undefined
+          ? {}
+          : { catalogLargeScanConfirmation }),
+        ...(catalogDirectoryPicker === undefined ? {} : { catalogDirectoryPicker }),
       });
       this.controller = controller;
       this.vaultAdapter = vaultAdapter;
@@ -174,20 +207,29 @@ export function createKnowledgeWorkbenchPluginClass(runtime: RuntimeComposition)
       this.recoveryAudit = recoveryAudit;
       this.recoveryReadiness = recoveryReadiness;
 
+      startCatalogInitialization(catalog, (code) => {
+        if (this.lifecycle.owns(epoch)) controller.reportCatalogError(code);
+      });
+
       // Metadata events begin during onload; vault events wait until layout readiness.
       vaultAdapter.startMetadataTracking();
-      this.registerView(VIEW_TYPE, (leaf) => new ConcreteWorkbenchView(leaf, controller));
+      this.registerView(VIEW_TYPE, (leaf) => new ConcreteWorkbenchView(
+        leaf,
+        controller,
+        runtime.createWorkbenchSettingsSurface?.(this.app, controller, getLocale),
+      ));
+      const loadI18n = createWorkbenchI18n(getLocale());
       this.addRibbonIcon(
         "network",
-        "Open knowledge workbench",
+        loadI18n.t("host.ribbon.open"),
         () => this.requestOpenWorkbench(),
       );
       this.addCommand({
         id: "open-workbench",
-        name: "Open workbench",
+        name: loadI18n.t("host.command.open"),
         callback: () => this.requestOpenWorkbench(),
       });
-      this.addSettingTab(runtime.createSettingsTab(this.app, this, controller));
+      this.addSettingTab(runtime.createSettingsTab(this.app, this, controller, getLocale));
       this.app.workspace.onLayoutReady(() => {
         if (!this.lifecycle.owns(epoch)) return;
         this.layoutReady = true;
@@ -253,7 +295,8 @@ export function createKnowledgeWorkbenchPluginClass(runtime: RuntimeComposition)
             || file.extension.toLocaleLowerCase("en-US") !== "md"
           ) return;
           void controller.recordFileOpen(file.path).catch((error: unknown) => {
-            controller.reportError(`File-open tracking failed: ${errorMessage(error)}`);
+            void error;
+            controller.reportError("host.action.openNoteFailed" satisfies HostActionMessageKey);
           });
         }));
         this.layoutTrackingStarted = true;
@@ -286,13 +329,8 @@ export function createKnowledgeWorkbenchPluginClass(runtime: RuntimeComposition)
       const epoch = this.activeEpoch;
       runVisibleHostAction(() => this.openWorkbench(), (error: unknown) => {
         if (error instanceof SurfacedHostError) return;
-        surfaceVisibleHostError(
-          "Open workbench failed",
-          error,
-          () => this.lifecycle.owns(epoch),
-          (message) => this.controller?.reportError(message),
-          (message) => { new Notice(message); },
-        );
+        void error;
+        this.showSafeHostError("host.action.openWorkbenchFailed", epoch);
       });
     }
 
@@ -300,20 +338,25 @@ export function createKnowledgeWorkbenchPluginClass(runtime: RuntimeComposition)
       return requireActivatedWorkbench(
         this.app,
         (view) => view instanceof ConcreteWorkbenchView,
-        (message) => {
-          if (this.lifecycle.owns(epoch)) this.controller?.reportError(message);
+        () => {
+          if (this.lifecycle.owns(epoch)) {
+            this.controller?.reportError("host.action.openWorkbenchFailed" satisfies HostActionMessageKey);
+          }
         },
       );
     }
 
     private showLayoutError(error: unknown, epoch: number): void {
-      surfaceVisibleHostError(
-        "Layout initialization failed",
-        error,
-        () => this.lifecycle.owns(epoch),
-        (message) => this.controller?.reportError(message),
-        (message) => { new Notice(message); },
-      );
+      void error;
+      this.showSafeHostError("host.action.layoutFailed", epoch);
+    }
+
+    private showSafeHostError(key: HostActionMessageKey, epoch: number): void {
+      if (!this.lifecycle.owns(epoch)) return;
+      const locale = this.store?.settings().locale ?? "zh-CN";
+      const message = createWorkbenchI18n(locale).t(key);
+      this.controller?.reportError(key);
+      new Notice(message);
     }
   };
 }

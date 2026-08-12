@@ -1,0 +1,317 @@
+import type { CloudCatalogConnectionViewModel } from "../catalog/cloud-catalog-runtime";
+import type { HybridCatalogViewModel } from "../catalog/hybrid-catalog-runtime";
+import { LARGE_CATALOG_RUN_BUDGET } from "../catalog/hybrid-catalog-types";
+import type { WorkbenchI18n, WorkbenchMessageKey } from "../i18n/workbench-i18n";
+import {
+  isCatalogMessageCode,
+  presentCatalogMessage,
+  type CatalogMessageCode,
+  type VerificationActionMessageCode,
+} from "./catalog-message-presenter";
+import { presentCatalogStopReason } from "./catalog-stop-reason-presenter";
+import { connectionCanVerify } from "./verification-connection-semantics";
+
+export { connectionCanVerify } from "./verification-connection-semantics";
+
+export interface VerificationPageActions {
+  readonly onRootChange: (value: string) => void;
+  readonly onToggleGroup: (groupKey: string) => void;
+  readonly onStart: () => Promise<void>;
+  readonly onResume: () => Promise<void>;
+  readonly onCancel: () => void;
+  readonly onBrowseRoot?: () => Promise<string | null>;
+}
+
+export interface VerificationPageModel {
+  readonly i18n: WorkbenchI18n;
+  readonly rootPath: string;
+  readonly rootLocked: boolean;
+  readonly selectedGroupKeys: readonly string[];
+  readonly actionMessageCode?: VerificationActionMessageCode;
+  readonly connection?: CloudCatalogConnectionViewModel;
+  readonly hybrid?: HybridCatalogViewModel;
+  readonly actions: VerificationPageActions;
+}
+
+const stateKey = (hybrid: HybridCatalogViewModel | undefined): WorkbenchMessageKey => {
+  if (hybrid === undefined || hybrid.status === "unavailable") return "verification.state.unavailable";
+  const status = hybrid.status;
+  if (status === "scanning") return "verification.state.scanning";
+  if (status === "paused") return "verification.state.paused";
+  if (status === "partial" || status === "error") {
+    return "verification.state.partial";
+  }
+  if (hybrid.active === undefined) {
+    return "verification.state.empty";
+  }
+  return "verification.state.ready";
+};
+
+interface ResolvedViewMessage {
+  readonly code: CatalogMessageCode;
+  readonly source: "connection" | "capability" | "action" | "hybrid" | "batch";
+}
+
+const viewMessage = (model: VerificationPageModel): ResolvedViewMessage | undefined => {
+  if (isCatalogMessageCode(model.connection?.messageCode)) {
+    return { code: model.connection.messageCode, source: "connection" };
+  }
+  if (model.hybrid === undefined || model.connection === undefined) {
+    return { code: "catalog-unavailable", source: "capability" };
+  }
+  if (!connectionCanVerify(model.connection)) {
+    return {
+      code: model.connection.status === "unconfigured"
+        ? "credentials-unavailable"
+        : "authorization-attempt-unavailable",
+      source: "connection",
+    };
+  }
+  if (model.actionMessageCode !== undefined) {
+    return { code: model.actionMessageCode, source: "action" };
+  }
+  if (isCatalogMessageCode(model.hybrid.messageCode)) {
+    return { code: model.hybrid.messageCode, source: "hybrid" };
+  }
+  const stopReason = model.hybrid.status === "paused" || model.hybrid.status === "partial"
+    ? model.hybrid.batch?.stopReason
+    : undefined;
+  if (stopReason === "user-canceled") return { code: "verification-canceled", source: "batch" };
+  if (isCatalogMessageCode(stopReason)) return { code: stopReason, source: "batch" };
+  return undefined;
+};
+
+const renderMessage = (
+  root: HTMLElement,
+  code: CatalogMessageCode,
+  i18n: WorkbenchI18n,
+): HTMLElement => {
+  const presentation = presentCatalogMessage(code, i18n);
+  const article = root.ownerDocument.createElement("article");
+  article.className = "knowledge-workbench__verification-message";
+  article.dataset.catalogMessage = code;
+  article.setAttribute("role", "status");
+  const title = root.ownerDocument.createElement("h3");
+  title.textContent = presentation.title;
+  const preservation = root.ownerDocument.createElement("p");
+  preservation.textContent = presentation.preservation;
+  const nextAction = root.ownerDocument.createElement("p");
+  nextAction.textContent = presentation.nextAction;
+  article.append(title, preservation, nextAction);
+  return article;
+};
+
+export function renderVerificationPage(root: HTMLElement, model: VerificationPageModel): void {
+  const { i18n, actions } = model;
+  const doc = root.ownerDocument;
+  root.replaceChildren();
+  root.className = "knowledge-workbench__verification-page";
+
+  const heading = doc.createElement("h2");
+  heading.textContent = i18n.t("verification.title");
+  const state = doc.createElement("p");
+  state.className = "knowledge-workbench__verification-state";
+  state.textContent = i18n.t(stateKey(model.hybrid));
+  root.append(heading, state);
+
+  const messageHost = doc.createElement("div");
+  messageHost.className = "knowledge-workbench__verification-message-host";
+  const initialMessage = viewMessage(model);
+  if (initialMessage !== undefined) {
+    messageHost.append(renderMessage(root, initialMessage.code, i18n));
+  }
+  root.append(messageHost);
+
+  const active = model.hybrid?.active;
+  const activeGroupKeys = new Set(active?.groups.map((group) => group.groupKey) ?? []);
+  const selected = new Set(model.selectedGroupKeys.filter((groupKey) => activeGroupKeys.has(groupKey)));
+  const busy = model.hybrid?.status === "scanning";
+  const authorized = connectionCanVerify(model.connection);
+  const capabilityAvailable = model.hybrid !== undefined && model.hybrid.status !== "unavailable";
+  const currentConnectionFault = initialMessage?.source === "connection"
+    || initialMessage?.source === "capability";
+  const batch = model.hybrid?.batch;
+  const rootLeaf = model.rootPath.normalize("NFC").split("/").at(-1) ?? "";
+  const selectedCategoryIsRoot = active?.groups.some((group) => (
+    group.groupKey !== "txt-root-items"
+    && selected.has(group.groupKey)
+    && group.label.normalize("NFC") === rootLeaf
+  )) ?? false;
+  if (initialMessage === undefined && active !== undefined) {
+    if (selected.size === 0) {
+      messageHost.append(renderMessage(root, "verification-group-required", i18n));
+    } else if (selectedCategoryIsRoot) {
+      messageHost.append(renderMessage(root, "invalid-large-catalog-root", i18n));
+    }
+  }
+  const selectedPdfCount = active?.groups.reduce((total, group) => (
+    selected.has(group.groupKey) ? total + group.pdfCount : total
+  ), 0) ?? 0;
+  const summary = doc.createElement("section");
+  summary.className = "knowledge-workbench__verification-summary";
+  const summaryTitle = doc.createElement("h3");
+  summaryTitle.textContent = i18n.t("verification.summary.title");
+  const scope = doc.createElement("p");
+  scope.textContent = i18n.t(
+    batch?.resumeAvailable === true
+      ? "verification.summary.newScope"
+      : "verification.summary.scope",
+    {
+    selected: i18n.number(selected.size),
+    count: i18n.number(selectedPdfCount),
+    },
+  );
+  const safety = doc.createElement("p");
+  safety.className = "knowledge-workbench__verification-safety";
+  safety.textContent = i18n.t("verification.safety");
+  summary.append(summaryTitle, scope, safety);
+  root.append(summary);
+
+  const scopeEditor = doc.createElement("section");
+  scopeEditor.className = "knowledge-workbench__verification-scope";
+  const rootLabel = doc.createElement("label");
+  rootLabel.textContent = i18n.t("verification.root.label");
+  const rootInput = doc.createElement("input");
+  rootInput.type = "text";
+  rootInput.autocomplete = "off";
+  rootInput.value = model.rootPath;
+  rootInput.disabled = busy || model.rootLocked;
+  rootInput.dataset.verificationRoot = "true";
+  rootInput.dataset.focusKey = "verification-root";
+  rootInput.addEventListener("input", () => {
+    if (!rootInput.disabled) actions.onRootChange(rootInput.value);
+  });
+  rootLabel.append(rootInput);
+  const rootHint = doc.createElement("p");
+  rootHint.textContent = i18n.t("verification.root.hint");
+  scopeEditor.append(rootLabel, rootHint);
+  if (model.rootLocked) {
+    const lockedHint = doc.createElement("p");
+    lockedHint.className = "knowledge-workbench__verification-root-locked";
+    lockedHint.textContent = i18n.t("verification.root.locked");
+    scopeEditor.append(lockedHint);
+  }
+  if (actions.onBrowseRoot !== undefined) {
+    const browse = doc.createElement("button");
+    browse.type = "button";
+    browse.dataset.action = "browse-verification-root";
+    browse.textContent = i18n.t("verification.browse");
+    browse.disabled = busy || model.rootLocked;
+    browse.addEventListener("click", () => {
+      void actions.onBrowseRoot?.().then((value) => {
+        if (value === null || value === undefined) return;
+        rootInput.value = value;
+        actions.onRootChange(value);
+      }).catch(() => undefined);
+    });
+    scopeEditor.append(browse);
+  }
+
+  const groupTitle = doc.createElement("h3");
+  groupTitle.textContent = i18n.t("verification.groups.title", {
+    maximum: LARGE_CATALOG_RUN_BUDGET.maxSelectedTopLevelGroups,
+  });
+  const choices = doc.createElement("div");
+  choices.className = "knowledge-workbench__verification-groups";
+  for (const group of active?.groups ?? []) {
+    const label = doc.createElement("label");
+    const choice = doc.createElement("input");
+    choice.type = "checkbox";
+    choice.checked = selected.has(group.groupKey);
+    choice.disabled = busy || (!choice.checked && selected.size >= LARGE_CATALOG_RUN_BUDGET.maxSelectedTopLevelGroups);
+    choice.dataset.groupKey = group.groupKey;
+    choice.addEventListener("change", () => actions.onToggleGroup(group.groupKey));
+    const text = doc.createElement("span");
+    text.textContent = i18n.t("verification.group.item", {
+      label: group.label,
+      count: i18n.number(group.pdfCount),
+      status: i18n.t(`settings.status.${group.verificationStatus}`),
+    });
+    label.append(choice, text);
+    choices.append(label);
+  }
+  if (active === undefined) {
+    const empty = doc.createElement("p");
+    empty.className = "knowledge-workbench__empty";
+    empty.textContent = i18n.t(stateKey(model.hybrid));
+    choices.append(empty);
+  }
+  scopeEditor.append(groupTitle, choices);
+  root.append(scopeEditor);
+
+  if (batch !== undefined) {
+    const progress = doc.createElement("section");
+    progress.className = "knowledge-workbench__verification-progress";
+    const counts = doc.createElement("p");
+    counts.textContent = i18n.t("verification.batch.counts", {
+      pdf: i18n.number(batch.pdfCount),
+      directory: i18n.number(batch.directoryCount),
+      remaining: i18n.number(batch.remainingGroupCount),
+    });
+    const requests = doc.createElement("p");
+    requests.textContent = i18n.t("verification.batch.requests", {
+      current: i18n.number(batch.listRequestCount),
+      cumulative: i18n.number(batch.cumulativeListRequestCount),
+    });
+    progress.append(counts, requests);
+    if (batch.stopReason !== null && !busy && !currentConnectionFault) {
+      const stop = doc.createElement("p");
+      stop.textContent = i18n.t("verification.batch.stop", {
+        reason: presentCatalogStopReason(batch.stopReason, i18n),
+      });
+      progress.append(stop);
+    }
+    if (
+      batch.resumeAvailable
+      && (model.hybrid?.status === "paused" || model.hybrid?.status === "partial")
+      && !currentConnectionFault
+    ) {
+      const preserved = doc.createElement("p");
+      preserved.textContent = i18n.t("verification.checkpoint.preserved");
+      progress.append(preserved);
+    }
+    root.append(progress);
+  }
+
+  const actionRow = doc.createElement("div");
+  actionRow.className = "knowledge-workbench__verification-actions";
+  if (busy) {
+    const cancel = doc.createElement("button");
+    cancel.type = "button";
+    cancel.dataset.action = "cancel-verification";
+    cancel.textContent = i18n.t("verification.action.cancel");
+    cancel.addEventListener("click", () => {
+      actions.onCancel();
+      const requested = doc.createElement("p");
+      requested.dataset.cancelRequested = "true";
+      requested.setAttribute("role", "status");
+      requested.textContent = i18n.t("verification.cancel.requested");
+      messageHost.replaceChildren(requested);
+    });
+    actionRow.append(cancel);
+  } else {
+    const start = doc.createElement("button");
+    start.type = "button";
+    start.dataset.action = "start-verification";
+    start.textContent = i18n.t("verification.action.start");
+    start.disabled = !authorized
+      || !capabilityAvailable
+      || currentConnectionFault
+      || active === undefined
+      || selected.size === 0
+      || selectedCategoryIsRoot
+      || model.rootPath.length === 0;
+    start.addEventListener("click", () => { void actions.onStart().catch(() => undefined); });
+    actionRow.append(start);
+    if (batch?.resumeAvailable === true && authorized && capabilityAvailable) {
+      const resume = doc.createElement("button");
+      resume.type = "button";
+      resume.dataset.action = "resume-verification";
+      resume.textContent = i18n.t("verification.action.resume");
+      resume.disabled = currentConnectionFault || model.rootPath.length === 0;
+      resume.addEventListener("click", () => { void actions.onResume().catch(() => undefined); });
+      actionRow.append(resume);
+    }
+  }
+  root.append(actionRow);
+}

@@ -12,6 +12,7 @@ import { buildConfirmedRelationCandidates, type OperationRationale, type Suggest
 import type { ChangePlanService, ConfirmedPlan } from "../plans/change-plan-service";
 import type { PluginDataStore } from "../storage/plugin-data-store";
 import type { FolderRule, FolderRuleProposal, PluginSettings } from "../storage/plugin-data";
+import type { WorkbenchLocale } from "../i18n/workbench-i18n";
 import type { TodayService } from "../today/today-service";
 import type { ExecutionResult, TransactionService } from "../transactions/transaction-service";
 import type { OperationJournal } from "../transactions/operation-journal";
@@ -19,9 +20,31 @@ import type { UndoService } from "../transactions/undo-service";
 import type { ChangePreviewPresenter } from "./change-preview-modal";
 import { exportJournalJson, type HistoryConfirmationPresenter } from "./history-tab";
 import type { TodayFilter } from "./today-pane";
-import type { WorkbenchProgress, WorkbenchTab, WorkbenchViewModel } from "./workbench-view";
+import type { StartSection, WorkbenchProgress, WorkbenchTab, WorkbenchViewModel } from "./workbench-view";
 import type { AiPayloadPreviewPresenter } from "./ai-payload-preview-modal";
 import { effectiveSettings, type RuntimeSafetyPolicy } from "../runtime/safety-policy";
+import { catalogPageContains, type CloudCatalogRuntime } from "../catalog/cloud-catalog-runtime";
+import type { CloudCatalogConnectionViewModel } from "../catalog/cloud-catalog-runtime";
+import { normalizeCatalogScanRoot } from "../catalog/catalog-path";
+import { CatalogError } from "../catalog/catalog-types";
+import type { CatalogScanConfirmationPresenter } from "./catalog-scan-confirmation-modal";
+import {
+  refreshCatalogProjection,
+  type CatalogInitializationErrorCode,
+} from "../runtime/catalog-runtime-lifecycle";
+import type { HybridCatalogViewModel } from "../catalog/hybrid-catalog-runtime";
+import type { CatalogTxtImportConfirmationPresenter } from "./catalog-txt-import-confirmation-modal";
+import type { CatalogLargeScanConfirmationPresenter } from "./catalog-large-scan-confirmation-modal";
+import type { CloudDirectoryPickerPresenter } from "./cloud-directory-picker";
+import type {
+  CatalogDifferenceKind,
+  CatalogVerificationStatus,
+} from "../catalog/hybrid-catalog-types";
+import { HybridCatalogError, LARGE_CATALOG_RUN_BUDGET } from "../catalog/hybrid-catalog-types";
+import {
+  verificationConnectionSemanticKey,
+  type VerificationConnectionSemanticKey,
+} from "./verification-connection-semantics";
 
 export interface AiSettingsInput {
   readonly enabled: boolean;
@@ -64,6 +87,11 @@ export interface WorkbenchDependencies {
   readonly clock: Clock;
   readonly ai?: WorkbenchAiDependencies;
   readonly projectionScheduler?: WorkbenchProjectionScheduler;
+  readonly catalog: CloudCatalogRuntime;
+  readonly catalogConfirmation: CatalogScanConfirmationPresenter;
+  readonly catalogTxtImportConfirmation?: CatalogTxtImportConfirmationPresenter;
+  readonly catalogLargeScanConfirmation?: CatalogLargeScanConfirmationPresenter;
+  readonly catalogDirectoryPicker?: CloudDirectoryPickerPresenter;
 }
 
 export type MapCenter = Readonly<{ kind: "document" | "topic"; id: string }>;
@@ -79,6 +107,16 @@ const RECOVERY_LOCK_MESSAGE = "Recovery required; organization writes are locked
 const PROJECTION_REFRESH_ERROR = "Workbench projection refresh failed";
 const PROJECTION_QUIET_DELAY_MS = 50;
 const PROJECTION_MAX_WAIT_MS = 500;
+const isSelectedCategoryRoot = (
+  cloudRoot: string,
+  groups: readonly Readonly<{ groupKey: string; label: string }>[],
+): boolean => {
+  const rootLeaf = cloudRoot.slice(cloudRoot.lastIndexOf("/") + 1);
+  return groups.some((group) => (
+    group.groupKey !== "txt-root-items"
+    && group.label.normalize("NFC") === rootLeaf
+  ));
+};
 const defaultProjectionScheduler: WorkbenchProjectionScheduler = {
   now: () => Date.now(),
   schedule: (callback, delayMs) => window.setTimeout(callback, delayMs),
@@ -133,10 +171,44 @@ const rawAiActionKey = (action: AiAction, paths: unknown, targetSuggestionId: un
 };
 const stripInitialFrontmatter = (content: string): string => content.replace(/^\uFEFF?---\r?\n(?:[\s\S]*?\r?\n)?---(?:\r?\n|$)/u, "");
 const suggestionPath = (suggestion: SuggestedOperation): string => normalizeVaultPath(sourcePathOf(suggestion));
+const verificationBatchAdvanced = (
+  before: HybridCatalogViewModel | undefined,
+  after: HybridCatalogViewModel | undefined,
+): boolean => {
+  const batch = after?.batch;
+  if (after === undefined || batch === undefined) return false;
+  const eligible = after.status === "scanning"
+    || ((after.status === "paused" || after.status === "partial") && batch.resumeAvailable);
+  if (!eligible) return false;
+  const prior = before?.batch;
+  return prior === undefined
+    || batch.batchId !== prior.batchId
+    || batch.runOrdinal > prior.runOrdinal;
+};
+
+const hybridWithoutMessage = (value: HybridCatalogViewModel): HybridCatalogViewModel => {
+  const { messageCode: _messageCode, ...current } = value;
+  return current;
+};
+
+const verificationValidationCode = (
+  error: unknown,
+): NonNullable<WorkbenchViewModel["verificationActionMessageCode"]> | undefined => {
+  if (error instanceof CatalogError && error.code === "invalid-scan-root") {
+    return "invalid-scan-root";
+  }
+  if (error instanceof Error && error.message === "invalid-large-catalog-root") {
+    return "invalid-large-catalog-root";
+  }
+  return undefined;
+};
 
 export class WorkbenchController {
   private readonly listeners = new Set<() => void>();
   private readonly unsubscribeIndex: () => void;
+  private readonly unsubscribeCatalog: () => void;
+  private readonly unsubscribeCatalogConnection: () => void;
+  private readonly unsubscribeHybridCatalog: () => void;
   private readonly projectionScheduler: WorkbenchProjectionScheduler;
   private model: WorkbenchViewModel;
   private records: readonly DocumentRecord[] = [];
@@ -159,6 +231,9 @@ export class WorkbenchController {
   private aiFlight: Readonly<{ rawKey: string; promise: Promise<AiResult<string>> }> | null = null;
   private aiOverrideSuggestionId: string | null = null;
   private aiOriginalRationale: OperationRationale | null = null;
+  private lockedVerificationRoot: string | null = null;
+  private dismissedVerificationHybridMessageCode: "hybrid-cloud-root-mismatch" | null = null;
+  private verificationConnectionKey: VerificationConnectionSemanticKey;
   private projectionRevision = 1;
   private projectedRevision = 0;
   private projectionDirtySince: number | null = null;
@@ -168,9 +243,26 @@ export class WorkbenchController {
 
   constructor(private readonly dependencies: WorkbenchDependencies) {
     this.projectionScheduler = dependencies.projectionScheduler ?? defaultProjectionScheduler;
+    this.verificationConnectionKey = verificationConnectionSemanticKey(
+      dependencies.catalog.connection?.snapshot(),
+    );
     this.model = {
+      locale: effectiveSettings(dependencies.policy, dependencies.store.settings()).locale,
       status: "ready",
       activeTab: "workbench",
+      startSection: "overview",
+      catalog: dependencies.catalog.snapshot(),
+      ...(dependencies.catalog.connection === undefined ? {} : {
+        catalogConnection: clone(dependencies.catalog.connection.snapshot()),
+      }),
+      ...(dependencies.catalog.hybrid === undefined ? {} : {
+        hybridCatalog: clone(dependencies.catalog.hybrid.snapshot()),
+      }),
+      verificationRoot: "",
+      verificationRootLocked: false,
+      selectedVerificationGroupKeys: [],
+      selectedCatalogId: null,
+      catalogFiltersExpanded: false,
       todayFilter: "all",
       today: { newItems: [], continueItems: [], nextItems: [] },
       suggestions: [],
@@ -187,6 +279,20 @@ export class WorkbenchController {
       if (this.disposed) return;
       this.markProjectionDirty();
     });
+    this.unsubscribeCatalog = dependencies.catalog.subscribe(() => this.refreshCatalogViewState());
+    this.unsubscribeCatalogConnection = dependencies.catalog.connection?.subscribe(
+      () => {
+        const nextKey = verificationConnectionSemanticKey(dependencies.catalog.connection?.snapshot());
+        if (nextKey !== this.verificationConnectionKey) {
+          this.dismissedVerificationHybridMessageCode = null;
+          this.verificationConnectionKey = nextKey;
+        }
+        this.refreshCatalogViewState();
+      },
+    ) ?? (() => undefined);
+    this.unsubscribeHybridCatalog = dependencies.catalog.hybrid?.subscribe(
+      () => this.refreshCatalogViewState(),
+    ) ?? (() => undefined);
   }
 
   snapshot(): WorkbenchViewModel {
@@ -207,6 +313,122 @@ export class WorkbenchController {
     if (this.disposed || tab === this.model.activeTab) return;
     this.model = { ...this.model, activeTab: tab };
     this.emit();
+  }
+
+  selectStartSection(section: StartSection): void {
+    if (this.disposed || section === this.model.startSection) return;
+    this.model = { ...this.model, startSection: section };
+    this.emit();
+  }
+
+  setVerificationRoot(value: string): void {
+    if (
+      this.disposed
+      || this.lockedVerificationRoot !== null
+      || value === this.model.verificationRoot
+    ) return;
+    const runtimeMessageCode = this.dependencies.catalog.hybrid?.snapshot().messageCode;
+    if (runtimeMessageCode === "hybrid-cloud-root-mismatch") {
+      this.dismissedVerificationHybridMessageCode = runtimeMessageCode;
+    }
+    const {
+      verificationActionMessageCode: _verificationActionMessageCode,
+      hybridCatalog,
+      ...current
+    } = this.model;
+    const visibleHybrid = hybridCatalog?.messageCode === this.dismissedVerificationHybridMessageCode
+      ? hybridWithoutMessage(hybridCatalog)
+      : hybridCatalog;
+    this.model = {
+      ...current,
+      ...(visibleHybrid === undefined ? {} : { hybridCatalog: visibleHybrid }),
+      verificationRoot: value,
+    };
+    this.emit();
+  }
+
+  toggleVerificationGroup(groupKey: string): void {
+    if (this.disposed) return;
+    const available = this.model.hybridCatalog?.active?.groups
+      .some((group) => group.groupKey === groupKey) === true;
+    if (!available) return;
+    const selected = new Set(this.model.selectedVerificationGroupKeys);
+    if (selected.has(groupKey)) selected.delete(groupKey);
+    else {
+      if (selected.size >= LARGE_CATALOG_RUN_BUDGET.maxSelectedTopLevelGroups) return;
+      selected.add(groupKey);
+    }
+    this.model = { ...this.model, selectedVerificationGroupKeys: [...selected] };
+    this.emit();
+  }
+
+  async startSelectedVerification(): Promise<void> {
+    if (this.disposed) return;
+    this.clearVerificationHybridMessageSuppression();
+    const groupKeys = [...this.model.selectedVerificationGroupKeys];
+    if (groupKeys.length === 0) throw new RangeError("verification-group-required");
+    let normalized: string;
+    try {
+      normalized = this.validateCatalogScanRoot(this.model.verificationRoot);
+    } catch (error) {
+      this.captureVerificationValidation(error);
+      throw error;
+    }
+    const before = this.dependencies.catalog.hybrid?.snapshot();
+    const alreadyLocked = this.lockedVerificationRoot !== null;
+    let lockedForAttempt = false;
+    try {
+      await this.requestLargeCatalogVerification(normalized, groupKeys, () => {
+        lockedForAttempt = !alreadyLocked;
+        this.lockVerificationRoot(normalized);
+      });
+      this.clearVerificationActionMessage();
+    } catch (error) {
+      const after = this.dependencies.catalog.hybrid?.snapshot();
+      if (lockedForAttempt && !verificationBatchAdvanced(before, after)) {
+        this.unlockVerificationRoot();
+      }
+      this.captureVerificationValidation(error);
+      throw error;
+    }
+  }
+
+  async resumeSelectedVerification(): Promise<void> {
+    if (this.disposed) return;
+    this.clearVerificationHybridMessageSuppression();
+    const alreadyLocked = this.lockedVerificationRoot !== null;
+    const candidate = this.lockedVerificationRoot ?? this.model.verificationRoot;
+    let normalized: string;
+    try {
+      normalized = this.validateCatalogScanRoot(candidate);
+    } catch (error) {
+      this.captureVerificationValidation(error);
+      throw error;
+    }
+    let lockedForAttempt = false;
+    try {
+      await this.requestResumeLargeCatalogVerification(normalized, () => {
+        if (alreadyLocked) return;
+        lockedForAttempt = true;
+        this.lockVerificationRoot(normalized);
+      });
+      this.clearVerificationActionMessage();
+    } catch (error) {
+      if (lockedForAttempt) this.unlockVerificationRoot();
+      if (
+        error instanceof HybridCatalogError
+        && error.code === "hybrid-cloud-root-mismatch"
+      ) {
+        this.unlockVerificationRoot();
+        this.setVerificationActionMessage("hybrid-cloud-root-mismatch");
+      }
+      this.captureVerificationValidation(error);
+      throw error;
+    }
+  }
+
+  cancelSelectedVerification(): void {
+    this.cancelLargeCatalogVerification();
   }
 
   setTodayFilter(filter: TodayFilter): void {
@@ -270,6 +492,254 @@ export class WorkbenchController {
     const results = this.dependencies.map.search(this.records, query);
     this.model = { ...this.model, searchQuery: query, searchResults: clone(results) };
     if (!this.refocusCurrentCenterIfStale()) this.emit();
+  }
+
+  searchCatalog(query: string): void {
+    if (this.disposed) return;
+    this.dependencies.catalog.setQuery(query);
+  }
+
+  selectCatalogRecord(catalogId: string): void {
+    if (this.disposed || !catalogPageContains(this.model.catalog, catalogId)) return;
+    if (catalogId === this.model.selectedCatalogId) return;
+    this.model = { ...this.model, selectedCatalogId: catalogId };
+    this.emit();
+  }
+
+  setCatalogFiltersExpanded(expanded: boolean): void {
+    if (this.disposed || expanded === this.model.catalogFiltersExpanded) return;
+    this.model = { ...this.model, catalogFiltersExpanded: expanded };
+    this.emit();
+  }
+
+  filterCatalogFolder(prefix: string): void {
+    if (this.disposed) return;
+    this.dependencies.catalog.setFolderPrefix(prefix);
+  }
+
+  toggleCatalogStatus(status: CatalogVerificationStatus): void {
+    if (this.disposed) return;
+    const active = this.dependencies.catalog.snapshot().verificationStatuses;
+    this.dependencies.catalog.setVerificationStatuses(
+      active.includes(status) ? active.filter((value) => value !== status) : [...active, status],
+    );
+  }
+
+  toggleCatalogDifference(kind: CatalogDifferenceKind): void {
+    if (this.disposed) return;
+    const active = this.dependencies.catalog.snapshot().differenceKinds;
+    this.dependencies.catalog.setDifferenceKinds(
+      active.includes(kind) ? active.filter((value) => value !== kind) : [...active, kind],
+    );
+  }
+
+  filterCatalogGroup(groupKey: string): void {
+    if (this.disposed) return;
+    this.dependencies.catalog.setTopLevelGroupId(groupKey);
+  }
+
+  filterCatalogTag(tag: string): void {
+    if (this.disposed) return;
+    this.dependencies.catalog.setHierarchyTag(tag);
+  }
+
+  toggleCatalogCloudMissing(include: boolean): void {
+    if (this.disposed) return;
+    this.dependencies.catalog.setIncludeCloudMissing(include);
+  }
+
+  selectCatalogPage(page: number): void {
+    if (this.disposed) return;
+    this.dependencies.catalog.setPage(page);
+  }
+
+  copyCatalogFilename(catalogId: string): Promise<void> {
+    if (this.disposed) return Promise.resolve();
+    return this.dependencies.catalog.copyFilename(catalogId);
+  }
+
+  copyCatalogPath(catalogId: string): Promise<void> {
+    if (this.disposed) return Promise.resolve();
+    return this.dependencies.catalog.copyCloudPath(catalogId);
+  }
+
+  openBaidu(): Promise<void> {
+    if (this.disposed) return Promise.resolve();
+    return this.dependencies.catalog.openBaidu();
+  }
+
+  catalogConnection(): CloudCatalogConnectionViewModel | undefined {
+    return this.dependencies.catalog.connection?.snapshot();
+  }
+
+  subscribeCatalogConnection(listener: () => void): () => void {
+    if (this.disposed) return () => undefined;
+    return this.dependencies.catalog.subscribe(listener);
+  }
+
+  async connectCatalog(credentials: Readonly<{ appKey: string; secretKey: string }>): Promise<void> {
+    if (this.disposed) return;
+    const connection = this.dependencies.catalog.connection;
+    if (connection === undefined) throw new Error("catalog-unavailable");
+    await connection.saveApplicationCredentials(credentials);
+    if (this.disposed) return;
+    await connection.beginAuthorization();
+  }
+
+  async submitCatalogAuthorizationCode(code: string): Promise<void> {
+    if (this.disposed) return;
+    const connection = this.dependencies.catalog.connection;
+    if (connection === undefined) throw new Error("catalog-unavailable");
+    await connection.submitAuthorizationCode(code);
+  }
+
+  cancelCatalogAuthorization(): void {
+    if (this.disposed) return;
+    this.dependencies.catalog.connection?.cancelAuthorization();
+  }
+
+  async revokeCatalog(): Promise<void> {
+    if (this.disposed) return;
+    const connection = this.dependencies.catalog.connection;
+    if (connection === undefined) throw new Error("catalog-unavailable");
+    await connection.revoke();
+  }
+
+  validateCatalogScanRoot(rootPath: string): string {
+    return normalizeCatalogScanRoot(rootPath);
+  }
+
+  async chooseCatalogRoot(initialRoot: string): Promise<string | null> {
+    if (this.disposed) return null;
+    const normalized = this.validateCatalogScanRoot(initialRoot);
+    const discovery = this.dependencies.catalog.directoryDiscovery;
+    const picker = this.dependencies.catalogDirectoryPicker;
+    if (discovery === undefined || picker === undefined) throw new Error("catalog-unavailable");
+    return picker.request({ initialRoot: normalized });
+  }
+
+  async requestCatalogScan(rootPath: string, onConfirmed?: () => void): Promise<void> {
+    if (this.disposed) return;
+    const normalized = this.validateCatalogScanRoot(rootPath);
+    const connection = this.dependencies.catalog.connection;
+    if (connection === undefined) throw new Error("catalog-unavailable");
+    const confirmed = await this.dependencies.catalogConfirmation.request(normalized);
+    if (this.disposed || !confirmed) return;
+    onConfirmed?.();
+    await connection.startScan(normalized);
+  }
+
+  cancelCatalogScan(): void {
+    if (this.disposed) return;
+    this.dependencies.catalog.connection?.cancelScan();
+  }
+
+  hybridCatalog(): HybridCatalogViewModel | undefined {
+    return this.dependencies.catalog.hybrid?.snapshot();
+  }
+
+  subscribeHybridCatalog(listener: () => void): () => void {
+    if (this.disposed) return () => undefined;
+    return this.dependencies.catalog.hybrid?.subscribe(listener) ?? (() => undefined);
+  }
+
+  async previewCatalogTxt(path: string): Promise<void> {
+    if (this.disposed) return;
+    const hybrid = this.dependencies.catalog.hybrid;
+    if (hybrid === undefined) throw new Error("catalog-unavailable");
+    await hybrid.previewTxt(path);
+  }
+
+  async requestCatalogTxtImport(path: string, onConfirmed?: () => void): Promise<void> {
+    if (this.disposed) return;
+    const hybrid = this.dependencies.catalog.hybrid;
+    const confirmation = this.dependencies.catalogTxtImportConfirmation;
+    const candidate = hybrid?.snapshot().candidate;
+    if (hybrid === undefined || confirmation === undefined || candidate === undefined) {
+      throw new Error("catalog-unavailable");
+    }
+    const confirmed = await confirmation.request(candidate);
+    if (this.disposed || !confirmed) return;
+    onConfirmed?.();
+    await hybrid.importTxt(path);
+    if (!this.disposed) await refreshCatalogProjection(this.dependencies.catalog);
+  }
+
+  async requestLargeCatalogVerification(
+    rootPath: string,
+    groupKeys: readonly string[],
+    onConfirmed?: () => void,
+  ): Promise<void> {
+    if (this.disposed) return;
+    const normalized = this.validateCatalogScanRoot(rootPath);
+    const hybrid = this.dependencies.catalog.hybrid;
+    const confirmation = this.dependencies.catalogLargeScanConfirmation;
+    const active = hybrid?.snapshot().active;
+    if (hybrid === undefined || confirmation === undefined || active === undefined) {
+      throw new Error("catalog-unavailable");
+    }
+    const groupsByKey = new Map(active.groups.map((group) => [group.groupKey, group]));
+    const groups = groupKeys.map((groupKey) => {
+      const group = groupsByKey.get(groupKey);
+      if (group === undefined) throw new Error("catalog-unavailable");
+      return { groupKey, label: group.label, pdfCount: group.pdfCount };
+    });
+    if (isSelectedCategoryRoot(normalized, groups)) {
+      throw new Error("invalid-large-catalog-root");
+    }
+    const confirmed = await confirmation.request({
+      kind: "start",
+      cloudRoot: normalized,
+      groups,
+    });
+    if (this.disposed || !confirmed) return;
+    onConfirmed?.();
+    await hybrid.startLargeVerification({ cloudRoot: normalized, groupKeys });
+    if (!this.disposed) await refreshCatalogProjection(this.dependencies.catalog);
+  }
+
+  async requestResumeLargeCatalogVerification(
+    rootPath: string,
+    onConfirmed?: () => void,
+  ): Promise<void> {
+    if (this.disposed) return;
+    const normalized = this.validateCatalogScanRoot(rootPath);
+    const hybrid = this.dependencies.catalog.hybrid;
+    const confirmation = this.dependencies.catalogLargeScanConfirmation;
+    if (
+      hybrid === undefined
+      || confirmation === undefined
+      || hybrid.snapshot().batch?.resumeAvailable !== true
+    ) throw new Error("catalog-unavailable");
+    const confirmed = await confirmation.request({
+      kind: "resume",
+      cloudRoot: normalized,
+      groups: [],
+    });
+    if (this.disposed || !confirmed) return;
+    onConfirmed?.();
+    await hybrid.resumeLargeVerification(normalized);
+    if (!this.disposed) await refreshCatalogProjection(this.dependencies.catalog);
+  }
+
+  cancelLargeCatalogVerification(): void {
+    if (this.disposed) return;
+    this.dependencies.catalog.hybrid?.cancelLargeVerification();
+  }
+
+  reportCatalogError(code: CatalogInitializationErrorCode): void {
+    if (this.disposed) return;
+    this.model = {
+      ...this.model,
+      catalog: {
+        ...this.model.catalog,
+        status: code === "snapshot-corrupt" ? "error" : "unavailable",
+        total: 0,
+        items: [],
+        messageCode: code,
+      },
+    };
+    this.emit();
   }
 
   previewSuggestion(suggestionId: string): Promise<void> {
@@ -582,6 +1052,15 @@ export class WorkbenchController {
     this.emit();
   }
 
+  async setLocale(locale: WorkbenchLocale): Promise<void> {
+    if (this.disposed || locale === this.model.locale) return;
+    const settings = this.dependencies.store.settings();
+    await this.dependencies.store.saveSettings({ ...settings, locale });
+    if (this.disposed) return;
+    this.model = { ...this.model, locale };
+    this.emit();
+  }
+
   async setWriteEnabled(value: boolean): Promise<void> {
     if (this.dependencies.policy.configuration === "read-only") {
       this.reportAcceptanceBlock("Read-only acceptance mode blocks write configuration");
@@ -711,7 +1190,111 @@ export class WorkbenchController {
     const quickCapture = this.dependencies.quickCapture as QuickCapturePort & { readonly dispose?: () => void };
     quickCapture.dispose?.();
     this.unsubscribeIndex();
+    this.unsubscribeCatalogConnection();
+    this.unsubscribeHybridCatalog();
+    this.unsubscribeCatalog();
+    this.dependencies.catalog.dispose();
     this.listeners.clear();
+  }
+
+  private refreshCatalogViewState(): void {
+    if (this.disposed) return;
+    const catalog = clone(this.dependencies.catalog.snapshot());
+    const catalogConnection = this.dependencies.catalog.connection === undefined
+      ? undefined
+      : clone(this.dependencies.catalog.connection.snapshot());
+    const incomingHybridCatalog = this.dependencies.catalog.hybrid === undefined
+      ? undefined
+      : clone(this.dependencies.catalog.hybrid.snapshot());
+    const verificationCapabilityAvailable = incomingHybridCatalog !== undefined
+      && incomingHybridCatalog.status !== "unavailable";
+    if (!verificationCapabilityAvailable) {
+      this.dismissedVerificationHybridMessageCode = null;
+    } else if (
+      this.dismissedVerificationHybridMessageCode !== null
+      && incomingHybridCatalog.messageCode !== this.dismissedVerificationHybridMessageCode
+    ) {
+      this.dismissedVerificationHybridMessageCode = null;
+    }
+    const hybridCatalog = incomingHybridCatalog !== undefined
+      && incomingHybridCatalog.messageCode === this.dismissedVerificationHybridMessageCode
+      ? hybridWithoutMessage(incomingHybridCatalog)
+      : incomingHybridCatalog;
+    if (
+      this.lockedVerificationRoot !== null
+      && hybridCatalog?.status !== "scanning"
+      && hybridCatalog?.batch?.resumeAvailable !== true
+    ) this.lockedVerificationRoot = null;
+    const availableGroupKeys = new Set(
+      hybridCatalog?.active?.groups.map((group) => group.groupKey) ?? [],
+    );
+    const selectedVerificationGroupKeys = this.model.selectedVerificationGroupKeys
+      .filter((groupKey) => availableGroupKeys.has(groupKey));
+    const {
+      catalogConnection: _catalogConnection,
+      hybridCatalog: _hybridCatalog,
+      verificationActionMessageCode,
+      ...current
+    } = this.model;
+    this.model = {
+      ...current,
+      catalog,
+      ...(catalogConnection === undefined ? {} : { catalogConnection }),
+      ...(hybridCatalog === undefined ? {} : { hybridCatalog }),
+      ...(verificationCapabilityAvailable && verificationActionMessageCode !== undefined
+        ? { verificationActionMessageCode }
+        : {}),
+      verificationRootLocked: this.lockedVerificationRoot !== null,
+      selectedVerificationGroupKeys,
+      selectedCatalogId: catalogPageContains(catalog, this.model.selectedCatalogId)
+        ? this.model.selectedCatalogId
+        : null,
+    };
+    this.emit();
+  }
+
+  private lockVerificationRoot(root: string): void {
+    if (this.disposed) return;
+    this.lockedVerificationRoot = root;
+    this.model = {
+      ...this.model,
+      verificationRoot: root,
+      verificationRootLocked: true,
+    };
+    this.emit();
+  }
+
+  private unlockVerificationRoot(): void {
+    if (this.disposed || this.lockedVerificationRoot === null) return;
+    this.lockedVerificationRoot = null;
+    this.model = { ...this.model, verificationRootLocked: false };
+    this.emit();
+  }
+
+  private setVerificationActionMessage(
+    code: NonNullable<WorkbenchViewModel["verificationActionMessageCode"]>,
+  ): void {
+    if (this.disposed || this.model.verificationActionMessageCode === code) return;
+    this.model = { ...this.model, verificationActionMessageCode: code };
+    this.emit();
+  }
+
+  private clearVerificationActionMessage(): void {
+    if (this.disposed || this.model.verificationActionMessageCode === undefined) return;
+    const { verificationActionMessageCode: _verificationActionMessageCode, ...current } = this.model;
+    this.model = current;
+    this.emit();
+  }
+
+  private captureVerificationValidation(error: unknown): void {
+    const code = verificationValidationCode(error);
+    if (code !== undefined) this.setVerificationActionMessage(code);
+  }
+
+  private clearVerificationHybridMessageSuppression(): void {
+    if (this.dismissedVerificationHybridMessageCode === null) return;
+    this.dismissedVerificationHybridMessageCode = null;
+    this.refreshCatalogViewState();
   }
 
   private async runInitialScan(

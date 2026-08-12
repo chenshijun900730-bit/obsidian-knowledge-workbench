@@ -68,6 +68,12 @@ describe("dedicated-vault acceptance evidence", () => {
     expect(config).toContain("configDefaults.exclude");
   });
 
+  it("runs fixed synthetic-vault test groups serially", () => {
+    const config = readFileSync(resolve(process.cwd(), "vitest.config.ts"), "utf8");
+    expect(config).toMatch(/name: "acceptance-workflows"[\s\S]*?groupOrder: 1/u);
+    expect(config).toMatch(/name: "acceptance-heavy"[\s\S]*?groupOrder: 2/u);
+  });
+
   it("accepts only the documented finite metrics and fixed status enums", () => {
     expect(decodeAcceptanceEvidence(valid())).toEqual(valid());
   });

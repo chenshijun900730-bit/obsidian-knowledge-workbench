@@ -4,16 +4,26 @@ import {
   NORMAL_RUNTIME_POLICY,
   type RuntimeSafetyPolicy,
 } from "../runtime/safety-policy";
+import {
+  createWorkbenchI18n,
+  type WorkbenchI18n,
+  type WorkbenchMessageKey,
+} from "../i18n/workbench-i18n";
 
 export type TodayFilter = "all" | "note" | "reference";
 
-const ACCEPTANCE_CAPTURE_LABEL = "Quick Capture creates Markdown and is unavailable in read-only acceptance mode";
+const TODAY_EXPLANATION_KEYS = {
+  pinned: "today.explanation.pinned",
+  unclassified: "today.explanation.unclassified",
+  "recently-opened": "today.explanation.recentlyOpened",
+  "recently-edited": "today.explanation.recentlyEdited",
+  "high-confidence-suggestion": "today.explanation.highConfidenceSuggestion",
+} as const satisfies Record<TodayItem["reason"], WorkbenchMessageKey>;
 
-const appendButton = (parent: HTMLElement, label: string, onClick: (() => void) | undefined, className?: string): HTMLButtonElement => {
+const appendButton = (parent: HTMLElement, label: string, onClick: (() => void) | undefined): HTMLButtonElement => {
   const button = parent.ownerDocument.createElement("button");
   button.type = "button";
   button.textContent = label;
-  if (className !== undefined) button.className = className;
   if (onClick !== undefined) button.addEventListener("click", onClick);
   parent.append(button);
   return button;
@@ -25,6 +35,7 @@ const renderItems = (
   items: readonly TodayItem[],
   filter: TodayFilter,
   actions: WorkbenchActions,
+  i18n: WorkbenchI18n,
 ): void => {
   const section = parent.ownerDocument.createElement("section");
   section.className = "knowledge-workbench__today-group";
@@ -35,7 +46,7 @@ const renderItems = (
   if (visible.length === 0) {
     const empty = parent.ownerDocument.createElement("p");
     empty.className = "knowledge-workbench__empty";
-    empty.textContent = "Nothing waiting here.";
+    empty.textContent = i18n.t("today.empty");
     section.append(empty);
   }
   for (const item of visible) {
@@ -47,15 +58,19 @@ const renderItems = (
     path.className = "knowledge-workbench__path";
     path.textContent = item.path;
     const explanation = parent.ownerDocument.createElement("p");
-    explanation.textContent = item.explanation;
+    explanation.textContent = i18n.t(TODAY_EXPLANATION_KEYS[item.reason]);
     const actionsRow = parent.ownerDocument.createElement("div");
     actionsRow.className = "knowledge-workbench__item-actions";
-    appendButton(actionsRow, item.actionLabel, () => {
+    appendButton(actionsRow, i18n.t(item.suggestionId === undefined
+      ? item.reason === "unclassified" || item.kind === "unclassified"
+        ? "today.action.review"
+        : "today.action.continue"
+      : "today.action.preview"), () => {
       if (item.suggestionId === undefined) actions.onOpenNote(item.path);
       else actions.onPreviewSuggestion(item.suggestionId);
     });
-    appendButton(actionsRow, "Pin", () => actions.onPin(item.id));
-    appendButton(actionsRow, "Dismiss", () => actions.onDismiss(item.id, item.activityAt));
+    appendButton(actionsRow, i18n.t("today.pin"), () => actions.onPin(item.id));
+    appendButton(actionsRow, i18n.t("today.dismiss"), () => actions.onDismiss(item.id, item.activityAt));
     article.append(itemTitle, path, explanation, actionsRow);
     section.append(article);
   }
@@ -68,43 +83,44 @@ export function renderTodayPane(
   filter: TodayFilter,
   actions: WorkbenchActions,
   policy: RuntimeSafetyPolicy = NORMAL_RUNTIME_POLICY,
+  i18n: WorkbenchI18n = createWorkbenchI18n("en"),
 ): void {
   const header = root.ownerDocument.createElement("header");
   header.className = "knowledge-workbench__pane-header";
   const heading = root.ownerDocument.createElement("h2");
-  heading.textContent = "Today";
+  heading.textContent = i18n.t("today.title");
   const captureAllowed = policy.quickCapture === "allowed";
   const capture = appendButton(
     header,
-    "Quick capture",
+    i18n.t("today.quickCapture"),
     captureAllowed ? actions.onQuickCapture : undefined,
-    "knowledge-workbench__primary-action",
   );
+  capture.className = "knowledge-workbench__primary-action";
   capture.dataset.action = "quick-capture";
   if (captureAllowed) {
-    capture.setAttribute("aria-label", "Quick capture a note");
+    capture.setAttribute("aria-label", i18n.t("today.quickCapture.aria"));
   } else {
     capture.disabled = true;
     capture.setAttribute(
       "aria-label",
-      ACCEPTANCE_CAPTURE_LABEL,
+      i18n.t("acceptance.control.unavailable", { label: i18n.t("today.quickCapture") }),
     );
-    capture.title = "Unavailable in read-only acceptance mode";
+    capture.title = i18n.t("acceptance.unavailable");
   }
   header.prepend(heading);
 
   const filters = root.ownerDocument.createElement("div");
   filters.className = "knowledge-workbench__filters";
-  filters.setAttribute("aria-label", "Filter today items");
-  for (const value of ["all", "note", "reference"] as const) {
-    const button = appendButton(filters, value === "all" ? "All" : value === "note" ? "Notes" : "References", () => {
+  filters.setAttribute("aria-label", i18n.t("today.filters.aria"));
+  for (const value of ["all", "note", "reference"] as const satisfies readonly TodayFilter[]) {
+    const button = appendButton(filters, i18n.t(`today.filter.${value}`), () => {
       actions.onSelectTodayFilter(value);
     });
     button.setAttribute("aria-pressed", String(filter === value));
   }
 
   root.append(header, filters);
-  renderItems(root, "New", model.newItems, filter, actions);
-  renderItems(root, "Continue", model.continueItems, filter, actions);
-  renderItems(root, "Next", model.nextItems, filter, actions);
+  renderItems(root, i18n.t("today.group.new"), model.newItems, filter, actions, i18n);
+  renderItems(root, i18n.t("today.group.continue"), model.continueItems, filter, actions, i18n);
+  renderItems(root, i18n.t("today.group.next"), model.nextItems, filter, actions, i18n);
 }

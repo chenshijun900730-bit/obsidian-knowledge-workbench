@@ -44,6 +44,7 @@ describe("runtime safety policy", () => {
     const settings = {
       writeEnabled: true,
       writePreviewAcknowledged: true,
+      locale: "zh-CN" as const,
       openAtStartup: true,
       folderRules: [{ prefix: "Notes", kind: "note" as const }],
       excludedPrefixes: ["Private"],

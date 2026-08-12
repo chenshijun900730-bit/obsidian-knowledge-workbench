@@ -29,8 +29,10 @@ import {
   assertCleanGitState,
   captureCleanGitState,
 } from "./git-worktree-state.mjs";
+import { buildFrozenNormalArtifact } from "./normal-real-artifact.mjs";
 
 const AUTHORIZED_ACTION = "INSTALL_READ_ONLY_ACCEPTANCE_IN_THIS_VAULT";
+const NORMAL_AUTHORIZED_ACTION = "INSTALL_NORMAL_BUILD_IN_THIS_VAULT";
 const PLUGIN_ID = "knowledge-workbench";
 const DESTINATION_LOCK = ".knowledge-workbench-read-only-install.lock";
 const TRANSACTION_DIRECTORY = ".knowledge-workbench-read-only-install.transaction";
@@ -153,12 +155,12 @@ async function assertAbsent(path, category, label) {
   }
 }
 
-function artifactView(snapshot) {
+function artifactView(snapshot, names = ACCEPTANCE_FILES) {
   const files = new Map();
-  for (const name of ACCEPTANCE_FILES) files.set(name, snapshot.files.get(name));
+  for (const name of names) files.set(name, snapshot.files.get(name));
   return Object.freeze({
     directory: Object.freeze({ path: snapshot.path, dev: snapshot.dev, ino: snapshot.ino }),
-    names: ACCEPTANCE_FILES,
+    names,
     files,
   });
 }
@@ -274,11 +276,11 @@ async function assertFrozenGitState(repoRoot, frozen) {
   }
 }
 
-function assertArtifactBytes(snapshot, source, label) {
-  validateAcceptanceArtifactSnapshot(artifactView(snapshot));
-  for (const name of ACCEPTANCE_FILES) {
+function assertArtifactBytes(snapshot, artifact, label) {
+  artifact.validateSnapshot(artifactView(snapshot, artifact.names));
+  for (const name of artifact.names) {
     const actual = snapshot.files.get(name);
-    const expected = source.files.get(name);
+    const expected = artifact.source.files.get(name);
     if (actual === undefined || expected === undefined || !actual.bytes.equals(expected.bytes)) {
       throw new Error(`${label} file bytes do not match the frozen source`);
     }
@@ -488,7 +490,7 @@ async function assertTargetState(state, category) {
   }
 }
 
-function validateOptions(options) {
+function validateOptions(options, authorizedAction) {
   if (
     typeof options !== "object"
     || options === null
@@ -503,7 +505,7 @@ function validateOptions(options) {
     || keys[2] !== "vaultPath"
   ) fail("invalid-invocation", "options must contain only action, repoRoot, and vaultPath");
   if (
-    options.action !== AUTHORIZED_ACTION
+    options.action !== authorizedAction
     || typeof options.repoRoot !== "string"
     || !isAbsolute(options.repoRoot)
     || typeof options.vaultPath !== "string"
@@ -801,7 +803,7 @@ async function publishTarget(input) {
   try {
     transaction.targetState = await captureTargetState(transaction.targetPath);
     transaction.stageNames = Object.freeze([
-      ...ACCEPTANCE_FILES,
+      ...input.artifact.names,
       ...(transaction.targetState.kind === "existing" && transaction.targetState.data !== null
         ? [DATA_FILE]
         : []),
@@ -831,8 +833,8 @@ async function publishTarget(input) {
       throw new Error("empty real-vault acceptance stage root identity changed");
     }
     transaction.stageTree = emptyStage;
-    for (const name of ACCEPTANCE_FILES) {
-      const sourceFile = input.frozen.source.files.get(name);
+    for (const name of input.artifact.names) {
+      const sourceFile = input.artifact.source.files.get(name);
       if (sourceFile === undefined) fail("artifact-changed", "frozen source lost an artifact file");
       const written = await writeExclusiveRegularFile(
         join(transaction.stagePath, name),
@@ -860,7 +862,7 @@ async function publishTarget(input) {
       transaction.stageNames,
       "Complete real-vault acceptance stage",
     );
-    assertArtifactBytes(stage, input.frozen.source, "Complete real-vault acceptance stage");
+    assertArtifactBytes(stage, input.artifact, "Complete real-vault plugin stage");
     if (
       transaction.targetState.kind === "existing"
       && transaction.targetState.data !== null
@@ -877,8 +879,7 @@ async function publishTarget(input) {
     );
     transaction.stageSnapshot = stage;
 
-    await assertFrozenArtifact(input.lease, input.frozen);
-    await assertFrozenGitState(input.repoRoot, input.git);
+    await input.artifact.assertCurrent();
     await assertCanonicalDirectory(input.obsidian, "vault-changed", "vault configuration");
     await assertCanonicalDirectory(input.plugins, "vault-changed", "community plugin directory");
     await assertCommunityPluginState(input.community);
@@ -919,7 +920,7 @@ async function publishTarget(input) {
       transaction.stageNames,
       "Published real-vault acceptance target",
     );
-    assertArtifactBytes(target, input.frozen.source, "Published real-vault acceptance target");
+    assertArtifactBytes(target, input.artifact, "Published real-vault plugin target");
     if (!sameExactSnapshot(stage, target)) {
       fail("target-changed", "published target was not the complete staged directory");
     }
@@ -928,8 +929,7 @@ async function publishTarget(input) {
       && transaction.targetState.data !== null
       && !target.files.get(DATA_FILE)?.bytes.equals(transaction.targetState.data.bytes)
     ) fail("target-changed", "published opaque plugin data changed");
-    await assertFrozenArtifact(input.lease, input.frozen);
-    await assertFrozenGitState(input.repoRoot, input.git);
+    await input.artifact.assertCurrent();
     await assertCommunityPluginState(input.community);
 
     transaction.stageTree = null;
@@ -970,10 +970,10 @@ async function publishTarget(input) {
     await assertCanonicalDirectory(input.plugins, "vault-changed", "community plugin directory");
 
     return Object.freeze({
-      artifactBinding: input.frozen.contract.artifactBinding,
-      artifactSetDigest: computeAcceptanceArtifactSetDigest(input.frozen.source),
+      artifactBinding: input.artifact.artifactBinding,
+      artifactSetDigest: input.artifact.artifactSetDigest,
       backupRetained: false,
-      pluginVersion: input.frozen.contract.pluginVersion,
+      pluginVersion: input.artifact.pluginVersion,
       priorTarget: transaction.targetState.kind === "absent" ? "absent" : "replaced",
     });
   } catch (error) {
@@ -994,8 +994,8 @@ async function publishTarget(input) {
   throw failure;
 }
 
-export async function installRealVaultAcceptance(options) {
-  const checked = validateOptions(options);
+async function installRealVault(options, mode) {
+  const checked = validateOptions(options, mode.authorizedAction);
   const vault = await requireCanonicalDirectory(checked.vaultPath, "authorized vault");
   const obsidian = await requireCanonicalDirectory(
     join(checked.vaultPath, ".obsidian"),
@@ -1010,41 +1010,41 @@ export async function installRealVaultAcceptance(options) {
   }
   const community = await readCommunityPluginState(checked.vaultPath);
   await assertObsidianStopped();
-  const git = await captureFrozenGitState(checked.repoRoot);
+  let modeState;
+  try {
+    modeState = await mode.preflight?.(checked.repoRoot);
+  } catch (error) {
+    if (trustedCategories.has(error)) throw error;
+    fail("artifact-invalid", "plugin artifact preflight failed", error);
+  }
   try {
     return await withBrandedArtifactLock(checked.repoRoot, async (lease) => {
-      let frozen;
+      let artifact;
       try {
-        await assertFrozenGitState(checked.repoRoot, git);
-        const built = await buildAcceptanceArtifactUnderLease({ lease });
-        frozen = await freezeBuiltArtifact(lease, built.target);
+        artifact = await mode.buildArtifact({ lease, modeState, repoRoot: checked.repoRoot });
       } catch (error) {
         if (trustedCategories.has(error)) throw error;
-        fail("artifact-invalid", "read-only acceptance artifact could not be built", error);
+        fail("artifact-invalid", "authorized plugin artifact could not be built", error);
       }
-      await assertFrozenArtifact(lease, frozen);
-      await assertFrozenGitState(checked.repoRoot, git);
+      await artifact.assertCurrent();
       await assertCanonicalDirectory(obsidian, "vault-changed", "vault configuration");
       await assertCanonicalDirectory(plugins, "vault-changed", "community plugin directory");
       await assertCommunityPluginState(community);
       await assertObsidianStopped();
-      await assertFrozenGitState(checked.repoRoot, git);
+      await artifact.assertCurrent();
 
       try {
         return await withBrandedDestinationLock(
           {
             parent: obsidian,
             name: DESTINATION_LOCK,
-            label: "Real-vault acceptance installation lock",
+            label: "Real-vault plugin installation lock",
           },
           async () => publishTarget({
+            artifact,
             community,
-            frozen,
-            git,
-            lease,
             obsidian,
             plugins,
-            repoRoot: checked.repoRoot,
           }),
         );
       } catch (error) {
@@ -1063,8 +1063,48 @@ export async function installRealVaultAcceptance(options) {
     if (artifactCleanupFailures.has(error) || destinationCleanupFailures.has(error)) {
       fail("cleanup-incomplete", "installer lock cleanup was incomplete", error);
     }
-    fail("artifact-invalid", "read-only acceptance artifact lease failed", error);
+    fail("artifact-invalid", "plugin artifact lease failed", error);
   }
+}
+
+const acceptanceMode = Object.freeze({
+  authorizedAction: AUTHORIZED_ACTION,
+  async preflight(repoRoot) {
+    return captureFrozenGitState(repoRoot);
+  },
+  async buildArtifact({ lease, modeState: git, repoRoot }) {
+    await assertFrozenGitState(repoRoot, git);
+    const built = await buildAcceptanceArtifactUnderLease({ lease });
+    const frozen = await freezeBuiltArtifact(lease, built.target);
+    const assertCurrent = async () => {
+      await assertFrozenArtifact(lease, frozen);
+      await assertFrozenGitState(repoRoot, git);
+    };
+    return Object.freeze({
+      artifactBinding: frozen.contract.artifactBinding,
+      artifactSetDigest: computeAcceptanceArtifactSetDigest(frozen.source),
+      assertCurrent,
+      names: ACCEPTANCE_FILES,
+      pluginVersion: frozen.contract.pluginVersion,
+      source: frozen.source,
+      validateSnapshot: validateAcceptanceArtifactSnapshot,
+    });
+  },
+});
+
+const normalMode = Object.freeze({
+  authorizedAction: NORMAL_AUTHORIZED_ACTION,
+  async buildArtifact({ repoRoot }) {
+    return buildFrozenNormalArtifact({ repoRoot });
+  },
+});
+
+export async function installRealVaultAcceptance(options) {
+  return installRealVault(options, acceptanceMode);
+}
+
+export async function installRealVaultNormal(options) {
+  return installRealVault(options, normalMode);
 }
 
 Object.defineProperty(installRealVaultAcceptance, "extractFailureCategory", {
@@ -1077,3 +1117,14 @@ Object.defineProperty(installRealVaultAcceptance, "extractFailureCategory", {
 });
 
 Object.freeze(installRealVaultAcceptance);
+
+Object.defineProperty(installRealVaultNormal, "extractFailureCategory", {
+  configurable: false,
+  enumerable: false,
+  value(error) {
+    return trustedCategories.get(error) ?? null;
+  },
+  writable: false,
+});
+
+Object.freeze(installRealVaultNormal);

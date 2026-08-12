@@ -15,6 +15,17 @@ import { createChangePreviewModalClass } from "./ui/change-preview-modal";
 import { createHistoryConfirmationModalClass } from "./ui/history-tab";
 import { createQuickCaptureModalClass } from "./ui/quick-capture-modal";
 import { createSettingsTabClass } from "./ui/settings-tab";
+import { createSettingsSectionsSurface } from "./ui/settings-sections";
+import {
+  createNormalCloudCatalogRuntime,
+  resolveCatalogRoot,
+} from "./runtime/normal-cloud-catalog-composition";
+import { createCatalogScanConfirmationModalClass } from "./ui/catalog-scan-confirmation-modal";
+import { presentCatalogProgress } from "./ui/catalog-progress-presenter";
+import { createCatalogTxtImportConfirmationModalClass } from "./ui/catalog-txt-import-confirmation-modal";
+import { createCatalogLargeScanConfirmationModalClass } from "./ui/catalog-large-scan-confirmation-modal";
+import { createCloudDirectoryPickerModalClass } from "./ui/cloud-directory-picker";
+import { createWorkbenchI18n } from "./i18n/workbench-i18n";
 
 if (
   __KNOWLEDGE_WORKBENCH_BUILD_MODE__ !== "normal"
@@ -30,37 +41,112 @@ const artifact: ArtifactExpectation = Object.freeze({
   manifestName: __KNOWLEDGE_WORKBENCH_MANIFEST_NAME__,
   artifactBinding: __KNOWLEDGE_WORKBENCH_ARTIFACT_BINDING__,
 });
-const ConcreteQuickCaptureModal = createQuickCaptureModalClass(Modal);
-const ConcreteChangePreviewModal = createChangePreviewModalClass(Modal, policy);
 const ConcreteSettingsTab = createSettingsTabClass(
   PluginSettingTab,
   SecretComponent,
   policy,
+  presentCatalogProgress,
 );
-const ConcreteHistoryConfirmationModal = createHistoryConfirmationModalClass(Modal);
-const ConcreteAiPayloadPreviewModal = createAiPayloadPreviewModalClass(Modal);
+const ConcreteCloudDirectoryPickerModal = createCloudDirectoryPickerModalClass(Modal);
+const openExternalPage = (url: string): void => {
+  window.open(url, "_blank", "noopener,noreferrer");
+};
 
 const runtime = Object.freeze({
   policy,
   artifact,
   selectVaultWrites: (vault) => vault,
-  createQuickCapture: (app) => new ObsidianQuickCaptureAdapter(
-    app,
-    () => new ConcreteQuickCaptureModal(app),
-  ),
-  createChangePreview: (app, plans) => ({
-    request: (preview) => new ConcreteChangePreviewModal(app, plans).request(preview),
-    requestSample: () => new ConcreteChangePreviewModal(app, plans).requestSample(),
+  createQuickCapture: (app, getLocale) => {
+    const ConcreteQuickCaptureModal = createQuickCaptureModalClass(Modal, getLocale);
+    return new ObsidianQuickCaptureAdapter(
+      app,
+      () => new ConcreteQuickCaptureModal(app),
+    );
+  },
+  createChangePreview: (app, plans, getLocale) => {
+    const ConcreteChangePreviewModal = createChangePreviewModalClass(Modal, policy, getLocale);
+    return {
+      request: (preview) => new ConcreteChangePreviewModal(app, plans).request(preview),
+      requestSample: () => new ConcreteChangePreviewModal(app, plans).requestSample(),
+    };
+  },
+  createHistoryConfirmation: (app, getLocale) => {
+    const ConcreteHistoryConfirmationModal = createHistoryConfirmationModalClass(Modal, getLocale);
+    return {
+      request: () => new ConcreteHistoryConfirmationModal(app).request(),
+    };
+  },
+  createSettingsTab: (app, plugin, controller, getLocale) => {
+    void getLocale;
+    return new ConcreteSettingsTab(
+      app,
+      plugin,
+      controller,
+    );
+  },
+  createWorkbenchSettingsSurface: (app, controller, getLocale) => {
+    void getLocale;
+    return createSettingsSectionsSurface({
+      app,
+      controller,
+      policy,
+      createSecretComponent: (hostApp, root) => new SecretComponent(hostApp, root),
+    }, presentCatalogProgress);
+  },
+  createCatalog: (app) => createNormalCloudCatalogRuntime({
+    catalogRoot: resolveCatalogRoot(),
+    host: {
+      secretStorage: app.secretStorage,
+      openAuthorizationPage: async (url) => { openExternalPage(url); },
+      request: async (request) => {
+        const response = await requestUrl({
+          method: request.method,
+          url: request.url,
+          throw: false,
+        });
+        return { status: response.status, text: response.text };
+      },
+      copyText: (value) => navigator.clipboard.writeText(value),
+      openBaidu: async () => { openExternalPage("https://pan.baidu.com/disk/main"); },
+    },
   }),
-  createHistoryConfirmation: (app) => ({
-    request: () => new ConcreteHistoryConfirmationModal(app).request(),
+  createCatalogConfirmation: (app, getLocale) => {
+    const ConcreteCatalogScanConfirmationModal = createCatalogScanConfirmationModalClass(
+      Modal,
+      getLocale,
+    );
+    return {
+      request: (rootPath) => new ConcreteCatalogScanConfirmationModal(app).request(rootPath),
+    };
+  },
+  createCatalogTxtImportConfirmation: (app, getLocale) => {
+    const ConcreteCatalogTxtImportConfirmationModal = createCatalogTxtImportConfirmationModalClass(
+      Modal,
+      getLocale,
+    );
+    return {
+      request: (summary) => new ConcreteCatalogTxtImportConfirmationModal(app).request(summary),
+    };
+  },
+  createCatalogLargeScanConfirmation: (app, getLocale) => {
+    const ConcreteCatalogLargeScanConfirmationModal = createCatalogLargeScanConfirmationModalClass(
+      Modal,
+      getLocale,
+    );
+    return {
+      request: (input) => new ConcreteCatalogLargeScanConfirmationModal(app).request(input),
+    };
+  },
+  createCatalogDirectoryPicker: (app, discovery, getLocale) => ({
+    request: (input) => new ConcreteCloudDirectoryPickerModal(
+      app,
+      discovery,
+      () => createWorkbenchI18n(getLocale()),
+    ).request(input),
   }),
-  createSettingsTab: (app, plugin, controller) => new ConcreteSettingsTab(
-    app,
-    plugin,
-    controller,
-  ),
-  createAi: (app) => ({
+  createAi: (app, getLocale) => {
+    const ConcreteAiPayloadPreviewModal = createAiPayloadPreviewModalClass(Modal, getLocale);
+    return {
     preview: {
       request: (preview) => new ConcreteAiPayloadPreviewModal(app).request(preview),
     },
@@ -81,7 +167,8 @@ const runtime = Object.freeze({
     delay: (milliseconds) => new Promise<void>((resolve) => {
       window.setTimeout(resolve, milliseconds);
     }),
-  }),
+    };
+  },
 } satisfies RuntimeComposition);
 
 export default createKnowledgeWorkbenchPluginClass(runtime);

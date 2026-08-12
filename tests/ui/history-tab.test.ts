@@ -11,7 +11,8 @@ import {
 } from "../../src/ui/history-tab";
 import { completedEntry, journalFixture, noOpHistoryActions, recoveryEntry } from "../helpers/journal-fixtures";
 import { controllerFixture } from "../helpers/ui-fixtures";
-import { READ_ONLY_ACCEPTANCE_POLICY } from "../../src/runtime/safety-policy";
+import { NORMAL_RUNTIME_POLICY, READ_ONLY_ACCEPTANCE_POLICY } from "../../src/runtime/safety-policy";
+import { createWorkbenchI18n } from "../../src/i18n/workbench-i18n";
 
 const createTestDiv = (): HTMLDivElement => document.createElementNS(
   "http://www.w3.org/1999/xhtml",
@@ -19,6 +20,53 @@ const createTestDiv = (): HTMLDivElement => document.createElementNS(
 ) as HTMLDivElement;
 
 describe("operation history", () => {
+  it.each([
+    ["zh-CN", "已完成", "撤销", "清空记录", "导出记录", "清空操作记录？"],
+    ["en", "Completed", "Undo", "Clear history", "Export history", "Clear operation history?"],
+  ] as const)("renders history and its confirmation in %s", async (
+    locale,
+    status,
+    undo,
+    clear,
+    exportLabel,
+    modalTitle,
+  ) => {
+    const root = createTestDiv();
+    renderHistory(
+      root,
+      { entries: [await completedEntry("private-history-id", 1)] },
+      noOpHistoryActions(),
+      NORMAL_RUNTIME_POLICY,
+      createWorkbenchI18n(locale),
+    );
+    expect(root.textContent).toContain(status);
+    expect(root.textContent).toContain(undo);
+    expect(root.textContent).toContain(clear);
+    expect(root.textContent).toContain(exportLabel);
+    expect(root.textContent).not.toContain("private-history-id");
+
+    class ModalSurface {
+      readonly contentEl = createTestDiv();
+      readonly titleEl = document.createElementNS("http://www.w3.org/1999/xhtml", "h2") as HTMLHeadingElement;
+      constructor(readonly app: App) {}
+      setTitle(value: string): this { this.titleEl.textContent = value; return this; }
+      open(): void { document.body.append(this.titleEl, this.contentEl); this.onOpen(); }
+      close(): void { this.onClose(); this.titleEl.remove(); this.contentEl.remove(); }
+      onOpen(): void {}
+      onClose(): void {}
+    }
+    const Concrete = createHistoryConfirmationModalClass(
+      ModalSurface as unknown as HistoryModalConstructor,
+      () => locale,
+    );
+    const modal = new Concrete({} as App);
+    const result = modal.request();
+    expect(modal.titleEl.textContent).toBe(modalTitle);
+    expect(document.activeElement).toBe(modal.contentEl.querySelector("button"));
+    modal.contentEl.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    await expect(result).resolves.toBe(false);
+  });
+
   it("shows only aggregate acceptance history and inert disabled actions", async () => {
     const completed = await completedEntry("completed-private-id", 1);
     const recovery = await recoveryEntry("recovery-private-id", 2);
@@ -307,7 +355,7 @@ describe("operation history", () => {
     renderHistory(root, fixture.controller.snapshot().history!, noOpHistoryActions());
     const report = root.querySelector('[aria-label="Recovery report"]');
     expect(report?.textContent).toContain("rename:a.md->x.md");
-    expect(report?.textContent).toContain("differs");
+    expect(report?.textContent).toContain("Differs");
     expect(report?.textContent).toContain("Original paths: a.md, x.md");
     expect(report?.textContent).toContain("Current paths: a.md");
   });

@@ -1,0 +1,1246 @@
+import type { App } from "obsidian";
+import type { FolderRule, FolderRuleProposal, PluginSettings } from "../storage/plugin-data";
+import type { AiSettingsInput } from "./workbench-controller";
+import type { RuntimeSafetyPolicy } from "../runtime/safety-policy";
+import type { CloudCatalogConnectionViewModel } from "../catalog/cloud-catalog-runtime";
+import type { HybridCatalogViewModel } from "../catalog/hybrid-catalog-runtime";
+import {
+  CATALOG_TXT_IMPORT_BUDGET,
+  LARGE_CATALOG_RUN_BUDGET,
+  type CatalogVerificationStatus,
+  type LargeCatalogStopReason,
+} from "../catalog/hybrid-catalog-types";
+import {
+  createWorkbenchI18n,
+  type WorkbenchI18n,
+  type WorkbenchLocale,
+  type WorkbenchMessageKey,
+} from "../i18n/workbench-i18n";
+import { presentCatalogMessage } from "./catalog-message-presenter";
+
+export interface SettingsController {
+  settings(): PluginSettings;
+  folderRuleProposals(): readonly FolderRuleProposal[];
+  previewSampleChange(): void;
+  setOpenAtStartup(value: boolean): Promise<void>;
+  setLocale(locale: WorkbenchLocale): Promise<void>;
+  setWriteEnabled(value: boolean): Promise<void>;
+  applyFolderRules(rules: readonly FolderRule[]): Promise<void>;
+  setExcludedPrefixes(prefixes: readonly string[]): Promise<void>;
+  saveAiSettings?(settings: AiSettingsInput): Promise<void>;
+  setSessionAiSecret?(secret: string): void;
+  catalogConnection?(): CloudCatalogConnectionViewModel | undefined;
+  subscribeCatalogConnection?(listener: () => void): () => void;
+  connectCatalog?(credentials: Readonly<{ appKey: string; secretKey: string }>): Promise<void>;
+  submitCatalogAuthorizationCode?(code: string): Promise<void>;
+  cancelCatalogAuthorization?(): void;
+  revokeCatalog?(): Promise<void>;
+  validateCatalogScanRoot?(rootPath: string): string;
+  chooseCatalogRoot?(initialRoot: string): Promise<string | null>;
+  requestCatalogScan?(rootPath: string, onConfirmed?: () => void): Promise<void>;
+  cancelCatalogScan?(): void;
+  hybridCatalog?(): HybridCatalogViewModel | undefined;
+  subscribeHybridCatalog?(listener: () => void): () => void;
+  previewCatalogTxt?(path: string): Promise<void>;
+  requestCatalogTxtImport?(path: string, onConfirmed?: () => void): Promise<void>;
+  requestLargeCatalogVerification?(
+    rootPath: string,
+    groupKeys: readonly string[],
+    onConfirmed?: () => void,
+  ): Promise<void>;
+  requestResumeLargeCatalogVerification?(
+    rootPath: string,
+    onConfirmed?: () => void,
+  ): Promise<void>;
+  cancelLargeCatalogVerification?(): void;
+}
+
+export interface SecretComponentLike {
+  setValue(value: string): this;
+  onChange(callback: (value: string) => void): this;
+}
+export type SecretComponentConstructor = new (app: App, containerEl: HTMLElement) => SecretComponentLike;
+export interface SettingsSectionsSurface {
+  render(root: HTMLElement, locale: WorkbenchLocale): void;
+  dispose(): void;
+}
+
+export interface SettingsSectionsDependencies {
+  readonly app: App;
+  readonly controller: SettingsController;
+  readonly policy: RuntimeSafetyPolicy;
+  readonly createSecretComponent?: (app: App, root: HTMLElement) => SecretComponentLike;
+}
+
+const SECRET_STORAGE_BRAND = "SecretStorage";
+
+export interface CatalogProgressPresentation {
+  readonly scanStatus: string;
+  readonly pdfProgress: string;
+  readonly directoryProgress: string;
+  readonly requestProgress: string;
+  readonly timeProgress: string;
+  readonly stopReason: string;
+}
+export type CatalogProgressPresenter = (
+  connection: CloudCatalogConnectionViewModel | undefined,
+  i18n: WorkbenchI18n,
+) => CatalogProgressPresentation;
+
+const CATALOG_AUTHORIZATION_INPUT_LIFETIME_MS = 10 * 60 * 1_000;
+
+type SettingsDisplayStatus =
+  | CloudCatalogConnectionViewModel["status"]
+  | HybridCatalogViewModel["status"]
+  | NonNullable<HybridCatalogViewModel["batch"]>["status"]
+  | CatalogVerificationStatus;
+
+const SETTINGS_STATUS_MESSAGE = {
+  unconfigured: "settings.status.unconfigured",
+  configured: "settings.status.configured",
+  authorizing: "settings.status.authorizing",
+  authorized: "settings.status.authorized",
+  scanning: "settings.status.scanning",
+  paused: "settings.status.paused",
+  partial: "settings.status.partial",
+  complete: "settings.status.complete",
+  empty: "settings.status.empty",
+  previewed: "settings.status.previewed",
+  importing: "settings.status.importing",
+  ready: "settings.status.ready",
+  error: "settings.status.error",
+  unavailable: "settings.status.unavailable",
+  unverified: "settings.status.unverified",
+  verified: "settings.status.verified",
+  difference: "settings.status.difference",
+} as const satisfies Record<SettingsDisplayStatus, WorkbenchMessageKey>;
+
+const SETTINGS_STOP_REASON_MESSAGE = {
+  complete: "settings.stop.complete",
+  "user-canceled": "settings.stop.userCanceled",
+  "pdf-limit": "settings.stop.pdfLimit",
+  "directory-limit": "settings.stop.directoryLimit",
+  "list-request-limit": "settings.stop.listRequestLimit",
+  "time-limit": "settings.stop.timeLimit",
+  "baidu-permission-denied": "settings.stop.baiduPermissionDenied",
+  "baidu-not-found": "settings.stop.baiduNotFound",
+  "baidu-rate-limited": "settings.stop.baiduRateLimited",
+  "baidu-token-expired": "settings.stop.baiduTokenExpired",
+  "baidu-access-unavailable": "settings.stop.baiduAccessUnavailable",
+  "invalid-baidu-response": "settings.stop.invalidBaiduResponse",
+  "hybrid-snapshot-corrupt": "settings.stop.hybridSnapshotCorrupt",
+  "hybrid-batch-invalid": "settings.stop.hybridBatchInvalid",
+  "hybrid-batch-unavailable": "settings.stop.hybridBatchUnavailable",
+} as const satisfies Record<LargeCatalogStopReason, WorkbenchMessageKey>;
+
+type SettingsSaveMessageKey = Extract<WorkbenchMessageKey, `settings.save.${string}`>;
+type SettingsErrorMessageKey = Extract<WorkbenchMessageKey, `settings.error.${string}`>;
+type SettingsUiEvent = "change" | "input" | "toggle";
+
+const heading = (doc: Document, level: 2 | 3, text: string): HTMLHeadingElement => {
+  const value = doc.createElement(`h${level}`);
+  value.textContent = text;
+  return value;
+};
+
+const actionButton = (
+  doc: Document,
+  label: string,
+  action: () => void,
+  signal: AbortSignal,
+): HTMLButtonElement => {
+  const button = doc.createElement("button");
+  button.type = "button";
+  button.textContent = label;
+  button.addEventListener("click", action, { signal });
+  return button;
+};
+
+type CollapsibleSettingsSection = Exclude<
+  "language" | "baidu" | "large-catalog" | "verification" | "privacy-ai",
+  "language"
+>;
+
+export function createSettingsSectionsSurface(
+  dependencies: SettingsSectionsDependencies,
+  presentCatalogProgress?: CatalogProgressPresenter,
+): SettingsSectionsSurface {
+  const { app, controller, policy, createSecretComponent } = dependencies;
+  return new (class StatefulSettingsSectionsSurface implements SettingsSectionsSurface {
+    secretComponent: SecretComponentLike | null = null;
+    private catalogAuthorizationExpiryTimer: number | null = null;
+    private unsubscribeCatalogConnection: (() => void) | null = null;
+    private unsubscribeHybridCatalog: (() => void) | null = null;
+    private readonly largeCatalogSelectedGroupKeys = new Set<string>();
+    private readonly expandedSections = new Set<CollapsibleSettingsSection>();
+    private largeCatalogVerificationRoot = "";
+    private catalogAppKeyDraft = "";
+    private catalogSecretKeyDraft = "";
+    private catalogAuthorizationCodeDraft = "";
+    private catalogScanRootDraft = "";
+    private catalogTxtPathDraft = "";
+    private sessionAiSecretDraft = "";
+    private liveStatus: HTMLElement | null = null;
+    private renderGeneration = 0;
+    private disposed = true;
+    private renderAbortController: AbortController | null = null;
+    private readonly sessionInputs = new Set<HTMLInputElement>();
+    render(root: HTMLElement, locale: WorkbenchLocale): void {
+      this.renderGeneration += 1;
+      const generation = this.renderGeneration;
+      this.disposed = false;
+      this.renderAbortController?.abort();
+      this.renderAbortController = new AbortController();
+      const renderSignal = this.renderAbortController.signal;
+      this.clearSessionInputValues();
+      this.clearCatalogAuthorizationExpiryTimer();
+      this.unsubscribeCatalogConnection?.();
+      this.unsubscribeCatalogConnection = null;
+      this.unsubscribeHybridCatalog?.();
+      this.unsubscribeHybridCatalog = null;
+      const doc = root.ownerDocument;
+      const settings = controller.settings();
+      const i18n = createWorkbenchI18n(locale);
+      const localizedStatus = (value: SettingsDisplayStatus | undefined): string => value === undefined
+        ? "—"
+        : i18n.t(SETTINGS_STATUS_MESSAGE[value]);
+      const localizedStopReason = (value: string | null | undefined): string => {
+        if (value === undefined || value === null) return "—";
+        const key = (SETTINGS_STOP_REASON_MESSAGE as Partial<
+          Record<string, WorkbenchMessageKey>
+        >)[value];
+        return i18n.t(key ?? "settings.status.unknown");
+      };
+      const isCurrent = (): boolean => !this.disposed && this.renderGeneration === generation;
+      const listen = (
+        target: EventTarget,
+        type: SettingsUiEvent,
+        listener: EventListenerOrEventListenerObject,
+      ): void => { target.addEventListener(type, listener, { signal: renderSignal }); };
+      const button = (label: string, action: () => void): HTMLButtonElement => actionButton(
+        doc,
+        label,
+        () => { if (isCurrent()) action(); },
+        renderSignal,
+      );
+      const trackSessionInput = (input: HTMLInputElement): void => {
+        this.sessionInputs.add(input);
+      };
+      this.secretComponent = null;
+      root.replaceChildren();
+      root.classList.add("knowledge-workbench", "knowledge-workbench__settings");
+      root.classList.toggle(
+        "knowledge-workbench__settings--read-only",
+        policy.configuration === "read-only",
+      );
+      root.append(heading(doc, 2, i18n.t("settings.title")));
+      const status = doc.createElement("div");
+      status.className = "knowledge-workbench__settings-status";
+      status.setAttribute("role", "status");
+      status.setAttribute("aria-live", "polite");
+      status.textContent = i18n.t("settings.surface.ready");
+      root.append(status);
+      this.liveStatus = status;
+
+      const languageSection = doc.createElement("section");
+      languageSection.dataset.settingsSection = "language";
+      languageSection.className = "knowledge-workbench__settings-card";
+      languageSection.append(heading(doc, 3, i18n.t("settings.section.language")));
+      const createCollapsibleSection = (
+        id: CollapsibleSettingsSection,
+        title: string,
+        summary: string,
+      ): Readonly<{ card: HTMLDetailsElement; content: HTMLElement }> => {
+        const card = doc.createElement("details");
+        card.dataset.settingsSection = id;
+        card.className = "knowledge-workbench__settings-card";
+        card.open = this.expandedSections.has(id);
+        listen(card, "toggle", () => {
+          if (card.open) this.expandedSections.add(id);
+          else this.expandedSections.delete(id);
+        });
+        const cardSummary = doc.createElement("summary");
+        const cardTitle = doc.createElement("strong");
+        cardTitle.textContent = title;
+        const cardDescription = doc.createElement("span");
+        cardDescription.textContent = summary;
+        cardSummary.append(cardTitle, cardDescription);
+        const content = doc.createElement("div");
+        content.className = "knowledge-workbench__settings-card-content";
+        card.append(cardSummary, content);
+        return { card, content };
+      };
+      const baiduSection = createCollapsibleSection(
+        "baidu",
+        i18n.t("settings.section.baidu"),
+        i18n.t("settings.section.baidu.summary"),
+      );
+      const largeCatalogSection = createCollapsibleSection(
+        "large-catalog",
+        i18n.t("settings.section.largeCatalog"),
+        i18n.t("settings.section.largeCatalog.summary"),
+      );
+      const verificationSection = createCollapsibleSection(
+        "verification",
+        i18n.t("settings.section.verification"),
+        i18n.t("settings.section.verification.summary"),
+      );
+      const privacyAiSection = createCollapsibleSection(
+        "privacy-ai",
+        i18n.t("settings.section.privacyAi"),
+        i18n.t("settings.section.privacyAi.summary"),
+      );
+      const renderLanguageSection = (): HTMLElement => languageSection;
+      const renderBaiduConnectionSection = (): HTMLDetailsElement => baiduSection.card;
+      const renderLargeCatalogSection = (): HTMLDetailsElement => largeCatalogSection.card;
+      const renderVerificationSection = (): HTMLDetailsElement => verificationSection.card;
+      const renderPrivacyAiSection = (): HTMLDetailsElement => privacyAiSection.card;
+      const renderAdvancedOrganizationSection = (): HTMLElement => privacyAiSection.content;
+      root.append(
+        renderLanguageSection(),
+        renderBaiduConnectionSection(),
+        renderLargeCatalogSection(),
+        renderVerificationSection(),
+        renderPrivacyAiSection(),
+      );
+      const run = async (
+        labelKey: SettingsSaveMessageKey,
+        operation: () => Promise<void>,
+        near: HTMLElement,
+        onError?: () => void,
+        safeErrorKey?: SettingsErrorMessageKey,
+      ): Promise<void> => {
+        if (!isCurrent()) return;
+        const label = i18n.t(labelKey);
+        near.insertAdjacentElement("afterend", status);
+        status.textContent = i18n.t("settings.save.progress", { label });
+        try {
+          await operation();
+          if (!isCurrent()) return;
+          status.textContent = i18n.t("settings.save.success", { label });
+        } catch {
+          if (!isCurrent()) return;
+          onError?.();
+          status.textContent = safeErrorKey === undefined
+            ? i18n.t("settings.save.failure")
+            : i18n.t(safeErrorKey);
+        }
+      };
+
+      const startup = doc.createElement("label");
+      startup.className = "knowledge-workbench__settings-row";
+      const startupInput = doc.createElement("input");
+      startupInput.type = "checkbox";
+      startupInput.checked = settings.openAtStartup;
+      listen(startupInput, "change", () => {
+        void run(
+          "settings.save.startup",
+          () => controller.setOpenAtStartup(startupInput.checked),
+          startup,
+          () => { startupInput.checked = controller.settings().openAtStartup; },
+        );
+      });
+      const startupText = doc.createElement("span");
+      startupText.textContent = i18n.t("settings.surface.startup");
+      startup.append(startupInput, startupText);
+      const localeLabel = doc.createElement("label");
+      localeLabel.className = "knowledge-workbench__settings-row";
+      const localeText = doc.createElement("span");
+      localeText.textContent = i18n.t("settings.save.language");
+      const localeSelect = doc.createElement("select");
+      localeSelect.dataset.locale = "true";
+      localeSelect.dataset.focusKey = "settings-locale";
+      for (const value of ["zh-CN", "en"] as const) {
+        const option = doc.createElement("option");
+        option.value = value;
+        option.textContent = i18n.t(value === "zh-CN" ? "language.chinese" : "language.english");
+        localeSelect.append(option);
+      }
+      localeSelect.value = settings.locale;
+      listen(localeSelect, "change", () => {
+        const previous = controller.settings().locale;
+        const next = localeSelect.value as WorkbenchLocale;
+        const restoreFocus = doc.activeElement === localeSelect;
+        localeLabel.insertAdjacentElement("afterend", status);
+        status.textContent = i18n.t("settings.save.progress", {
+          label: i18n.t("settings.save.language"),
+        });
+        void controller.setLocale(next).then(() => {
+          if (!isCurrent()) return;
+          this.render(root, next);
+          if (restoreFocus) {
+            root.querySelector<HTMLSelectElement>('select[data-focus-key="settings-locale"]')
+              ?.focus({ preventScroll: true });
+          }
+        }).catch(() => {
+          if (!isCurrent()) return;
+          localeSelect.value = previous;
+          status.textContent = i18n.t("settings.save.failure");
+        });
+      });
+      localeLabel.append(localeText, localeSelect);
+      languageSection.append(localeLabel, startup);
+
+      const safety = doc.createElement("section");
+      safety.append(heading(doc, 3, i18n.t("settings.surface.writeSafety")));
+      if (policy.configuration === "read-only") {
+        const locked = doc.createElement("p");
+        locked.className = "knowledge-workbench__locked";
+        locked.textContent = i18n.t("settings.surface.writeUnavailable");
+        safety.append(locked);
+      } else if (!settings.writePreviewAcknowledged) {
+        const locked = doc.createElement("p");
+        locked.className = "knowledge-workbench__locked";
+        locked.textContent = i18n.t("settings.surface.writeLocked");
+        const review = button(i18n.t("settings.surface.reviewSample"), () => controller.previewSampleChange());
+        safety.append(locked, review);
+      } else {
+        const writeLabel = doc.createElement("label");
+        writeLabel.className = "knowledge-workbench__settings-row";
+        const writeEnabled = doc.createElement("input");
+        writeEnabled.type = "checkbox";
+        writeEnabled.checked = settings.writeEnabled;
+        writeEnabled.dataset.writeEnabled = "true";
+        listen(writeEnabled, "change", () => {
+          void run(
+            "settings.save.write",
+            () => controller.setWriteEnabled(writeEnabled.checked),
+            safety,
+            () => { writeEnabled.checked = controller.settings().writeEnabled; },
+          );
+        });
+        const writeText = doc.createElement("span");
+        writeText.textContent = i18n.t("settings.surface.enableWrite");
+        writeLabel.append(writeEnabled, writeText);
+        safety.append(writeLabel);
+      }
+      renderAdvancedOrganizationSection().append(safety);
+
+      const organization = doc.createElement("section");
+      organization.append(heading(doc, 3, i18n.t("settings.surface.folderRules")));
+      const selected = new Map<string, FolderRule>();
+      const folderRuleChoices: HTMLInputElement[] = [];
+      const proposals = controller.folderRuleProposals();
+      if (proposals.length === 0) {
+        const empty = doc.createElement("p");
+        empty.textContent = i18n.t("settings.surface.noFolderRules");
+        organization.append(empty);
+      }
+      for (const proposal of proposals) {
+        const row = doc.createElement("label");
+        row.className = "knowledge-workbench__settings-row";
+        const checkbox = doc.createElement("input");
+        checkbox.type = "checkbox";
+        checkbox.checked = false;
+        checkbox.dataset.folderRule = proposal.prefix;
+        folderRuleChoices.push(checkbox);
+        listen(checkbox, "change", () => {
+          if (checkbox.checked) selected.set(proposal.prefix, { prefix: proposal.prefix, kind: proposal.kind });
+          else selected.delete(proposal.prefix);
+        });
+        const description = doc.createElement("span");
+        description.textContent = i18n.t("settings.surface.ruleDescription", {
+          prefix: proposal.prefix,
+          count: i18n.number(proposal.noteCount),
+          samples: proposal.samplePaths.join(", "),
+        });
+        row.append(checkbox, description);
+        organization.append(row);
+      }
+      organization.append(button(i18n.t("settings.surface.confirmRules"), () => {
+        if (selected.size === 0) return;
+        void run("settings.save.folderRules", async () => {
+          const merged = new Map(controller.settings().folderRules.map((rule) => [rule.prefix, rule]));
+          for (const [prefix, rule] of selected) merged.set(prefix, rule);
+          await controller.applyFolderRules([...merged.values()]);
+          if (!isCurrent()) return;
+          selected.clear();
+          for (const choice of folderRuleChoices) choice.checked = false;
+        }, organization);
+      }));
+      privacyAiSection.content.append(organization);
+
+      const exclusions = doc.createElement("section");
+      exclusions.append(heading(doc, 3, i18n.t("settings.surface.excludedFolders")));
+      const existing = new Set(settings.excludedPrefixes);
+      const proposalPrefixes = new Set(proposals.map((proposal) => proposal.prefix));
+      const exclusionRows: HTMLInputElement[] = [];
+      const appendExclusion = (prefix: string, descriptionText: string): void => {
+        const row = doc.createElement("label");
+        row.className = "knowledge-workbench__settings-row";
+        const checkbox = doc.createElement("input");
+        checkbox.type = "checkbox";
+        checkbox.checked = existing.has(prefix);
+        checkbox.dataset.excludedPrefix = prefix;
+        const description = doc.createElement("span");
+        description.textContent = descriptionText;
+        row.append(checkbox, description);
+        exclusionRows.push(checkbox);
+        exclusions.append(row);
+      };
+      for (const proposal of proposals) {
+        appendExclusion(
+          proposal.prefix,
+          i18n.t("settings.surface.ruleDescription", {
+            prefix: proposal.prefix,
+            count: i18n.number(proposal.noteCount),
+            samples: proposal.samplePaths.join(", "),
+          }),
+        );
+      }
+      for (const prefix of settings.excludedPrefixes.filter((value) => !proposalPrefixes.has(value)).sort()) {
+        appendExclusion(prefix, i18n.t("settings.surface.existingExclusion", { prefix }));
+      }
+      if (exclusionRows.length === 0) {
+        const empty = doc.createElement("p");
+        empty.textContent = i18n.t("settings.surface.noExclusions");
+        exclusions.append(empty);
+      }
+      exclusions.append(button(i18n.t("settings.surface.applyExclusions"), () => {
+        const prefixes = exclusionRows.filter((checkbox) => checkbox.checked)
+          .map((checkbox) => checkbox.dataset.excludedPrefix!);
+        void run("settings.save.exclusions", () => controller.setExcludedPrefixes(prefixes), exclusions, () => {
+          const persisted = new Set(controller.settings().excludedPrefixes);
+          for (const checkbox of exclusionRows) {
+            checkbox.checked = persisted.has(checkbox.dataset.excludedPrefix!);
+          }
+        });
+      }));
+      privacyAiSection.content.append(exclusions);
+
+      const catalog = doc.createElement("section");
+      catalog.className = "knowledge-workbench__catalog-settings";
+      catalog.append(heading(doc, 3, i18n.t("settings.surface.cloudCatalog")));
+      const connection = controller.catalogConnection?.();
+      if (policy.configuration === "read-only") {
+        const locked = doc.createElement("p");
+        locked.className = "knowledge-workbench__locked";
+        locked.textContent = i18n.t("settings.surface.readOnlyCatalogUnavailable");
+        catalog.append(locked);
+        const verificationLocked = locked.cloneNode(true) as HTMLParagraphElement;
+        verificationSection.content.append(verificationLocked);
+        const largeCatalogLocked = locked.cloneNode(true) as HTMLParagraphElement;
+        largeCatalogSection.content.append(largeCatalogLocked);
+      } else if (
+        connection === undefined
+        || controller.connectCatalog === undefined
+        || controller.submitCatalogAuthorizationCode === undefined
+        || controller.cancelCatalogAuthorization === undefined
+        || controller.revokeCatalog === undefined
+        || controller.validateCatalogScanRoot === undefined
+        || controller.requestCatalogScan === undefined
+      ) {
+        const locked = doc.createElement("p");
+        locked.className = "knowledge-workbench__locked";
+        locked.textContent = i18n.t("settings.surface.cloudUnavailable");
+        catalog.append(locked);
+      } else {
+        const connectCatalog = controller.connectCatalog.bind(controller);
+        const submitCatalogAuthorizationCode = controller.submitCatalogAuthorizationCode
+          .bind(controller);
+        const cancelCatalogAuthorization = controller.cancelCatalogAuthorization
+          .bind(controller);
+        const revokeCatalog = controller.revokeCatalog.bind(controller);
+        const validateCatalogScanRoot = controller.validateCatalogScanRoot.bind(controller);
+        const requestCatalogScan = controller.requestCatalogScan.bind(controller);
+        const connectionStatus = doc.createElement("p");
+        connectionStatus.dataset.catalogConnectionStatus = "true";
+        const connectionMessage = doc.createElement("p");
+        connectionMessage.dataset.catalogConnectionMessage = "true";
+        connectionMessage.setAttribute("aria-live", "polite");
+        const catalogProgress = doc.createElement("div");
+        catalogProgress.className = "knowledge-workbench__catalog-progress";
+        const scanStatus = doc.createElement("p");
+        scanStatus.dataset.catalogScanStatus = "true";
+        const pdfProgress = doc.createElement("p");
+        pdfProgress.dataset.catalogPdfProgress = "true";
+        const directoryProgress = doc.createElement("p");
+        directoryProgress.dataset.catalogDirectoryProgress = "true";
+        const requestProgress = doc.createElement("p");
+        requestProgress.dataset.catalogRequestProgress = "true";
+        const timeProgress = doc.createElement("p");
+        timeProgress.dataset.catalogTimeProgress = "true";
+        const stopReason = doc.createElement("p");
+        stopReason.dataset.catalogStopReason = "true";
+        catalogProgress.append(
+          scanStatus,
+          pdfProgress,
+          directoryProgress,
+          requestProgress,
+          timeProgress,
+          stopReason,
+        );
+        const credentialStorageNotice = doc.createElement("p");
+        credentialStorageNotice.textContent = i18n.t("settings.surface.credentialStorage", {
+          credentialStoreName: SECRET_STORAGE_BRAND,
+        });
+
+        const appKeyLabel = doc.createElement("label");
+        appKeyLabel.className = "knowledge-workbench__settings-row";
+        const appKeyText = doc.createElement("span");
+        appKeyText.textContent = i18n.t("settings.surface.applicationKey");
+        const appKey = doc.createElement("input");
+        appKey.type = "password";
+        appKey.autocomplete = "off";
+        appKey.dataset.catalogAppKey = "true";
+        trackSessionInput(appKey);
+        appKey.value = this.catalogAppKeyDraft;
+        listen(appKey, "input", () => { this.catalogAppKeyDraft = appKey.value; });
+        appKeyLabel.append(appKeyText, appKey);
+
+        const secretKeyLabel = doc.createElement("label");
+        secretKeyLabel.className = "knowledge-workbench__settings-row";
+        const secretKeyText = doc.createElement("span");
+        secretKeyText.textContent = i18n.t("settings.surface.secretKey");
+        const secretKey = doc.createElement("input");
+        secretKey.type = "password";
+        secretKey.autocomplete = "off";
+        secretKey.dataset.catalogSecretKey = "true";
+        trackSessionInput(secretKey);
+        secretKey.value = this.catalogSecretKeyDraft;
+        listen(secretKey, "input", () => { this.catalogSecretKeyDraft = secretKey.value; });
+        secretKeyLabel.append(secretKeyText, secretKey);
+
+        const connectionActions = doc.createElement("div");
+        connectionActions.className = "knowledge-workbench__settings-row";
+        const connect = button(i18n.t("settings.surface.connect"), () => {
+          const credentials = { appKey: appKey.value, secretKey: secretKey.value };
+          appKey.value = "";
+          secretKey.value = "";
+          this.catalogAppKeyDraft = "";
+          this.catalogSecretKeyDraft = "";
+          authorizationCode.value = "";
+          this.catalogAuthorizationCodeDraft = "";
+          this.clearCatalogAuthorizationExpiryTimer();
+          void run(
+            "settings.save.cloudConnection",
+            async () => {
+              await connectCatalog(credentials);
+              if (!isCurrent()) return;
+              scheduleAuthorizationExpiry(
+                controller.catalogConnection?.()?.authorizationExpiresAt,
+              );
+            },
+            connectionActions,
+            undefined,
+            "settings.error.cloudUnavailable",
+          );
+        });
+        connect.dataset.action = "catalog-connect";
+        const revoke = button(i18n.t("settings.surface.removeCredentials"), () => {
+          authorizationCode.value = "";
+          this.catalogAuthorizationCodeDraft = "";
+          this.clearCatalogAuthorizationExpiryTimer();
+          void run(
+            "settings.save.cloudAuthorization",
+            revokeCatalog,
+            connectionActions,
+            undefined,
+            "settings.error.cloudUnavailable",
+          );
+        });
+        revoke.dataset.action = "catalog-revoke";
+        connectionActions.append(connect, revoke);
+
+        const authorizationCodeLabel = doc.createElement("label");
+        authorizationCodeLabel.className = "knowledge-workbench__settings-row";
+        const authorizationCodeText = doc.createElement("span");
+        authorizationCodeText.textContent = i18n.t("settings.surface.authorizationCode");
+        const authorizationCode = doc.createElement("input");
+        authorizationCode.type = "password";
+        authorizationCode.autocomplete = "off";
+        authorizationCode.dataset.catalogAuthorizationCode = "true";
+        trackSessionInput(authorizationCode);
+        authorizationCode.value = this.catalogAuthorizationCodeDraft;
+        listen(authorizationCode, "input", () => {
+          this.catalogAuthorizationCodeDraft = authorizationCode.value;
+        });
+        authorizationCodeLabel.append(authorizationCodeText, authorizationCode);
+
+        const authorizationActions = doc.createElement("div");
+        authorizationActions.className = "knowledge-workbench__settings-row";
+        const scheduleAuthorizationExpiry = (expiresAt: number | undefined): void => {
+          if (!isCurrent()) return;
+          this.clearCatalogAuthorizationExpiryTimer();
+          const remaining = expiresAt === undefined
+            ? CATALOG_AUTHORIZATION_INPUT_LIFETIME_MS
+            : Math.max(0, expiresAt - Date.now());
+          this.catalogAuthorizationExpiryTimer = window.setTimeout(() => {
+            if (!isCurrent()) return;
+            this.catalogAuthorizationExpiryTimer = null;
+            authorizationCode.value = "";
+            this.catalogAuthorizationCodeDraft = "";
+            cancelCatalogAuthorization();
+            status.textContent = i18n.t("settings.surface.authorizationExpired");
+            authorizationActions.insertAdjacentElement("afterend", status);
+          }, remaining);
+        };
+        const submitAuthorization = button(i18n.t("settings.surface.submitAuthorization"), () => {
+          const code = authorizationCode.value;
+          authorizationCode.value = "";
+          this.catalogAuthorizationCodeDraft = "";
+          this.clearCatalogAuthorizationExpiryTimer();
+          void run(
+            "settings.save.cloudAuthorization",
+            () => submitCatalogAuthorizationCode(code),
+            authorizationActions,
+            undefined,
+            "settings.error.cloudUnavailable",
+          );
+        });
+        submitAuthorization.dataset.action = "catalog-submit-authorization-code";
+        const cancelAuthorization = button(i18n.t("settings.surface.cancelAuthorization"), () => {
+          authorizationCode.value = "";
+          this.catalogAuthorizationCodeDraft = "";
+          this.clearCatalogAuthorizationExpiryTimer();
+          cancelCatalogAuthorization();
+          status.textContent = i18n.t("settings.surface.authorizationCanceled");
+          authorizationActions.insertAdjacentElement("afterend", status);
+        });
+        cancelAuthorization.dataset.action = "catalog-cancel-authorization";
+        authorizationActions.append(submitAuthorization, cancelAuthorization);
+
+        const rootLabel = doc.createElement("label");
+        rootLabel.className = "knowledge-workbench__settings-row";
+        const rootText = doc.createElement("span");
+        rootText.textContent = i18n.t("settings.surface.scanRoot");
+        const root = doc.createElement("input");
+        root.type = "text";
+        root.autocomplete = "off";
+        root.placeholder = "/样本";
+        root.dataset.catalogScanRoot = "true";
+        trackSessionInput(root);
+        root.value = this.catalogScanRootDraft;
+        listen(root, "input", () => { this.catalogScanRootDraft = root.value; });
+        rootLabel.append(rootText, root);
+
+        const scanActions = doc.createElement("div");
+        scanActions.className = "knowledge-workbench__settings-row";
+        if (controller.chooseCatalogRoot !== undefined) {
+          const browse = button(i18n.t("verification.browse"), () => {
+            browse.disabled = true;
+            void controller.chooseCatalogRoot?.(root.value).then((value) => {
+              if (!isCurrent() || value === null || value === undefined) return;
+              root.value = value;
+              this.catalogScanRootDraft = value;
+            }).catch(() => {
+              if (isCurrent()) status.textContent = i18n.t("directoryPicker.error");
+            }).finally(() => {
+              if (isCurrent()) browse.disabled = false;
+            });
+          });
+          browse.dataset.action = "browse-catalog-scan-root";
+          scanActions.append(browse);
+        }
+        const validate = button(i18n.t("settings.surface.validatePath"), () => {
+          try {
+            root.value = validateCatalogScanRoot(root.value);
+            status.textContent = i18n.t("settings.surface.scanRootValid");
+          } catch {
+            status.textContent = i18n.t("settings.surface.scanRootInvalid");
+          }
+          scanActions.insertAdjacentElement("afterend", status);
+        });
+        validate.dataset.action = "catalog-validate-root";
+        const start = button(i18n.t("settings.surface.startScan"), () => {
+          void run(
+            "settings.save.cloudScan",
+            () => requestCatalogScan(root.value, () => {
+              if (!isCurrent()) return;
+              root.value = "";
+              this.catalogScanRootDraft = "";
+            }),
+            scanActions,
+            undefined,
+            "settings.error.cloudUnavailable",
+          );
+        });
+        start.dataset.action = "catalog-start-scan";
+        scanActions.append(validate, start);
+        let cancel: HTMLButtonElement | undefined;
+        if (controller.cancelCatalogScan !== undefined) {
+          cancel = button(i18n.t("settings.surface.cancelScan"), () => controller.cancelCatalogScan?.());
+          cancel.dataset.action = "catalog-cancel-scan";
+          scanActions.append(cancel);
+        }
+        const renderCatalogConnection = (): void => {
+          if (!isCurrent()) return;
+          const current = controller.catalogConnection?.();
+          const empty = i18n.t("progress.empty");
+          const progress = presentCatalogProgress?.(current, i18n) ?? {
+            scanStatus: i18n.t("progress.scan.status", { status: empty }),
+            pdfProgress: i18n.t("progress.scan.pdf", { current: empty, maximum: empty }),
+            directoryProgress: i18n.t("progress.scan.directory", { current: empty, maximum: empty }),
+            requestProgress: i18n.t("progress.scan.request", { current: empty, maximum: empty }),
+            timeProgress: i18n.t("progress.scan.elapsed", { current: empty, maximum: empty }),
+            stopReason: i18n.t("progress.scan.stopReason", { reason: empty }),
+          };
+          connectionStatus.textContent = i18n.t("settings.connection.status", {
+            status: localizedStatus(current?.status),
+          });
+          connectionMessage.hidden = current?.messageCode === undefined;
+          connectionMessage.textContent = current?.messageCode === undefined
+            ? ""
+            : presentCatalogMessage(current.messageCode, i18n).title;
+          scanStatus.textContent = progress.scanStatus;
+          pdfProgress.textContent = progress.pdfProgress;
+          directoryProgress.textContent = progress.directoryProgress;
+          requestProgress.textContent = progress.requestProgress;
+          timeProgress.textContent = progress.timeProgress;
+          stopReason.textContent = progress.stopReason;
+          if (cancel !== undefined) {
+            const scanning = current?.status === "scanning";
+            cancel.hidden = !scanning;
+            cancel.disabled = !scanning;
+          }
+        };
+        renderCatalogConnection();
+        this.unsubscribeCatalogConnection = controller.subscribeCatalogConnection?.(
+          renderCatalogConnection,
+        ) ?? null;
+        if (connection.status === "authorizing") {
+          scheduleAuthorizationExpiry(connection.authorizationExpiresAt);
+        }
+        catalog.append(
+          connectionStatus,
+          connectionMessage,
+          credentialStorageNotice,
+          appKeyLabel,
+          secretKeyLabel,
+          connectionActions,
+          authorizationCodeLabel,
+          authorizationActions,
+        );
+        verificationSection.content.append(
+          catalogProgress,
+          rootLabel,
+          scanActions,
+        );
+      }
+
+      const hybrid = controller.hybridCatalog?.();
+      if (
+        policy.configuration !== "read-only"
+        && hybrid !== undefined
+        && controller.subscribeHybridCatalog !== undefined
+        && controller.previewCatalogTxt !== undefined
+        && controller.requestCatalogTxtImport !== undefined
+        && controller.requestLargeCatalogVerification !== undefined
+        && controller.requestResumeLargeCatalogVerification !== undefined
+        && controller.cancelLargeCatalogVerification !== undefined
+      ) {
+        const previewCatalogTxt = controller.previewCatalogTxt.bind(controller);
+        const requestCatalogTxtImport = controller.requestCatalogTxtImport.bind(controller);
+        const requestLargeCatalogVerification = controller.requestLargeCatalogVerification
+          .bind(controller);
+        const requestResumeLargeCatalogVerification = controller
+          .requestResumeLargeCatalogVerification.bind(controller);
+        const cancelLargeCatalogVerification = controller.cancelLargeCatalogVerification
+          .bind(controller);
+        const hybridSection = doc.createElement("section");
+        hybridSection.className = "knowledge-workbench__hybrid-catalog-settings";
+        hybridSection.append(heading(doc, 3, i18n.t("settings.surface.largeCatalog")));
+        const explanation = doc.createElement("p");
+        explanation.textContent = i18n.t("settings.surface.largeCatalogExplanation");
+
+        const activeSummary = doc.createElement("p");
+        activeSummary.dataset.catalogHybridActiveSummary = "true";
+        const previewSummary = doc.createElement("p");
+        previewSummary.dataset.catalogHybridPreviewSummary = "true";
+        const batchSummary = doc.createElement("p");
+        batchSummary.dataset.catalogHybridBatchSummary = "true";
+        const batchRequests = doc.createElement("p");
+        batchRequests.dataset.catalogHybridBatchRequests = "true";
+        const batchGuidance = doc.createElement("p");
+        batchGuidance.dataset.catalogHybridBatchGuidance = "true";
+
+        const txtLabel = doc.createElement("label");
+        txtLabel.className = "knowledge-workbench__settings-row";
+        const txtText = doc.createElement("span");
+        txtText.textContent = i18n.t("settings.surface.localTxtSession");
+        const txtPath = doc.createElement("input");
+        txtPath.type = "text";
+        txtPath.autocomplete = "off";
+        txtPath.dataset.catalogTxtPath = "true";
+        trackSessionInput(txtPath);
+        txtPath.value = this.catalogTxtPathDraft;
+        listen(txtPath, "input", () => { this.catalogTxtPathDraft = txtPath.value; });
+        txtLabel.append(txtText, txtPath);
+        const txtActions = doc.createElement("div");
+        txtActions.className = "knowledge-workbench__settings-row";
+        const previewTxt = button(i18n.t("settings.surface.previewLocalCatalog"), () => {
+          const path = txtPath.value;
+          void run(
+            "settings.save.localPreview",
+            () => previewCatalogTxt(path),
+            txtActions,
+            undefined,
+            "settings.error.localCatalogUnavailable",
+          );
+        });
+        previewTxt.dataset.action = "catalog-preview-txt";
+        const importTxt = button(i18n.t("settings.surface.importPreviewedCatalog"), () => {
+          const path = txtPath.value;
+          void run(
+            "settings.save.localImport",
+            () => requestCatalogTxtImport(path, () => {
+              if (!isCurrent()) return;
+              txtPath.value = "";
+              this.catalogTxtPathDraft = "";
+            }),
+            txtActions,
+            undefined,
+            "settings.error.localCatalogUnavailable",
+          );
+        });
+        importTxt.dataset.action = "catalog-import-txt";
+        txtActions.append(previewTxt, importTxt);
+
+        const selectionTitle = doc.createElement("p");
+        selectionTitle.textContent = i18n.t("settings.surface.selectionLimit", {
+          maximum: i18n.number(LARGE_CATALOG_RUN_BUDGET.maxSelectedTopLevelGroups),
+        });
+        const groupChoices = doc.createElement("div");
+        groupChoices.className = "knowledge-workbench__catalog-group-choices";
+        const selectedGroupKeys = this.largeCatalogSelectedGroupKeys;
+
+        const rootLabel = doc.createElement("label");
+        rootLabel.className = "knowledge-workbench__settings-row";
+        const rootText = doc.createElement("span");
+        rootText.textContent = i18n.t("settings.surface.verificationRoot");
+        const root = doc.createElement("input");
+        root.type = "text";
+        root.autocomplete = "off";
+        root.placeholder = "/library";
+        root.dataset.catalogLargeScanRoot = "true";
+        trackSessionInput(root);
+        root.value = this.largeCatalogVerificationRoot;
+        listen(root, "input", () => {
+          this.largeCatalogVerificationRoot = root.value;
+        });
+        rootLabel.append(rootText, root);
+        const rootHint = doc.createElement("p");
+        rootHint.textContent = i18n.t("settings.surface.verificationRootHint");
+        const verificationActions = doc.createElement("div");
+        verificationActions.className = "knowledge-workbench__settings-row";
+        if (controller.chooseCatalogRoot !== undefined) {
+          const browse = button(i18n.t("verification.browse"), () => {
+            browse.disabled = true;
+            void controller.chooseCatalogRoot?.(root.value).then((value) => {
+              if (!isCurrent() || value === null || value === undefined) return;
+              root.value = value;
+              this.largeCatalogVerificationRoot = value;
+            }).catch(() => {
+              if (isCurrent()) status.textContent = i18n.t("directoryPicker.error");
+            }).finally(() => {
+              if (isCurrent()) browse.disabled = false;
+            });
+          });
+          browse.dataset.action = "browse-catalog-large-scan-root";
+          verificationActions.append(browse);
+        }
+        const startVerification = button(i18n.t("settings.surface.startVerification"), () => {
+          const rootPath = root.value;
+          const groupKeys = [...selectedGroupKeys];
+          const rootLeaf = rootPath.normalize("NFC").split("/").at(-1) ?? "";
+          const selectedGroupIsRoot = (controller.hybridCatalog?.()?.active?.groups ?? []).some((group) => (
+            group.groupKey !== "txt-root-items"
+            && selectedGroupKeys.has(group.groupKey)
+            && group.label.normalize("NFC") === rootLeaf
+          ));
+          if (selectedGroupIsRoot) {
+            verificationActions.insertAdjacentElement("afterend", status);
+            status.textContent = i18n.t("settings.surface.parentRootRequired");
+            return;
+          }
+          void run(
+            "settings.save.categoryVerification",
+            () => requestLargeCatalogVerification(
+              rootPath,
+              groupKeys,
+              () => {
+                if (!isCurrent()) return;
+                root.value = "";
+                this.largeCatalogVerificationRoot = "";
+              },
+            ),
+            verificationActions,
+            undefined,
+            "settings.error.verificationUnavailable",
+          );
+        });
+        startVerification.dataset.action = "catalog-start-large-verification";
+        const resumeVerification = button(i18n.t("settings.surface.resumeVerification"), () => {
+          const rootPath = root.value;
+          void run(
+            "settings.save.categoryResume",
+            () => requestResumeLargeCatalogVerification(rootPath, () => {
+              if (!isCurrent()) return;
+              root.value = "";
+              this.largeCatalogVerificationRoot = "";
+            }),
+            verificationActions,
+            undefined,
+            "settings.error.verificationUnavailable",
+          );
+        });
+        resumeVerification.dataset.action = "catalog-resume-large-verification";
+        const cancelVerification = button(i18n.t("settings.surface.cancelVerification"), () => {
+          cancelLargeCatalogVerification();
+        });
+        cancelVerification.dataset.action = "catalog-cancel-large-verification";
+        verificationActions.append(startVerification, resumeVerification, cancelVerification);
+
+        const renderHybrid = (): void => {
+          if (!isCurrent()) return;
+          const current = controller.hybridCatalog?.();
+          const busy = current?.status === "importing" || current?.status === "scanning";
+          activeSummary.textContent = current?.active === undefined
+            ? i18n.t("settings.surface.activeCatalogEmpty")
+            : i18n.t("settings.surface.activeCatalogSummary", {
+              pdf: i18n.number(current.active.pdfCount),
+              unverified: i18n.number(current.active.unverifiedCount),
+              verified: i18n.number(current.active.verifiedCount),
+              differences: i18n.number(current.active.differenceCount),
+              verifiedGroups: i18n.number(current.active.verifiedGroupCount),
+              groups: i18n.number(current.active.groupCount),
+            });
+          previewSummary.textContent = current?.candidate === undefined
+            ? i18n.t("settings.surface.previewEmpty")
+            : i18n.t("settings.surface.previewSummary", {
+              pdf: i18n.number(current.candidate.pdfCount),
+              maximum: i18n.number(CATALOG_TXT_IMPORT_BUDGET.maxPdfCount),
+              directories: i18n.number(current.candidate.directoryCount),
+              ignored: i18n.number(current.candidate.ignoredLeafCount),
+            });
+          batchSummary.textContent = i18n.t("settings.batch.status", {
+            status: localizedStatus(current?.batch?.status),
+            reason: localizedStopReason(current?.batch?.stopReason),
+          });
+          batchRequests.textContent = i18n.t("settings.surface.batchRequests", {
+            segment: i18n.number(current?.batch?.listRequestCount ?? 0),
+            cumulative: i18n.number(current?.batch?.cumulativeListRequestCount ?? 0),
+          });
+          batchGuidance.hidden = current?.batch?.stopReason !== "baidu-not-found";
+          batchGuidance.textContent = current?.batch?.stopReason === "baidu-not-found"
+            ? i18n.t("settings.surface.notFoundGuidance")
+            : "";
+          const availableKeys = new Set(current?.active?.groups.map((group) => group.groupKey) ?? []);
+          for (const key of [...selectedGroupKeys]) {
+            if (!availableKeys.has(key)) selectedGroupKeys.delete(key);
+          }
+          groupChoices.replaceChildren();
+          for (const group of current?.active?.groups ?? []) {
+            const row = doc.createElement("label");
+            row.className = "knowledge-workbench__settings-row";
+            const choice = doc.createElement("input");
+            choice.type = "checkbox";
+            choice.checked = selectedGroupKeys.has(group.groupKey);
+            choice.disabled = busy;
+            choice.dataset.catalogGroupKey = group.groupKey;
+            listen(choice, "change", () => {
+              if (choice.checked) {
+                if (selectedGroupKeys.size >= LARGE_CATALOG_RUN_BUDGET.maxSelectedTopLevelGroups) {
+                  choice.checked = false;
+                  status.textContent = i18n.t("settings.surface.selectionMaximum", {
+                    maximum: i18n.number(LARGE_CATALOG_RUN_BUDGET.maxSelectedTopLevelGroups),
+                  });
+                  groupChoices.insertAdjacentElement("afterend", status);
+                  return;
+                }
+                selectedGroupKeys.add(group.groupKey);
+              } else {
+                selectedGroupKeys.delete(group.groupKey);
+              }
+              startVerification.disabled = busy || selectedGroupKeys.size === 0;
+            });
+            const label = doc.createElement("span");
+            label.textContent = i18n.t("settings.group.verification", {
+              label: group.label,
+              count: group.pdfCount,
+              status: localizedStatus(group.verificationStatus),
+            });
+            row.append(choice, label);
+            groupChoices.append(row);
+          }
+          previewTxt.disabled = busy;
+          importTxt.disabled = busy || current?.candidate === undefined;
+          startVerification.disabled = busy || selectedGroupKeys.size === 0;
+          resumeVerification.hidden = current?.batch?.resumeAvailable !== true;
+          resumeVerification.disabled = busy || current?.batch?.resumeAvailable !== true;
+          cancelVerification.hidden = current?.status !== "scanning";
+          cancelVerification.disabled = current?.status !== "scanning";
+        };
+
+        hybridSection.append(
+          explanation,
+          activeSummary,
+          previewSummary,
+          batchSummary,
+          batchRequests,
+          batchGuidance,
+          txtLabel,
+          txtActions,
+          selectionTitle,
+          groupChoices,
+          rootLabel,
+          rootHint,
+          verificationActions,
+        );
+        largeCatalogSection.content.append(hybridSection);
+        renderHybrid();
+        this.unsubscribeHybridCatalog = controller.subscribeHybridCatalog(renderHybrid);
+      }
+      baiduSection.content.append(catalog);
+
+      if (policy.ai === "blocked") {
+        const ai = doc.createElement("section");
+        ai.className = "knowledge-workbench__ai-settings";
+        ai.append(heading(doc, 3, i18n.t("settings.surface.privateAi")));
+        const locked = doc.createElement("p");
+        locked.className = "knowledge-workbench__locked";
+        locked.textContent = i18n.t("settings.surface.aiUnavailable");
+        ai.append(locked);
+        privacyAiSection.content.append(ai);
+      } else if (controller.saveAiSettings !== undefined && controller.setSessionAiSecret !== undefined) {
+        const ai = doc.createElement("section");
+        ai.className = "knowledge-workbench__ai-settings";
+        ai.append(heading(doc, 3, i18n.t("settings.surface.privateAi")));
+        const description = doc.createElement("p");
+        description.textContent = i18n.t("settings.surface.aiDescription");
+        ai.append(description);
+
+        let secretId = settings.secretId;
+        const enabledLabel = doc.createElement("label");
+        enabledLabel.className = "knowledge-workbench__settings-row";
+        const enabled = doc.createElement("input");
+        enabled.type = "checkbox";
+        enabled.checked = settings.aiEnabled;
+        enabled.dataset.aiEnabled = "true";
+        const enabledText = doc.createElement("span");
+        enabledText.textContent = i18n.t("settings.surface.enableAi");
+        enabledLabel.append(enabled, enabledText);
+
+        const endpointLabel = doc.createElement("label");
+        endpointLabel.textContent = i18n.t("settings.surface.aiEndpoint");
+        const endpoint = doc.createElement("input");
+        endpoint.type = "url";
+        endpoint.value = settings.aiEndpoint;
+        endpoint.dataset.aiEndpoint = "true";
+        endpointLabel.append(endpoint);
+
+        const modelLabel = doc.createElement("label");
+        modelLabel.textContent = i18n.t("settings.surface.aiModel");
+        const model = doc.createElement("input");
+        model.type = "text";
+        model.value = settings.aiModel;
+        model.dataset.aiModel = "true";
+        modelLabel.append(model);
+
+        const save = (): Promise<void> => controller.saveAiSettings!({
+          enabled: enabled.checked,
+          endpoint: endpoint.value,
+          model: model.value,
+          secretId,
+        });
+        const rollbackAiControls = (): void => {
+          const current = controller.settings();
+          enabled.checked = current.aiEnabled;
+          endpoint.value = current.aiEndpoint;
+          model.value = current.aiModel;
+          secretId = current.secretId;
+          this.secretComponent?.setValue(current.secretId);
+        };
+        const saveAi = (near: HTMLElement, onError?: () => void): void => {
+          void run("settings.save.ai", save, near, () => {
+            rollbackAiControls();
+            onError?.();
+          }, "settings.error.aiUnavailable");
+        };
+        listen(enabled, "change", () => saveAi(enabledLabel));
+        listen(endpoint, "change", () => saveAi(endpointLabel));
+        listen(model, "change", () => saveAi(modelLabel));
+        ai.append(enabledLabel, endpointLabel, modelLabel);
+
+        if (createSecretComponent !== undefined) {
+          const persistent = doc.createElement("label");
+          persistent.className = "knowledge-workbench__settings-row";
+          const persistentLabel = doc.createElement("span");
+          persistentLabel.textContent = i18n.t("settings.surface.persistentCredentialId", {
+            credentialStoreName: SECRET_STORAGE_BRAND,
+          });
+          const host = doc.createElement("div");
+          persistent.append(persistentLabel, host);
+          this.secretComponent = createSecretComponent(app, host)
+            .setValue(secretId)
+            .onChange((value) => {
+              if (!isCurrent()) return;
+              const previous = secretId;
+              secretId = value;
+              saveAi(persistent, () => {
+                secretId = previous;
+                this.secretComponent?.setValue(previous);
+              });
+            });
+          ai.append(persistent);
+        }
+
+        const sessionLabel = doc.createElement("label");
+        sessionLabel.textContent = i18n.t("settings.surface.sessionSecret");
+        const session = doc.createElement("input");
+        session.type = "password";
+        session.autocomplete = "off";
+        session.dataset.sessionAiSecret = "true";
+        trackSessionInput(session);
+        session.value = this.sessionAiSecretDraft;
+        listen(session, "input", () => { this.sessionAiSecretDraft = session.value; });
+        sessionLabel.append(session);
+        const useSession = button(i18n.t("settings.surface.useSessionSecret"), () => {
+          const value = session.value;
+          session.value = "";
+          this.sessionAiSecretDraft = "";
+          if (value.length === 0 || secretId.length > 0) return;
+          controller.setSessionAiSecret!(value);
+          status.textContent = i18n.t("settings.surface.sessionSecretAccepted");
+        });
+        useSession.dataset.action = "use-session-secret";
+        ai.append(sessionLabel, useSession);
+        privacyAiSection.content.append(ai);
+      }
+    }
+
+    dispose(): void {
+      this.disposed = true;
+      this.renderGeneration += 1;
+      this.renderAbortController?.abort();
+      this.renderAbortController = null;
+      this.clearSessionInputValues();
+      this.clearCatalogAuthorizationExpiryTimer();
+      this.unsubscribeCatalogConnection?.();
+      this.unsubscribeCatalogConnection = null;
+      this.unsubscribeHybridCatalog?.();
+      this.unsubscribeHybridCatalog = null;
+      this.catalogAppKeyDraft = "";
+      this.catalogSecretKeyDraft = "";
+      this.catalogAuthorizationCodeDraft = "";
+      this.catalogScanRootDraft = "";
+      this.catalogTxtPathDraft = "";
+      this.sessionAiSecretDraft = "";
+      this.largeCatalogVerificationRoot = "";
+      this.largeCatalogSelectedGroupKeys.clear();
+      this.secretComponent = null;
+      this.liveStatus = null;
+    }
+
+    private clearCatalogAuthorizationExpiryTimer(): void {
+      if (this.catalogAuthorizationExpiryTimer === null) return;
+      window.clearTimeout(this.catalogAuthorizationExpiryTimer);
+      this.catalogAuthorizationExpiryTimer = null;
+    }
+
+    private clearSessionInputValues(): void {
+      for (const input of this.sessionInputs) input.value = "";
+      this.sessionInputs.clear();
+    }
+  })();
+}

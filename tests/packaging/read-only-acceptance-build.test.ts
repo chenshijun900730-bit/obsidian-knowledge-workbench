@@ -151,6 +151,27 @@ describe("read-only acceptance artifact builder", () => {
     )).toEqual(normalEvidenceBefore);
   });
 
+  it("excludes normal-only TXT, hybrid storage, credentials, and verification capabilities", async () => {
+    const repoRoot = await fixture();
+    await builder.buildAcceptanceArtifact({ repoRoot });
+    const bundle = await readFile(join(targetOf(repoRoot), "main.js"), "utf8");
+
+    for (const forbidden of [
+      "node:fs",
+      "Local inventory TXT (session only)",
+      "catalog-preview-txt",
+      "catalog-import-txt",
+      "catalog-start-large-scan",
+      "catalog-resume-large-scan",
+      "candidate-active.json",
+      "LocalHybridCatalogAdapter",
+      "BaiduCatalogSourceAdapter",
+      "SecretStorage",
+    ]) {
+      expect(bundle, forbidden).not.toContain(forbidden);
+    }
+  });
+
   it("writes exact newline-terminated metadata and changes only the manifest display name", async () => {
     const repoRoot = await fixture();
     const normalManifest = JSON.parse(await readFile(join(repoRoot, "manifest.json"), "utf8")) as Record<string, unknown>;

@@ -3,10 +3,17 @@ import {
   evaluatePlanSelection,
   type ChangePlanService,
   type ConfirmedPlan,
+  type PlanConflictCode,
   type PlanPreview,
 } from "../plans/change-plan-service";
 import type { FieldState, PlannedOperation } from "../core/types";
 import type { RuntimeSafetyPolicy } from "../runtime/safety-policy";
+import {
+  createWorkbenchI18n,
+  type WorkbenchI18n,
+  type WorkbenchLocaleProvider,
+  type WorkbenchMessageKey,
+} from "../i18n/workbench-i18n";
 
 export interface ChangePreviewPresenter {
   request(preview: PlanPreview): Promise<ConfirmedPlan | null>;
@@ -15,25 +22,65 @@ export interface ChangePreviewPresenter {
 
 export type ModalConstructor = abstract new (app: App) => Modal;
 
-const fieldText = (value: FieldState): string => value.present ? JSON.stringify(value.value) : "not set";
-const operationText = (operation: PlannedOperation): Readonly<{ before: string; after: string }> => {
+const fieldText = (value: FieldState, i18n: WorkbenchI18n): string => value.present
+  ? JSON.stringify(value.value)
+  : i18n.t("changePreview.value.notSet");
+const operationText = (
+  operation: PlannedOperation,
+  i18n: WorkbenchI18n,
+): Readonly<{ before: string; after: string }> => {
   if ("sourcePath" in operation) return { before: operation.sourcePath, after: operation.targetPath };
   if ("field" in operation) return {
-    before: `${operation.field}: ${fieldText(operation.before)}`,
-    after: `${operation.field}: ${fieldText(operation.after)}`,
+    before: `${operation.field}: ${fieldText(operation.before, i18n)}`,
+    after: `${operation.field}: ${fieldText(operation.after, i18n)}`,
   };
   return {
-    before: `knowledge-workbench-related: ${fieldText(operation.before)}`,
-    after: `knowledge-workbench-related: ${fieldText(operation.after)}`,
+    before: `knowledge-workbench-related: ${fieldText(operation.before, i18n)}`,
+    after: `knowledge-workbench-related: ${fieldText(operation.after, i18n)}`,
   };
 };
 
-const conflictText = (code: string): string => code.replaceAll("-", " ");
+const CONFLICT_KEYS = {
+  "target-exists": "changePreview.conflict.targetExists",
+  "case-collision": "changePreview.conflict.caseCollision",
+  "duplicate-target": "changePreview.conflict.duplicateTarget",
+  "overlapping-operation": "changePreview.conflict.overlappingOperation",
+  "related-target-missing": "changePreview.conflict.relatedTargetMissing",
+  "frontmatter-unreadable": "changePreview.conflict.frontmatterUnreadable",
+  "owned-field-drift": "changePreview.conflict.ownedFieldDrift",
+  "invalid-path": "changePreview.conflict.invalidPath",
+  "source-missing": "changePreview.conflict.sourceMissing",
+  "inbound-links": "changePreview.conflict.inboundLinks",
+  "metadata-not-ready": "changePreview.conflict.metadataNotReady",
+  "write-locked": "changePreview.conflict.writeLocked",
+  "too-many-operations": "changePreview.conflict.tooManyOperations",
+  "precondition-drift": "changePreview.conflict.preconditionDrift",
+  "post-state-drift": "changePreview.conflict.postStateDrift",
+} as const satisfies Record<PlanConflictCode, WorkbenchMessageKey>;
+
+const RATIONALE_KEYS = {
+  move: "changePreview.rationale.move",
+  rename: "changePreview.rationale.rename",
+  "set-owned-field": "changePreview.rationale.setOwnedField",
+  "add-related-link": "changePreview.rationale.addRelatedLink",
+} as const satisfies Record<PlannedOperation["kind"], WorkbenchMessageKey>;
+
+const BUILT_IN_RATIONALE_KEYS = {
+  "Review move": "changePreview.rationale.move",
+  "Review rename": "changePreview.rationale.rename",
+  "Review set owned field": "changePreview.rationale.setOwnedField",
+  "Review add related link": "changePreview.rationale.addRelatedLink",
+  "Confirm the folder-derived note kind": "changePreview.rationale.confirmKind",
+  "Move the note to its confirmed kind root": "changePreview.rationale.confirmMove",
+  "Replace a generic filename with its visible title": "changePreview.rationale.confirmRename",
+  "Confirm the strongest local relation": "changePreview.rationale.confirmRelation",
+} as const satisfies Record<string, WorkbenchMessageKey>;
 
 /** Injecting Modal keeps this surface pure DOM and independent of vault write adapters. */
 export function createChangePreviewModalClass(
   ModalBase: ModalConstructor,
   policy: RuntimeSafetyPolicy,
+  getLocale: WorkbenchLocaleProvider = () => "en",
 ) {
   return class ChangePreviewModal extends ModalBase implements ChangePreviewPresenter {
     private mode: "plan" | "sample" | null = null;
@@ -99,8 +146,11 @@ export function createChangePreviewModalClass(
     }
 
     private renderPlan(preview: PlanPreview): void {
+      const i18n = createWorkbenchI18n(getLocale());
       const confirmationBlocked = policy.planConfirmation === "blocked";
-      this.setTitle(confirmationBlocked ? "Change plan preview (read-only)" : "Preview organization changes");
+      this.setTitle(i18n.t(confirmationBlocked
+        ? "changePreview.title.readOnly"
+        : "changePreview.title.plan"));
       const doc = this.contentEl.ownerDocument;
       const form = doc.createElement("form");
       form.className = "knowledge-workbench__change-preview";
@@ -112,12 +162,12 @@ export function createChangePreviewModalClass(
         });
       }
       const intro = doc.createElement("p");
-      intro.textContent = confirmationBlocked
-        ? "Preview only. This build cannot confirm or execute changes."
-        : "Select the local changes to confirm. Nothing is executed from this preview.";
+      intro.textContent = i18n.t(confirmationBlocked
+        ? "changePreview.intro.readOnly"
+        : "changePreview.intro.plan");
       const operations = doc.createElement("div");
       operations.setAttribute("role", "group");
-      operations.setAttribute("aria-label", "Proposed changes");
+      operations.setAttribute("aria-label", i18n.t("changePreview.operations.aria"));
       for (const operation of preview.plan.operations) {
         const row = doc.createElement("label");
         row.className = "knowledge-workbench__change-row";
@@ -127,13 +177,19 @@ export function createChangePreviewModalClass(
         checkbox.value = operation.id;
         checkbox.checked = this.selected.has(operation.id);
         const detail = doc.createElement("span");
-        const values = operationText(operation);
+        const values = operationText(operation, i18n);
         const rationale = preview.plan.rationales[operation.id];
-        detail.textContent = `${values.before} → ${values.after}. ${rationale?.summary ?? "Review change"}`;
+        const builtInKey = rationale?.source !== "local"
+          ? undefined
+          : BUILT_IN_RATIONALE_KEYS[rationale.summary as keyof typeof BUILT_IN_RATIONALE_KEYS];
+        const summary = rationale === undefined
+          ? i18n.t(RATIONALE_KEYS[operation.kind] ?? "changePreview.reviewChange")
+          : builtInKey === undefined ? rationale.summary : i18n.t(builtInKey);
+        detail.textContent = `${values.before} → ${values.after}. ${summary}`;
         checkbox.addEventListener("change", () => {
           if (checkbox.checked) this.selected.add(operation.id);
           else this.selected.delete(operation.id);
-          this.updatePlanStatus(preview, status, conflicts, confirm);
+          this.updatePlanStatus(preview, status, conflicts, confirm, i18n);
         });
         row.append(checkbox, detail);
         operations.append(row);
@@ -142,7 +198,7 @@ export function createChangePreviewModalClass(
       status.dataset.affectedCount = "true";
       const conflicts = doc.createElement("ul");
       conflicts.className = "knowledge-workbench__change-conflicts";
-      conflicts.setAttribute("aria-label", "Plan conflicts");
+      conflicts.setAttribute("aria-label", i18n.t("changePreview.conflicts.aria"));
       const error = doc.createElement("p");
       error.setAttribute("role", "alert");
       error.setAttribute("aria-live", "assertive");
@@ -150,24 +206,26 @@ export function createChangePreviewModalClass(
       actions.className = "knowledge-workbench__item-actions";
       const cancel = doc.createElement("button");
       cancel.type = "button";
-      cancel.textContent = "Cancel";
+      cancel.textContent = i18n.t("changePreview.cancel");
       cancel.addEventListener("click", () => this.cancel());
       const confirm = doc.createElement("button");
       confirm.type = confirmationBlocked ? "button" : "submit";
       confirm.dataset.action = "confirm";
-      confirm.textContent = confirmationBlocked ? "Confirmation unavailable" : "Confirm selected changes";
+      confirm.textContent = i18n.t(confirmationBlocked
+        ? "changePreview.confirm.unavailable"
+        : "changePreview.confirm");
       if (confirmationBlocked) {
         confirm.disabled = true;
         confirm.setAttribute(
           "aria-label",
-          "Confirmation unavailable in read-only acceptance mode",
+          i18n.t("changePreview.confirm.unavailableAria"),
         );
-        confirm.title = "Unavailable in read-only acceptance mode";
+        confirm.title = i18n.t("acceptance.unavailable");
       }
       actions.append(cancel, confirm);
       form.append(intro, operations, status, conflicts, error, actions);
       this.contentEl.append(form);
-      this.updatePlanStatus(preview, status, conflicts, confirm);
+      this.updatePlanStatus(preview, status, conflicts, confirm, i18n);
       operations.querySelector<HTMLInputElement>('input[type="checkbox"]')?.focus();
     }
 
@@ -176,13 +234,17 @@ export function createChangePreviewModalClass(
       status: HTMLElement,
       conflicts: HTMLElement,
       confirm: HTMLButtonElement,
+      i18n: WorkbenchI18n,
     ): void {
       const evaluation = evaluatePlanSelection(preview, [...this.selected]);
-      status.textContent = `${evaluation.affectedFiles.length} affected files; ${evaluation.undoableOperationIds.length} undoable changes`;
+      status.textContent = i18n.t("changePreview.status", {
+        affected: i18n.number(evaluation.affectedFiles.length),
+        undoable: i18n.number(evaluation.undoableOperationIds.length),
+      });
       conflicts.replaceChildren();
       for (const conflict of [...evaluation.blockingConflicts, ...evaluation.warnings]) {
         const item = conflicts.ownerDocument.createElement("li");
-        item.textContent = `${conflictText(conflict.code)}${conflict.paths.length === 0 ? "" : `: ${conflict.paths.join(", ")}`}`;
+        item.textContent = `${i18n.t(CONFLICT_KEYS[conflict.code])}${conflict.paths.length === 0 ? "" : `: ${conflict.paths.join(", ")}`}`;
         conflicts.append(item);
       }
       confirm.disabled = this.confirming
@@ -206,8 +268,10 @@ export function createChangePreviewModalClass(
         const plan = await this.plans.confirm(preview, [...this.selected]);
         this.resolvePlan(plan);
         this.close();
-      } catch (cause) {
-        if (error !== null) error.textContent = cause instanceof Error ? cause.message : String(cause);
+      } catch {
+        if (error !== null) {
+          error.textContent = createWorkbenchI18n(getLocale()).t("changePreview.confirm.failed");
+        }
         this.confirming = false;
         this.confirmationFailed = true;
         if (confirm !== null) confirm.disabled = true;
@@ -215,28 +279,29 @@ export function createChangePreviewModalClass(
     }
 
     private renderSample(): void {
-      this.setTitle("Sample change preview");
+      const i18n = createWorkbenchI18n(getLocale());
+      this.setTitle(i18n.t("changePreview.sample.title"));
       const doc = this.contentEl.ownerDocument;
       const wrap = doc.createElement("div");
       wrap.className = "knowledge-workbench__change-preview";
       const example = doc.createElement("p");
-      example.textContent = "Example only: Example/Untitled.md → Notes/Visible title.md";
+      example.textContent = i18n.t("changePreview.sample.example");
       const label = doc.createElement("label");
       const checkbox = doc.createElement("input");
       checkbox.type = "checkbox";
       const text = doc.createElement("span");
-      text.textContent = "I understand that future changes require confirmation";
+      text.textContent = i18n.t("changePreview.sample.acknowledgement");
       label.append(checkbox, text);
       const actions = doc.createElement("div");
       actions.className = "knowledge-workbench__item-actions";
       const cancel = doc.createElement("button");
       cancel.type = "button";
-      cancel.textContent = "Cancel";
+      cancel.textContent = i18n.t("changePreview.cancel");
       cancel.addEventListener("click", () => this.cancel());
       const acknowledge = doc.createElement("button");
       acknowledge.type = "button";
       acknowledge.dataset.action = "acknowledge";
-      acknowledge.textContent = "Acknowledge preview safety";
+      acknowledge.textContent = i18n.t("changePreview.sample.confirm");
       acknowledge.disabled = true;
       checkbox.addEventListener("change", () => { acknowledge.disabled = !checkbox.checked; });
       acknowledge.addEventListener("click", () => {

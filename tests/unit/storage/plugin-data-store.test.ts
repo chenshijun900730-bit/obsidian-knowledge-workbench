@@ -48,6 +48,7 @@ const unsafeHistoricalData = (): unknown => ({
   settings: {
     writeEnabled: true,
     writePreviewAcknowledged: true,
+    locale: "zh-CN",
     openAtStartup: true,
     folderRules: [],
     excludedPrefixes: [],
@@ -62,6 +63,22 @@ const unsafeHistoricalData = (): unknown => ({
 });
 
 describe("PluginDataStore", () => {
+  it.each([
+    ["missing locale", { openAtStartup: true }],
+    ["invalid locale", { openAtStartup: true, locale: "fr" }],
+  ])("defaults $0 to Simplified Chinese without clearing unrelated settings", async (_, settings) => {
+    const store = new PluginDataStore(new MemoryPluginDataPort({
+      schemaVersion: 1,
+      settings,
+      activeIndex: null,
+      staging: null,
+      operational: { pins: {}, dismissals: {}, lastOpened: {}, journals: [] },
+    }));
+    await store.load();
+    expect(store.settings().locale).toBe("zh-CN");
+    expect(store.settings().openAtStartup).toBe(true);
+  });
+
   it("durably disables historical write and AI settings in acceptance mode", async () => {
     const port = new MemoryPluginDataPort(unsafeHistoricalData());
     const store = new PluginDataStore(port);
@@ -72,6 +89,7 @@ describe("PluginDataStore", () => {
     expect(store.settings()).toMatchObject({
       writeEnabled: false,
       aiEnabled: false,
+      locale: "zh-CN",
       openAtStartup: true,
       secretId: "fixture-secret",
     });
@@ -183,6 +201,7 @@ describe("PluginDataStore", () => {
       settings: {
         writeEnabled: true,
         writePreviewAcknowledged: true,
+        locale: "zh-CN",
         openAtStartup: true,
         aiEnabled: true,
       },

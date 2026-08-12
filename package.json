@@ -11,20 +11,26 @@
     "prepare:acceptance:synthetic": "node scripts/prepare-acceptance-synthetic-cli.mjs",
     "install:acceptance:dev": "node scripts/install-acceptance-dev-cli.mjs",
     "install:acceptance:real": "node scripts/install-acceptance-real-cli.mjs",
+    "install:normal:real": "node scripts/install-normal-real-cli.mjs",
     "record:read-only-acceptance": "node scripts/record-read-only-acceptance.mjs",
     "validate:read-only-acceptance": "node scripts/validate-read-only-acceptance.mjs",
     "lint": "eslint .",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
+    "test:catalog-performance": "KNOWLEDGE_WORKBENCH_PERFORMANCE=1 vitest run tests/performance/catalog-search.bench.test.ts --no-file-parallelism --maxWorkers=1 --testTimeout=180000 --reporter=verbose",
+    "inspect:catalog-txt": "node scripts/inspect-catalog-txt-aggregate.mjs",
     "test:performance": "KNOWLEDGE_WORKBENCH_PERFORMANCE=1 vitest run tests/performance/index.bench.test.ts tests/performance/workbench-open.bench.test.ts --no-file-parallelism --maxWorkers=1 --testTimeout=180000 --hookTimeout=180000 --reporter=verbose",
     "install:dev": "npm run build && node scripts/install-dev.mjs",
     "validate:acceptance": "node scripts/validate-acceptance.mjs",
     "verify": "npm run lint && npm test && npm run build"
   },
-  "engines": { "node": "^20.19.0 || ^22.13.0 || >=24.0.0" },
+  "engines": {
+    "node": "^20.19.0 || ^22.13.0 || >=24.0.0"
+  },
   "devDependencies": {
     "@eslint/js": "9.39.4",
+    "@types/json-bigint": "1.0.4",
     "@types/node": "22.15.17",
     "@vitest/coverage-v8": "4.1.10",
     "esbuild": "0.25.5",
@@ -37,5 +43,8 @@
     "typescript": "5.8.3",
     "typescript-eslint": "8.59.1",
     "vitest": "4.1.10"
+  },
+  "dependencies": {
+    "json-bigint": "1.0.0"
   }
 }

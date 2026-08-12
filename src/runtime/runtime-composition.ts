@@ -9,6 +9,18 @@ import type {
 } from "../ui/workbench-controller";
 import type { ArtifactExpectation } from "./artifact-binding";
 import type { RuntimeSafetyPolicy } from "./safety-policy";
+import type { CloudCatalogRuntime } from "../catalog/cloud-catalog-runtime";
+import type { CatalogScanConfirmationPresenter } from "../ui/catalog-scan-confirmation-modal";
+import type { CatalogTxtImportConfirmationPresenter } from "../ui/catalog-txt-import-confirmation-modal";
+import type { CatalogLargeScanConfirmationPresenter } from "../ui/catalog-large-scan-confirmation-modal";
+import type { SettingsSectionsSurface } from "../ui/settings-sections";
+import type { CloudDirectoryDiscoveryRuntime } from "../catalog/cloud-directory-discovery-service";
+import type {
+  WorkbenchLocaleProvider,
+} from "../i18n/workbench-i18n";
+import type { CloudDirectoryPickerPresenter } from "../ui/cloud-directory-picker";
+
+export type { WorkbenchLocaleProvider } from "../i18n/workbench-i18n";
 
 export interface DisposableQuickCapturePort extends QuickCapturePort {
   dispose(): void;
@@ -18,18 +30,52 @@ export interface RuntimeComposition {
   readonly policy: RuntimeSafetyPolicy;
   readonly artifact: ArtifactExpectation;
   readonly selectVaultWrites: (vault: VaultWritePort) => VaultWritePort;
-  readonly createQuickCapture: (app: App) => DisposableQuickCapturePort;
+  readonly createQuickCapture: (
+    app: App,
+    getLocale: WorkbenchLocaleProvider,
+  ) => DisposableQuickCapturePort;
   readonly createChangePreview: (
     app: App,
     plans: ChangePlanService,
+    getLocale: WorkbenchLocaleProvider,
   ) => ChangePreviewPresenter;
-  readonly createHistoryConfirmation: (app: App) => HistoryConfirmationPresenter;
+  readonly createHistoryConfirmation: (
+    app: App,
+    getLocale: WorkbenchLocaleProvider,
+  ) => HistoryConfirmationPresenter;
   readonly createSettingsTab: (
     app: App,
     plugin: Plugin,
     controller: WorkbenchController,
+    getLocale: WorkbenchLocaleProvider,
   ) => PluginSettingTab;
-  readonly createAi?: (app: App) => WorkbenchAiDependencies;
+  readonly createWorkbenchSettingsSurface?: (
+    app: App,
+    controller: WorkbenchController,
+    getLocale: WorkbenchLocaleProvider,
+  ) => SettingsSectionsSurface;
+  readonly createAi?: (
+    app: App,
+    getLocale: WorkbenchLocaleProvider,
+  ) => WorkbenchAiDependencies;
+  readonly createCatalog: (app: App) => CloudCatalogRuntime;
+  readonly createCatalogConfirmation: (
+    app: App,
+    getLocale: WorkbenchLocaleProvider,
+  ) => CatalogScanConfirmationPresenter;
+  readonly createCatalogTxtImportConfirmation?: (
+    app: App,
+    getLocale: WorkbenchLocaleProvider,
+  ) => CatalogTxtImportConfirmationPresenter;
+  readonly createCatalogLargeScanConfirmation?: (
+    app: App,
+    getLocale: WorkbenchLocaleProvider,
+  ) => CatalogLargeScanConfirmationPresenter;
+  readonly createCatalogDirectoryPicker?: (
+    app: App,
+    discovery: CloudDirectoryDiscoveryRuntime,
+    getLocale: WorkbenchLocaleProvider,
+  ) => CloudDirectoryPickerPresenter;
 }
 
 export function assertRuntimeCompositionCoherence(

@@ -24,6 +24,7 @@ import {
 } from "../../src/ui/workbench-view";
 
 const ACCEPTANCE_BANNER = "Read-only acceptance build. Quick Capture, organization writes, Undo, and AI are unavailable. Derived index data is stored in the plugin's data file.";
+const ZH_ACCEPTANCE_BANNER = "只读验收版本。快速记录、整理写入、撤销和 AI 均不可用。派生索引数据保存在插件数据文件中。";
 
 const suggestion = {
   operation: {
@@ -58,8 +59,35 @@ const previewOperation = {
 };
 
 const modelFor = (activeTab: WorkbenchTab): WorkbenchViewModel => ({
+  locale: "zh-CN",
   status: "ready",
   activeTab,
+  startSection: "overview",
+  catalog: {
+    status: "unavailable",
+    source: "none",
+    pdfCount: 0,
+    verificationCounts: { unverified: 0, verified: 0, difference: 0, cloudMissing: 0 },
+    query: "",
+    folderPrefix: "",
+    verificationStatuses: [],
+    differenceKinds: [],
+    topLevelGroupId: "",
+    hierarchyTag: "",
+    includeCloudMissing: false,
+    groups: [],
+    hierarchyTags: [],
+    page: 0,
+    pageSize: 50,
+    total: 0,
+    items: [],
+    messageCode: "catalog-unavailable",
+  },
+  verificationRoot: "",
+  verificationRootLocked: false,
+  selectedVerificationGroupKeys: [],
+  selectedCatalogId: null,
+  catalogFiltersExpanded: false,
   todayFilter: "all",
   today: {
     newItems: [{
@@ -109,6 +137,7 @@ const workbenchActions = (
   overrides: Partial<WorkbenchActions> = {},
 ): WorkbenchActions => ({
   onSelectTab: vi.fn(),
+  onSelectStartSection: vi.fn(),
   onSelectTodayFilter: vi.fn(),
   onSelectMapFilter: vi.fn(),
   onOpenNote: vi.fn(),
@@ -131,6 +160,24 @@ const workbenchActions = (
   onExplainRelation: vi.fn(),
   onSuggestLabels: vi.fn(),
   onSuggestionSelectionChange: vi.fn(),
+  onSearchCatalog: vi.fn(),
+  onFilterCatalogFolder: vi.fn(),
+  onToggleCatalogStatus: vi.fn(),
+  onToggleCatalogDifference: vi.fn(),
+  onFilterCatalogGroup: vi.fn(),
+  onFilterCatalogTag: vi.fn(),
+  onToggleCatalogCloudMissing: vi.fn(),
+  onCatalogPage: vi.fn(),
+  onCopyCatalogFilename: vi.fn(),
+  onCopyCatalogPath: vi.fn(),
+  onOpenBaidu: vi.fn(),
+  onSelectCatalogRecord: vi.fn(),
+  onSetCatalogFiltersExpanded: vi.fn(),
+  onSetVerificationRoot: vi.fn(),
+  onToggleVerificationGroup: vi.fn(),
+  onStartSelectedVerification: vi.fn(async () => undefined),
+  onResumeSelectedVerification: vi.fn(async () => undefined),
+  onCancelSelectedVerification: vi.fn(),
   ...overrides,
 });
 
@@ -187,6 +234,7 @@ class SettingsSurface {
 }
 
 const acceptanceSettings = (): PluginSettings => Object.defineProperties({
+  locale: "zh-CN",
   openAtStartup: true,
   folderRules: [],
   excludedPrefixes: ["Generated/Archive"],
@@ -207,6 +255,34 @@ afterEach(() => {
 });
 
 describe("read-only acceptance surfaces", () => {
+  it.each([
+    [
+      "zh-CN",
+      ZH_ACCEPTANCE_BANNER,
+      "只读验收模式已启用",
+      "当前版本不提供可变设置界面。",
+    ],
+    [
+      "en",
+      ACCEPTANCE_BANNER,
+      "Read-only acceptance mode is active",
+      "Mutable settings are unavailable in this build.",
+    ],
+  ] as const)("localizes the immutable acceptance banner and settings notice in %s", (
+    locale,
+    bannerText,
+    ariaLabel,
+    settingsNotice,
+  ) => {
+    const root = testDiv();
+    renderWorkbench(root, { ...modelFor("settings"), locale }, workbenchActions(), READ_ONLY_ACCEPTANCE_POLICY);
+    const banner = root.querySelector<HTMLElement>('[data-acceptance-banner="true"]')!;
+    expect(banner.textContent).toBe(bannerText);
+    expect(banner.getAttribute("aria-label")).toBe(ariaLabel);
+    expect(root.textContent).toContain(settingsNotice);
+    expect(root.querySelector('[data-ai-enabled="true"]')).toBeNull();
+  });
+
   it("keeps a persistent non-color-only banner and only read-safe Workbench actions", () => {
     const root = testDiv();
     const quickCapture = vi.fn();
@@ -221,22 +297,16 @@ describe("read-only acceptance surfaces", () => {
       onSuggestLabels: ai,
     });
 
-    for (const tab of ["workbench", "suggestions", "history", "settings"] as const) {
+    for (const tab of ["workbench", "verification", "history", "settings"] as const) {
       renderWorkbench(root, modelFor(tab), actions, READ_ONLY_ACCEPTANCE_POLICY);
       const banners = root.querySelectorAll<HTMLElement>('[data-acceptance-banner="true"]');
       expect(banners).toHaveLength(1);
-      expect(banners[0]?.textContent).toBe(ACCEPTANCE_BANNER);
+      expect(banners[0]?.textContent).toBe(ZH_ACCEPTANCE_BANNER);
       expect(banners[0]?.getAttribute("role")).toBe("status");
       expect(banners[0]?.getAttribute("aria-label")).toBe(
-        "Read-only acceptance mode is active",
+        "只读验收模式已启用",
       );
-      expect(Array.from(root.children).map((child) => child.className)).toEqual([
-        "knowledge-workbench__tabs",
-        "knowledge-workbench__acceptance-banner",
-        "knowledge-workbench__status",
-        "knowledge-workbench__progress-row",
-        "",
-      ]);
+      expect(root.querySelector(".knowledge-workbench__shell")).not.toBeNull();
     }
 
     const css = readFileSync(resolve(process.cwd(), "styles.css"), "utf8");
@@ -247,22 +317,16 @@ describe("read-only acceptance surfaces", () => {
 
     renderWorkbench(root, modelFor("workbench"), actions, READ_ONLY_ACCEPTANCE_POLICY);
     const capture = root.querySelector<HTMLButtonElement>('[data-action="quick-capture"]');
-    expect(capture?.textContent).toBe("Quick capture");
-    expect(capture?.disabled).toBe(true);
-    expect(capture?.getAttribute("aria-label")).toBe(
-      "Quick Capture creates Markdown and is unavailable in read-only acceptance mode",
-    );
-    expect(capture?.title).toBe("Unavailable in read-only acceptance mode");
-    if (capture !== null) {
-      capture.disabled = false;
-      capture.click();
-    }
+    expect(capture).toBeNull();
     expect(quickCapture).not.toHaveBeenCalled();
     expect(root.textContent).not.toContain("stale AI output must remain hidden");
     expect(root.querySelector(".knowledge-workbench__ai-actions")).toBeNull();
     expect(ai).not.toHaveBeenCalled();
 
-    renderWorkbench(root, modelFor("suggestions"), actions, READ_ONLY_ACCEPTANCE_POLICY);
+    renderWorkbench(root, {
+      ...modelFor("workbench"),
+      startSection: "suggestions",
+    }, actions, READ_ONLY_ACCEPTANCE_POLICY);
     const checkbox = root.querySelector<HTMLInputElement>(
       'input[value="acceptance-suggestion"]',
     );
@@ -272,12 +336,12 @@ describe("read-only acceptance surfaces", () => {
       checkbox.dispatchEvent(new Event("change", { bubbles: true }));
     }
     const preview = Array.from(root.querySelectorAll<HTMLButtonElement>("button"))
-      .find((button) => button.textContent === "Preview selected");
+      .find((button) => button.textContent === "预览所选");
     expect(preview?.disabled).toBe(false);
     preview?.click();
     expect(previewSelected).toHaveBeenCalledWith(["acceptance-suggestion"]);
     expect(Array.from(root.querySelectorAll("button")).some(
-      (button) => button.textContent === "Explain selected relation with AI",
+      (button) => button.textContent === "用 AI 解释所选关系",
     )).toBe(false);
   });
 
@@ -458,6 +522,7 @@ describe("read-only acceptance surfaces", () => {
       }],
       previewSampleChange: blocked.sample,
       setOpenAtStartup: allowed.startup,
+      setLocale: async () => undefined,
       setWriteEnabled: blocked.write,
       applyFolderRules: allowed.rules,
       setExcludedPrefixes: allowed.exclusions,
@@ -476,14 +541,14 @@ describe("read-only acceptance surfaces", () => {
     expect(tab.containerEl.classList.contains(
       "knowledge-workbench__settings--read-only",
     )).toBe(true);
-    expect(tab.containerEl.textContent).toContain("Open the workbench at startup");
-    expect(tab.containerEl.textContent).toContain("Folder rule proposals");
-    expect(tab.containerEl.textContent).toContain("Excluded folders");
+    expect(tab.containerEl.textContent).toContain("启动时打开知识工作台");
+    expect(tab.containerEl.textContent).toContain("文件夹规则建议");
+    expect(tab.containerEl.textContent).toContain("排除的文件夹");
     expect(tab.containerEl.textContent).toContain(
-      "Organization writes are unavailable in the read-only acceptance build.",
+      "只读验收版本不提供整理写入。",
     );
     expect(tab.containerEl.textContent).toContain(
-      "AI configuration and requests are unavailable in the read-only acceptance build.",
+      "只读验收版本不提供 AI 配置和请求。",
     );
     expect(tab.containerEl.textContent).not.toContain("Review a sample change");
     expect(tab.containerEl.querySelector('[data-write-enabled="true"]')).toBeNull();
@@ -497,7 +562,7 @@ describe("read-only acceptance surfaces", () => {
     const startup = Array.from(tab.containerEl.querySelectorAll<HTMLInputElement>(
       'input[type="checkbox"]',
     )).find((input) => input.closest("label")?.textContent?.includes(
-      "Open the workbench at startup",
+      "启动时打开知识工作台",
     ));
     expect(startup).toBeDefined();
     if (startup !== undefined) {
@@ -513,7 +578,7 @@ describe("read-only acceptance surfaces", () => {
       folderRule.dispatchEvent(new Event("change", { bubbles: true }));
     }
     Array.from(tab.containerEl.querySelectorAll<HTMLButtonElement>("button"))
-      .find((button) => button.textContent === "Confirm selected rules")?.click();
+      .find((button) => button.textContent === "确认所选规则")?.click();
     const exclusion = tab.containerEl.querySelector<HTMLInputElement>(
       '[data-excluded-prefix="Generated"]',
     );
@@ -523,7 +588,7 @@ describe("read-only acceptance surfaces", () => {
       exclusion.dispatchEvent(new Event("change", { bubbles: true }));
     }
     Array.from(tab.containerEl.querySelectorAll<HTMLButtonElement>("button"))
-      .find((button) => button.textContent === "Apply exclusions")?.click();
+      .find((button) => button.textContent === "应用排除项")?.click();
 
     await vi.waitFor(() => {
       expect(allowed.startup).toHaveBeenCalledWith(false);

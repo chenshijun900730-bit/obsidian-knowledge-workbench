@@ -1,4 +1,10 @@
 import type { WorkbenchActions, WorkbenchViewModel } from "../../src/ui/workbench-view";
+import type { CloudCatalogRuntime } from "../../src/catalog/cloud-catalog-runtime";
+import { FakeCloudCatalogRuntime } from "../fakes/fake-cloud-catalog-runtime";
+import { FakeCatalogScanConfirmationPresenter } from "../fakes/fake-cloud-catalog-runtime";
+import type { CatalogScanConfirmationPresenter } from "../../src/ui/catalog-scan-confirmation-modal";
+import type { CatalogTxtImportConfirmationPresenter } from "../../src/ui/catalog-txt-import-confirmation-modal";
+import type { CatalogLargeScanConfirmationPresenter } from "../../src/ui/catalog-large-scan-confirmation-modal";
 import { ClassificationService } from "../../src/classification/classification-service";
 import type { AiClientPort, Clock, VaultReadPort, WorkspacePort } from "../../src/core/ports";
 import type { AiPayloadPreview } from "../../src/ui/ai-payload-preview-modal";
@@ -101,8 +107,34 @@ export function manualProjectionScheduler(): ManualProjectionScheduler {
 
 export function populatedWorkbenchModel(): WorkbenchViewModel {
   return {
+    locale: "zh-CN",
     status: "ready",
     activeTab: "workbench",
+    startSection: "overview",
+    catalog: {
+      status: "no-snapshot",
+      source: "none",
+      pdfCount: 0,
+      verificationCounts: { unverified: 0, verified: 0, difference: 0, cloudMissing: 0 },
+      query: "",
+      folderPrefix: "",
+      verificationStatuses: [],
+      differenceKinds: [],
+      topLevelGroupId: "",
+      hierarchyTag: "",
+      includeCloudMissing: false,
+      groups: [],
+      hierarchyTags: [],
+      page: 0,
+      pageSize: 50,
+      total: 0,
+      items: [],
+    },
+    verificationRoot: "",
+    verificationRootLocked: false,
+    selectedVerificationGroupKeys: [],
+    selectedCatalogId: null,
+    catalogFiltersExpanded: false,
     todayFilter: "all",
     today: {
       newItems: [{
@@ -163,6 +195,7 @@ export function populatedWorkbenchModel(): WorkbenchViewModel {
 export function noOpWorkbenchActions(overrides: Partial<WorkbenchActions> = {}): WorkbenchActions {
   return {
     onSelectTab: () => undefined,
+    onSelectStartSection: () => undefined,
     onSelectTodayFilter: () => undefined,
     onSelectMapFilter: () => undefined,
     onOpenNote: () => undefined,
@@ -185,6 +218,24 @@ export function noOpWorkbenchActions(overrides: Partial<WorkbenchActions> = {}):
     onExplainRelation: () => undefined,
     onSuggestLabels: () => undefined,
     onSuggestionSelectionChange: () => undefined,
+    onSearchCatalog: () => undefined,
+    onFilterCatalogFolder: () => undefined,
+    onToggleCatalogStatus: () => undefined,
+    onToggleCatalogDifference: () => undefined,
+    onFilterCatalogGroup: () => undefined,
+    onFilterCatalogTag: () => undefined,
+    onToggleCatalogCloudMissing: () => undefined,
+    onCatalogPage: () => undefined,
+    onCopyCatalogFilename: () => undefined,
+    onCopyCatalogPath: () => undefined,
+    onOpenBaidu: () => undefined,
+    onSelectCatalogRecord: () => undefined,
+    onSetCatalogFiltersExpanded: () => undefined,
+    onSetVerificationRoot: () => undefined,
+    onToggleVerificationGroup: () => undefined,
+    onStartSelectedVerification: async () => undefined,
+    onResumeSelectedVerification: async () => undefined,
+    onCancelSelectedVerification: () => undefined,
     ...overrides,
   };
 }
@@ -215,6 +266,7 @@ const RECORDS: readonly DocumentRecord[] = [
 const defaultSettings = (): PluginSettings => ({
   writeEnabled: false,
   writePreviewAcknowledged: false,
+  locale: "zh-CN",
   openAtStartup: false,
   folderRules: [],
   excludedPrefixes: [],
@@ -470,6 +522,10 @@ export interface ControllerFixtureOptions {
   readonly records?: readonly DocumentRecord[];
   readonly projectionScheduler?: ProjectionSchedulerDependency;
   readonly deferInitialProjection?: boolean;
+  readonly catalog?: CloudCatalogRuntime;
+  readonly catalogConfirmation?: CatalogScanConfirmationPresenter;
+  readonly catalogTxtImportConfirmation?: CatalogTxtImportConfirmationPresenter;
+  readonly catalogLargeScanConfirmation?: CatalogLargeScanConfirmationPresenter;
 }
 
 export function controllerFixture(options: ControllerFixtureOptions = {}) {
@@ -515,6 +571,9 @@ export function controllerFixture(options: ControllerFixtureOptions = {}) {
     },
     dispose(): void { this.disposeCalls += 1; },
   };
+  const catalog = options.catalog ?? new FakeCloudCatalogRuntime();
+  const catalogConfirmation = options.catalogConfirmation
+    ?? new FakeCatalogScanConfirmationPresenter(false);
   const clock: Clock = { now: () => 100 };
   const workspace: WorkspacePort = {
     openNote: async () => {
@@ -713,6 +772,14 @@ export function controllerFixture(options: ControllerFixtureOptions = {}) {
     historyConfirmation,
     clock,
     ai,
+    catalog,
+    catalogConfirmation,
+    ...(options.catalogTxtImportConfirmation === undefined
+      ? {}
+      : { catalogTxtImportConfirmation: options.catalogTxtImportConfirmation }),
+    ...(options.catalogLargeScanConfirmation === undefined
+      ? {}
+      : { catalogLargeScanConfirmation: options.catalogLargeScanConfirmation }),
     ...(options.projectionScheduler === undefined ? {} : { projectionScheduler: options.projectionScheduler }),
   };
   const controller = new WorkbenchController(dependencies);
@@ -735,6 +802,7 @@ export function controllerFixture(options: ControllerFixtureOptions = {}) {
     aiPreview,
     aiClient,
     projection,
+    catalog,
   };
 }
 

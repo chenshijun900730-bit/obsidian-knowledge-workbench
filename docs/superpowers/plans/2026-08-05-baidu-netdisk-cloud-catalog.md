@@ -2,11 +2,11 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (\`- [ ]\`) syntax for tracking.
 
-**Goal:** Build a catalog-only Obsidian workflow that indexes PDF metadata from an explicitly authorized Baidu Netdisk directory without downloading PDF content or writing catalog data into the Vault.
+**Goal:** Build a catalog-only Obsidian workflow that indexes PDF metadata from a user-confirmed Baidu Netdisk path without downloading PDF content or writing catalog data into the Vault. The user has accepted the official account-wide `basic,netdisk` OAuth range, while product code remains restricted to read-only directory listing.
 
-**Architecture:** Keep the existing Vault-facing DocumentRecord pipeline unchanged. Add a separate catalog domain, a Vault-external atomic NDJSON snapshot store, a serial resumable scanner, and a paginated Cloud Catalog tab; compose official OAuth and Baidu list access only in the normal entry point after two manual feasibility gates pass.
+**Architecture:** Keep the existing Vault-facing DocumentRecord pipeline unchanged. Add a separate catalog domain, a Vault-external atomic NDJSON snapshot store, a serial resumable scanner, and a paginated Cloud Catalog tab; compose official OOB OAuth and Baidu list access only in the normal entry point after the user explicitly accepts the broad OAuth range. Authorization never triggers enumeration, and the network adapter exposes only the documented list request.
 
-**Tech Stack:** TypeScript 5.8, Vitest 4, Obsidian 1.13 APIs, Node filesystem/crypto primitives available in Obsidian Desktop, json-bigint 1.0.0, official Baidu OAuth authorization-code flow, and GET /rest/2.0/xpan/file?method=list.
+**Tech Stack:** TypeScript 5.8, Vitest 4, Obsidian 1.13 APIs, Node filesystem/crypto primitives available in Obsidian Desktop, json-bigint 1.0.0, official Baidu OAuth authorization-code flow with `redirect_uri=oob`, and GET /rest/2.0/xpan/file?method=list.
 
 ---
 
@@ -18,6 +18,7 @@ Implement against:
 - Official file-list documentation: https://pan.baidu.com/union/doc/基础网盘服务/获取文件信息/获取文件列表/
 - Official authorization-code documentation: https://pan.baidu.com/union/doc/使用入门/接入授权/授权码模式/
 - Official callback documentation: https://pan.baidu.com/union/doc/使用入门/接入授权/授权回调地址/
+- Official authorization FAQ: https://pan.baidu.com/union/doc/使用入门/接入授权/faq/
 - Official current permission documentation: https://pan.baidu.com/union/doc/使用入门/权限与配额/
 - Official common error-code documentation: https://pan.baidu.com/union/doc/平台简介/错误码/
 
@@ -35,9 +36,9 @@ The implementation must not:
 
 These gates are part of the implementation, not assumptions:
 
-1. The callback guide documents a configured application URL and redirect_uri=oob, but does not explicitly promise that a 127.0.0.1 loopback callback is accepted. Before implementing the real callback listener, the user must confirm that the exact loopback URL can be saved and used by their own application. If it cannot, stop and revise the approved design; do not silently switch to oob.
-2. The current permission guide says file-query operations must remain inside directories authorized to the application and that the default directory is normally /apps/{appname}. Before scanning the existing collection, the user must confirm through the official authorization surface that one non-sensitive existing directory is actually in scope. Permission/interface errors -7, 31024, or 20013 and application-access errors 20011 or 20015 are stop signals, not reasons to broaden access; rate-limit errors 20012 or 31034 pause the scan without changing scope.
-3. A personal application is acceptable only if the official console allows the required software application, callback, netdisk scope, and chosen-directory authorization. No real account step begins until the user explicitly approves the small-directory validation.
+1. The official authorization FAQ says a local callback address is not allowed. The callback guide and authorization-code guide document `redirect_uri=oob`; after the loopback gate failed closed, the user explicitly approved the OOB revision on 2026-08-05. No implementation may bind a local HTTP listener, register localhost, or silently substitute another domain.
+2. The official authorization surface exposes the account-wide `basic,netdisk` read/write range and no folder selector. On 2026-08-05 the user explicitly accepted that broad external scope. Product capability remains narrower: OAuth, token exchange, and exact `GET + method=list` requests for a user-entered path only. Permission/interface errors -7, 31024, or 20013 and application-access errors 20011 or 20015 are stop signals, not reasons to enumerate parents or add write capabilities; rate-limit errors 20012 or 31034 pause the scan without changing scope.
+3. A personal application is acceptable only if the official console allows the required personal-use software application, `redirect_uri=oob`, and `basic,netdisk` scope. A displayed OOB authorization code must never be pasted into chat, terminal history, a project file, a screenshot, or the runbook; real exchange starts only after credential storage and the bounded OOB adapter pass automated isolation tests.
 
 ## File responsibility map
 
@@ -52,13 +53,13 @@ These gates are part of the implementation, not assumptions:
 | src/catalog/disabled-cloud-catalog-runtime.ts | Network-free and filesystem-free acceptance-build implementation |
 | src/adapters/local-catalog-snapshot-adapter.ts | 0700/0600 Vault-external NDJSON/checkpoint/receipt storage |
 | src/adapters/obsidian-baidu-credential-adapter.ts | Strict secretStorage bundle read, replace, and revoke |
-| src/adapters/baidu-oauth-adapter.ts | Exact authorize/token/refresh endpoints and loopback state validation |
+| src/adapters/baidu-oauth-adapter.ts | Exact OOB authorize/token/refresh endpoints and bounded manual-code attempt state |
 | src/adapters/baidu-catalog-source-adapter.ts | Exact GET method=list request construction and stable error mapping |
 | src/ui/cloud-catalog-tab.ts | Search/filter/pagination/result actions |
 | src/ui/catalog-scan-confirmation-modal.ts | Explicit root, recursive scope, and no-download confirmation |
 | src/ui/workbench-controller.ts | Delegate catalog actions and subscribe to the separate catalog runtime |
 | src/ui/workbench-view.ts | Add the Cloud Catalog tab without mixing catalog records into other tabs |
-| src/ui/settings-tab.ts | Credential status, authorization, scan-root entry, and explicit start controls |
+| src/ui/settings-tab.ts | Credential status, OOB authorization-code input, scan-root entry, and explicit start controls |
 | src/runtime/runtime-composition.ts | Inject normal or disabled catalog runtime factory |
 | src/plugin/knowledge-workbench-plugin.ts | Own and dispose the catalog runtime alongside existing services |
 | src/main.ts | Compose Node storage, secret storage, browser, clipboard, OAuth, and list adapters |
@@ -71,12 +72,14 @@ These gates are part of the implementation, not assumptions:
 | tests/packaging/composition-roots.test.ts | Prove normal-only network/secret/filesystem dependencies stay out of acceptance |
 | tests/performance/catalog-search.bench.test.ts | Normal 100,000-record product fixture and 50-query p95 |
 | docs/runbooks/baidu-cloud-catalog-small-folder.md | Human-authorized real small-directory procedure and evidence whitelist |
+| docs/runbooks/baidu-cloud-catalog-directory-scope-gate.md | Manual no-exchange check for personal app, OOB page, and existing-directory selection |
 
 ## Checkpoint schedule
 
 - Checkpoint A after Tasks 1–4: catalog contracts, storage, scan engine, and search performance.
 - Checkpoint B after Tasks 5–8: disabled runtime, controller/view, settings confirmation, and composition-root isolation.
-- Checkpoint C after Tasks 9–13: official feasibility evidence, credentials, OAuth, list adapter, real small-directory acceptance, and final verification.
+- Checkpoint C at the Task 9 loopback failure: official feasibility evidence and fail-closed stop; the user then approved the OOB design revision.
+- Checkpoint D after the revised Task 9 plus Tasks 10–13: OOB feasibility evidence, credentials, OOB OAuth, list adapter, real small-directory acceptance, and final verification.
 - At every checkpoint, stop and report the Git commit, implemented functions, executed tests, wrong directions/rework, available input-token statistics, PMH recall count/token estimate, and cross-project/model contamination finding. Never report recalled memory or cloud metadata.
 
 ### Task 1: Lock the separate catalog domain and strict Baidu codec
@@ -180,7 +183,10 @@ export interface CloudCatalogDirectory {
 export type CatalogSnapshotRecord = CloudCatalogRecord | CloudCatalogDirectory;
 export type CatalogErrorCode =
   | "authorization-canceled"
-  | "authorization-state-mismatch"
+  | "authorization-attempt-unavailable"
+  | "authorization-attempt-expired"
+  | "authorization-code-invalid"
+  | "authorization-exchange-failed"
   | "credentials-unavailable"
   | "invalid-scan-root"
   | "baidu-permission-denied"
@@ -751,18 +757,18 @@ export interface CatalogSearchQuery {
   readonly folderPrefix?: string;
   readonly modifiedAfter?: number;
   readonly offset: number;
-  readonly limit: 50;
+  readonly limit: number;
 }
 
 export interface CatalogSearchPage {
   readonly items: readonly CloudCatalogRecord[];
   readonly total: number;
   readonly offset: number;
-  readonly limit: 50;
+  readonly limit: number;
 }
 ~~~
 
-Single-character and punctuation-only queries may scan the pre-normalized array, but must still apply the 50-item page limit.
+Reject non-integer or negative offsets and limits outside 1–50. Single-character and punctuation-only queries may scan the pre-normalized array, but must still apply the requested page limit and the 50-item maximum.
 
 - [ ] **Step 4: Add and run the normal product performance fixture**
 
@@ -1035,6 +1041,7 @@ Expected: no list call occurs without the final confirmation.
 **Files:**
 
 - Modify: src/main.ts
+- Modify: src/catalog/cloud-catalog-runtime.ts
 - Modify: src/plugin/knowledge-workbench-plugin.ts
 - Modify: src/runtime/runtime-composition.ts
 - Modify: tests/packaging/composition-roots.test.ts
@@ -1108,27 +1115,35 @@ Expected: verify passes and the acceptance bundle contains no catalog network, s
 
 **Files:**
 
-- No project file changes
+- Modify: docs/superpowers/specs/2026-08-05-baidu-netdisk-cloud-catalog-design.md
+- Modify: docs/superpowers/plans/2026-08-05-baidu-netdisk-cloud-catalog.md
+- Create: docs/runbooks/baidu-cloud-catalog-directory-scope-gate.md
 
-- [ ] **Step 1: Verify the personal application prerequisite**
+- [x] **Step 1: Record the failed loopback gate and approved OOB revision**
+
+The current official authorization FAQ states that a local callback address is not allowed. The callback and authorization-code guides document `redirect_uri=oob`. Record that the exact loopback design was rejected by official published policy and that the user approved OOB on 2026-08-05. Remove every local listener, callback-host, callback-path, and unverifiable callback `state` assumption from the design and implementation plan.
+
+Expected: the approved design uses a manual one-time OOB authorization code, one active ten-minute local attempt, single submission, immediate input clearing, and no local HTTP server. It does not claim callback-style `state` verification because the official OOB documentation does not guarantee a plugin-verifiable returned state.
+
+- [x] **Step 2: Verify the personal application prerequisite**
 
 The user, not Codex, logs into the official Baidu console, completes any required personal real-name verification, creates one personal-use software application, and records AppKey/SecretKey only through the later private credential input. Do not paste credentials into chat, terminal history, environment variables, project files, or screenshots.
 
-- [ ] **Step 2: Verify the exact loopback callback**
+- [x] **Step 3: Verify the official OOB authorization page without exchanging a code**
 
-Attempt to register exactly http://127.0.0.1:43871/baidu-oauth/callback. Record only accepted or rejected. Do not broaden to 0.0.0.0, LAN addresses, wildcards, or another domain.
+Using only the official authorization URL described in docs/runbooks/baidu-cloud-catalog-directory-scope-gate.md, verify that `redirect_uri=oob` and `scope=basic,netdisk` reach the official authorization surface for the user-owned application. Do not configure localhost, start a listener, exchange the displayed code, or record the code.
 
-Expected: accepted. If rejected, stop Task 9 and request a design revision; no OAuth implementation begins.
+Expected: available. If OOB is rejected, stop Task 9; no OAuth implementation begins.
 
-- [ ] **Step 3: Verify authorized-directory selection exists**
+- [x] **Step 4: Record the missing directory selector and explicit broad-scope decision**
 
-From the official application/authorization UI, verify whether the user can explicitly authorize one existing non-sensitive directory outside /apps/{appname}. Record only available or unavailable; do not record the path.
+The official authorization UI did not expose an existing-directory selector. It exposed a checked `netdisk` permission for creating folders and reading/writing netdisk data. The user explicitly accepted this account-wide range on 2026-08-05. Record no account identity, path, credential, code, token, screenshot, or raw URL.
 
-Expected: available. If unavailable, stop: the approved architecture cannot catalog the existing 3.2 TB tree through the current official boundary.
+Expected: broad scope accepted, while the implementation remains fail-closed and list-only. This decision does not prove that an existing path is readable; that requires one separately approved, non-sensitive, read-only small-directory test after Tasks 10–12.
 
-- [ ] **Step 4: Report the gate**
+- [x] **Step 5: Report the gate**
 
-Report callback accepted/rejected, existing-directory authorization available/unavailable, and whether user action remains. This is a verifiable implementation stage even though no commit is created.
+Reported: personal application ready, OOB page available, folder-level selector unavailable, broad `netdisk` scope accepted, and real code exchange deferred until isolated credential/OAuth/list adapters are verified. Never report a path, account identity, AppKey, SecretKey, authorization code, token, screenshot, or raw URL.
 
 ### Task 10: Store one strict credential bundle through Obsidian secret storage
 
@@ -1190,10 +1205,12 @@ git commit -m "feat(授权): 安全保存百度授权凭证"
 
 Expected: strict bundle and redaction tests pass.
 
-### Task 11: Implement OAuth with exact endpoint and state boundaries
+### Task 11: Implement OOB OAuth with exact endpoint and manual-code boundaries
 
 **Files:**
 
+- Modify: src/catalog/catalog-types.ts
+- Modify: src/catalog/catalog-ports.ts
 - Create: src/adapters/baidu-oauth-adapter.ts
 - Test: tests/unit/catalog/baidu-oauth-adapter.test.ts
 
@@ -1201,11 +1218,16 @@ Expected: strict bundle and redaction tests pass.
 
 Assert:
 
-- authorize host is openapi.baidu.com, path is /oauth/2.0/authorize, response_type=code, scope=basic,netdisk, and state is present;
-- callback host is exactly 127.0.0.1, port and path are exact, and state mismatch closes without token exchange;
+- authorize host is openapi.baidu.com, path is /oauth/2.0/authorize, response_type=code, scope=basic,netdisk, and redirect_uri is exactly oob;
+- no callback host, callback path, local listener, or general callback handler exists in the adapter contract or production dependency graph;
+- only one OOB attempt can be active, it expires after ten minutes, and a second begin call replaces and invalidates the first attempt;
+- submitted codes must contain 1 to 512 visible ASCII characters with no whitespace or controls, are accepted only during the active attempt, and are consumed before token exchange so retry cannot reuse them;
+- cancel, timeout, validation failure, exchange completion, and dispose clear all code-bearing input/state; the adapter never logs or returns the code;
+- the authorize request does not claim a callback-verifiable state round trip; callback-style state errors and tests do not exist;
 - token host/path are exact, grant_type is authorization_code or refresh_token, and no POST/body variant exists;
-- code is single-use and expires after ten minutes in the local state machine;
+- authorization-code exchange sends redirect_uri=oob exactly;
 - refresh replaces both access and refresh tokens once; refresh failure requires reauthorization and never loops;
+- replace `authorization-state-mismatch` with the fixed codes `authorization-attempt-unavailable`, `authorization-attempt-expired`, `authorization-code-invalid`, and `authorization-exchange-failed`;
 - errors expose only fixed codes and never URLs or credentials.
 
 - [ ] **Step 2: Run the RED test**
@@ -1218,13 +1240,31 @@ npx vitest run tests/unit/catalog/baidu-oauth-adapter.test.ts
 
 Expected: FAIL because the adapter does not exist.
 
-- [ ] **Step 3: Implement a fixed loopback listener**
+- [ ] **Step 3: Implement one bounded OOB attempt**
 
-Bind only 127.0.0.1:43871, accept only GET /baidu-oauth/callback, cap request-line/header sizes, validate one active random state with timing-safe comparison, return a static success/failure HTML page, close after one terminal callback, and enforce a ten-minute timeout. Never bind 0.0.0.0 or log the callback URL.
+Open only the internally constructed official authorize URL with `redirect_uri=oob`. Expose a narrow `beginAuthorization()`, `submitAuthorizationCode(code)`, and `cancelAuthorization()` workflow rather than a callback server or general URL handler. Keep one private attempt deadline, consume the attempt before exchange, enforce the visible-ASCII length boundary, and clear all code-bearing values on every terminal path. Never persist the code, return it from a method, or include it in an error.
+
+Add these ports to `src/catalog/catalog-ports.ts`:
+
+~~~ts
+export interface CatalogAuthorizationBrowserPort {
+  openAuthorizationPage(url: string): Promise<void>;
+}
+
+export interface BaiduOAuthPort {
+  beginAuthorization(): Promise<Readonly<{ expiresAt: number }>>;
+  submitAuthorizationCode(code: string): Promise<void>;
+  cancelAuthorization(): void;
+  refresh(): Promise<void>;
+  dispose(): void;
+}
+~~~
+
+The browser port is called only with the internally constructed official authorize URL. No URL enters a view model, log, error, receipt, or test snapshot.
 
 - [ ] **Step 4: Implement token exchange and one-time refresh**
 
-Construct URLSearchParams internally, call the injected request function only after exact URL assertions, parse response text strictly, replace the entire credential bundle atomically, and translate all failures to fixed CatalogError codes. Do not expose a general request(url) method from the adapter.
+Construct URLSearchParams internally, require `redirect_uri=oob` for authorization-code exchange, call the injected request function only after exact URL assertions, parse response text strictly, replace the entire credential bundle atomically, and translate all failures to fixed CatalogError codes. Do not expose a general request(url) method from the adapter.
 
 - [ ] **Step 5: Run GREEN and commit**
 
@@ -1233,11 +1273,11 @@ Run:
 ~~~bash
 npx vitest run tests/unit/catalog/baidu-oauth-adapter.test.ts
 npm run build
-git add src/adapters/baidu-oauth-adapter.ts tests/unit/catalog/baidu-oauth-adapter.test.ts
+git add src/catalog/catalog-types.ts src/catalog/catalog-ports.ts src/adapters/baidu-oauth-adapter.ts tests/unit/catalog/baidu-oauth-adapter.test.ts
 git commit -m "feat(授权): 实现官方授权码流程"
 ~~~
 
-Expected: state, timeout, exact endpoint, refresh rotation, and redaction tests pass.
+Expected: OOB-only endpoint, active-attempt timeout, single-use code, input clearing, refresh rotation, and redaction tests pass without any listener capability.
 
 ### Task 12: Implement the exact read-only list adapter
 
@@ -1310,15 +1350,15 @@ Expected: whitelist, error mapping, exact fs_id, and single-refresh tests pass.
 - Create: docs/runbooks/baidu-cloud-catalog-small-folder.md
 - Modify: README.md
 
-- [ ] **Step 1: Add RED end-to-end composition tests**
+- [x] **Step 1: Add RED end-to-end composition tests**
 
-The normal graph must include OAuth, source, credential, snapshot, scan, and catalog runtime adapters. The acceptance graph must exclude all of them except disabled-cloud-catalog-runtime.ts. Simulate Connect and prove it makes OAuth calls but zero list calls; simulate confirmed Start and prove exactly one serial list call begins.
+The normal graph must include OAuth, source, credential, snapshot, scan, and catalog runtime adapters. The acceptance graph must exclude all of them except disabled-cloud-catalog-runtime.ts. Simulate Connect and prove it opens one OOB authorization URL but makes zero token or list calls; simulate local code submission and prove it makes one token exchange but zero list calls; simulate confirmed Start and prove exactly one serial list call begins.
 
-- [ ] **Step 2: Compose normal-only capabilities**
+- [x] **Step 2: Compose normal-only capabilities**
 
-main.ts creates the credential adapter from app.secretStorage, OAuth adapter from requestUrl plus a fixed loopback listener/browser opener, list adapter, external snapshot adapter, CatalogScanService, and CloudCatalogRuntime. The plugin owns the runtime. settings-tab.ts clears AppKey/SecretKey inputs immediately after save and shows only fixed state labels.
+main.ts creates the credential adapter from app.secretStorage, OAuth adapter from requestUrl plus a browser opener, list adapter, external snapshot adapter, CatalogScanService, and CloudCatalogRuntime. No listener or local-server capability is composed. The plugin owns the runtime. Replace the connection runtime's single `authorize()` action with `beginAuthorization()`, `submitAuthorizationCode(code)`, and `cancelAuthorization()` so the UI cannot pass a callback URL or general request. settings-tab.ts clears AppKey/SecretKey inputs immediately after save, clears the OOB authorization code on submit/cancel/timeout, and shows only fixed state labels.
 
-- [ ] **Step 3: Run automated release gates before real authorization**
+- [x] **Step 3: Run automated release gates before real authorization**
 
 Run:
 
@@ -1331,18 +1371,19 @@ npm run test:coverage
 
 Expected: all tests pass; coverage remains above the existing thresholds; the 100,000-record gate passes; acceptance bundle safety passes.
 
-- [ ] **Step 4: Write and review the small-directory runbook**
+- [x] **Step 4: Write and review the small-directory runbook**
 
 The runbook must require:
 
-1. user-owned personal app and accepted loopback callback;
-2. explicit user selection of one non-sensitive directory already shown as authorized by the official surface;
+1. user-owned personal app, official OOB authorization availability, and no localhost callback;
+2. explicit user entry and confirmation of one non-sensitive small-directory path, without first enumerating `/` or a parent directory;
 3. visible confirmation of recursive metadata-only scanning and no download;
 4. before/after network evidence showing only OAuth endpoints and GET method=list;
 5. manual comparison of returned item count with the Baidu client;
 6. evidence limited to status, counts, duration, response error codes, request count, and downloaded PDF bytes;
 7. an immediate stop on permission or quota errors;
 8. no installation into or scan of the real Vault.
+9. the one-time authorization code is never recorded and is cleared before evidence collection.
 
 - [ ] **Step 5: Obtain explicit user authorization and run exactly one small-directory acceptance**
 

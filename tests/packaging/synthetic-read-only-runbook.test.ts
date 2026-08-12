@@ -572,7 +572,7 @@ describe("synthetic acceptance documentation links", () => {
     expect(readme).toMatch(/\[[^\]]+\]\(docs\/runbooks\/synthetic-read-only-acceptance\.md\)/u);
     expect(fences(readme).map((block) => [block.marker, block.language, sha256(block.body)]))
       .toEqual(expectedReadmeFences);
-    expect(readme).toContain("| normal | 仓库根目录的 `main.js`、`manifest.json`、`styles.css` | `Knowledge Workbench` | `knowledge-workbench@<version>:normal` | `install:dev`，仅限仓库内专用合成库 |");
+    expect(readme).toContain("| normal | 事务构建的 `main.js`、`manifest.json`、`styles.css` | `Knowledge Workbench` | `knowledge-workbench@<version>:normal` | 合成库使用 `install:dev`；真实库仅在明确授权后使用 `install:normal:real` |");
     expect(readme).toContain("| read-only acceptance | 隔离目录中的 `main.js`、`manifest.json`、`styles.css`、`acceptance-build.json` | `Knowledge Workbench (Read-only acceptance)` | `knowledge-workbench@<version>:read-only-acceptance` | 合成库按固定手册使用 `install:acceptance:dev`；真实库仅在双人工停止门之间使用 `install:acceptance:real` |");
     expect(readme).toContain("[真实库只读事务安装与人工验收停止门](docs/runbooks/real-vault-read-only-acceptance.md)定义唯一受支持的真实库安装入口以及安装前后的人工停止边界。阅读文档、构建产物或实现通过自动化测试都不是安装、打开、启用、扫描或完成真实库验收的授权；实现和测试不代表真实库验收已经完成。");
     expect(readme).toContain("[专用合成库只读验收运行手册](docs/runbooks/synthetic-read-only-acceptance.md)定义固定 prepare/install、自动化停在主机控制之前、人工主机演练和一次性终态证据；它不授权任何真实库操作，也不会改变上面的真实库新授权停止门。");

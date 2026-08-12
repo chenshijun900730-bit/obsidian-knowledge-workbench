@@ -3,6 +3,7 @@ import { normalizeAiEndpoint, normalizeAiModel, normalizeAiSecretId } from "../a
 import type { PluginDataPort } from "../core/ports";
 import { OWNED_FIELDS, type DocumentKind, type DocumentRecord, type OwnedFieldValue } from "../core/types";
 import { effectiveSettings, type RuntimeSafetyPolicy } from "../runtime/safety-policy";
+import { isWorkbenchLocale } from "../i18n/workbench-i18n";
 import type {
   ActiveIndex,
   FolderRule,
@@ -40,6 +41,7 @@ const assertFiniteTimestamp = (value: number, label: string): void => {
 };
 
 const defaultSettings = (): PluginSettings => ({
+  locale: "zh-CN",
   writeEnabled: false,
   writePreviewAcknowledged: false,
   openAtStartup: false,
@@ -102,6 +104,7 @@ const decodeSettings = (value: unknown): PluginSettings => {
     try { secretId = normalizeAiSecretId(value.secretId); } catch { aiConfigurationValid = false; }
   } else if (value.secretId !== undefined) aiConfigurationValid = false;
   return {
+    locale: isWorkbenchLocale(value.locale) ? value.locale : "zh-CN",
     writeEnabled: value.writeEnabled === true && writePreviewAcknowledged,
     writePreviewAcknowledged,
     openAtStartup: value.openAtStartup === true,

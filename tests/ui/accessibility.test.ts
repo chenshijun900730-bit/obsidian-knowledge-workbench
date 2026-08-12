@@ -14,24 +14,25 @@ const renderRoot = (): HTMLDivElement => {
 };
 
 describe("workbench accessibility contracts", () => {
-  it("uses unique tab and panel IDs across simultaneous workbench roots", () => {
+  it("uses unique navigation and page IDs across simultaneous workbench roots", () => {
     const first = renderRoot();
     const second = renderRoot();
     const ids = Array.from(document.querySelectorAll<HTMLElement>("[id]")).map((element) => element.id);
     expect(new Set(ids).size).toBe(ids.length);
-    for (const tab of Array.from(document.querySelectorAll<HTMLElement>('[role="tab"]'))) {
-      const controlled = tab.getAttribute("aria-controls");
-      expect(controlled).not.toBeNull();
-      if (controlled !== null) expect(document.getElementById(controlled)).not.toBeNull();
+    for (const panel of Array.from(document.querySelectorAll<HTMLElement>("main[aria-labelledby]"))) {
+      const label = panel.getAttribute("aria-labelledby");
+      expect(label).not.toBeNull();
+      if (label !== null) expect(document.getElementById(label)).not.toBeNull();
     }
     first.remove();
     second.remove();
   });
 
-  it("keeps one roving tab stop and names every native control", () => {
+  it("keeps navigation controls named and names every native control", () => {
     const root = renderRoot();
-    const tabs = Array.from(root.querySelectorAll<HTMLButtonElement>('[role="tab"]'));
-    expect(tabs.map((tab) => tab.tabIndex)).toEqual([0, -1, -1, -1]);
+    const pages = Array.from(root.querySelectorAll<HTMLButtonElement>("[data-workbench-page]"));
+    expect(pages.map((page) => page.tabIndex)).toEqual([0, 0, 0, 0, 0]);
+    expect(root.querySelector<HTMLSelectElement>("[data-workbench-locale]")?.getAttribute("aria-label")).toBeTruthy();
     for (const control of Array.from(root.querySelectorAll<HTMLElement>("button, input, select, textarea"))) {
       const name = control.getAttribute("aria-label")
         ?? (control.id ? root.querySelector<HTMLLabelElement>(`label[for="${control.id}"]`)?.textContent : null)
@@ -58,7 +59,7 @@ describe("workbench accessibility contracts", () => {
     renderWorkbench(root, populatedWorkbenchModel(), noOpWorkbenchActions(), READ_ONLY_ACCEPTANCE_POLICY);
     const banner = root.querySelector<HTMLElement>('[data-acceptance-banner="true"]')!;
     expect(banner.getAttribute("role")).toBe("status");
-    expect(banner.getAttribute("aria-label")).toBe("Read-only acceptance mode is active");
+    expect(banner.getAttribute("aria-label")).toBe("只读验收模式已启用");
     for (const control of Array.from(root.querySelectorAll<HTMLButtonElement>("button:disabled"))) {
       expect(control.getAttribute("aria-label") ?? control.textContent).toBeTruthy();
     }

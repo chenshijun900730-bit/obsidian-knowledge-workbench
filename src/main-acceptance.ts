@@ -1,4 +1,10 @@
-import { Modal, PluginSettingTab } from "obsidian";
+import {
+  Modal,
+  PluginSettingTab,
+  type App,
+  type Plugin,
+  type SettingDefinitionItem,
+} from "obsidian";
 import { createKnowledgeWorkbenchPluginClass } from "./plugin/knowledge-workbench-plugin";
 import type { ArtifactExpectation } from "./runtime/artifact-binding";
 import {
@@ -8,7 +14,11 @@ import {
 import type { RuntimeComposition } from "./runtime/runtime-composition";
 import { policyFor } from "./runtime/safety-policy";
 import { createChangePreviewModalClass } from "./ui/change-preview-modal";
-import { createSettingsTabClass } from "./ui/settings-tab";
+import { DISABLED_CLOUD_CATALOG_RUNTIME } from "./catalog/disabled-cloud-catalog-runtime";
+import {
+  createWorkbenchI18n,
+  type WorkbenchLocaleProvider,
+} from "./i18n/workbench-i18n";
 
 if (
   __KNOWLEDGE_WORKBENCH_BUILD_MODE__ !== "read-only-acceptance"
@@ -25,31 +35,69 @@ const artifact: ArtifactExpectation = Object.freeze({
   manifestName: __KNOWLEDGE_WORKBENCH_MANIFEST_NAME__,
   artifactBinding: __KNOWLEDGE_WORKBENCH_ARTIFACT_BINDING__,
 });
-const ConcreteChangePreviewModal = createChangePreviewModalClass(Modal, policy);
-const ConcreteSettingsTab = createSettingsTabClass(
-  PluginSettingTab,
-  undefined,
-  policy,
-);
+class ReadOnlyAcceptanceSettingsTab extends PluginSettingTab {
+  constructor(
+    app: App,
+    plugin: Plugin,
+    private readonly getLocale: WorkbenchLocaleProvider,
+  ) {
+    super(app, plugin);
+  }
 
+  getSettingDefinitions(): SettingDefinitionItem[] {
+    const i18n = createWorkbenchI18n(this.getLocale());
+    return [{
+      name: i18n.t("acceptance.settings.name"),
+      desc: i18n.t("acceptance.settings.notice"),
+    }];
+  }
+
+  display(): void {
+    const i18n = createWorkbenchI18n(this.getLocale());
+    const doc = this.containerEl.ownerDocument;
+    this.containerEl.replaceChildren();
+    const heading = doc.createElement("h2");
+    heading.textContent = i18n.t("acceptance.settings.title");
+    const notice = doc.createElement("p");
+    notice.className = "knowledge-workbench__locked";
+    notice.textContent = i18n.t("acceptance.settings.notice");
+    this.containerEl.append(heading, notice);
+  }
+}
+
+// The acceptance composition intentionally omits the normal-only directory picker factory.
 const runtime = Object.freeze({
   policy,
   artifact,
   selectVaultWrites: () => READ_ONLY_VAULT_WRITE_PORT,
-  createQuickCapture: () => ({
+  createQuickCapture: (_app, getLocale) => {
+    void getLocale;
+    return {
     capture: () => READ_ONLY_QUICK_CAPTURE_PORT.capture(),
     dispose: () => undefined,
-  }),
-  createChangePreview: (app, plans) => ({
-    request: (preview) => new ConcreteChangePreviewModal(app, plans).request(preview),
-    requestSample: () => new ConcreteChangePreviewModal(app, plans).requestSample(),
-  }),
-  createHistoryConfirmation: () => ({ request: async () => false }),
-  createSettingsTab: (app, plugin, controller) => new ConcreteSettingsTab(
+    };
+  },
+  createChangePreview: (app, plans, getLocale) => {
+    const ConcreteChangePreviewModal = createChangePreviewModalClass(Modal, policy, getLocale);
+    return {
+      request: (preview) => new ConcreteChangePreviewModal(app, plans).request(preview),
+      requestSample: () => new ConcreteChangePreviewModal(app, plans).requestSample(),
+    };
+  },
+  createHistoryConfirmation: (_app, getLocale) => {
+    void getLocale;
+    return { request: async () => false };
+  },
+  createSettingsTab: (app, plugin, _controller, getLocale) => new ReadOnlyAcceptanceSettingsTab(
     app,
     plugin,
-    controller,
+    getLocale,
   ),
+  createCatalog: () => DISABLED_CLOUD_CATALOG_RUNTIME,
+  createCatalogConfirmation: (_app, getLocale) => {
+    void getLocale;
+    return { request: async () => false };
+  },
 } satisfies RuntimeComposition);
 
 export default createKnowledgeWorkbenchPluginClass(runtime);

@@ -82,6 +82,9 @@ import * as runContractModule from "../../scripts/acceptance-run-contract.mjs";
 interface GitStateModule {
   captureCleanGitState(repoRoot: string): Promise<Readonly<{ commit: string }>>;
   assertCleanGitState(repoRoot: string, expectedCommit: string): Promise<void>;
+  captureTrackedGitState(repoRoot: string): Promise<Readonly<{ commit: string }>>;
+  assertTrackedGitState(repoRoot: string, expectedCommit: string): Promise<void>;
+  assertTrackedBuildInputs(repoRoot: string, paths: readonly string[]): Promise<void>;
 }
 
 interface PreparationState {
@@ -383,6 +386,39 @@ describe("clean Git worktree state", () => {
       .rejects.toThrow(/commit|40|64|object/iu);
     await expect(gitState.assertCleanGitState(repo.root, "a".repeat(64)))
       .rejects.toThrow(/commit|HEAD|expected|match/iu);
+  });
+
+  it("allows unrelated untracked files while rejecting tracked drift", async () => {
+    const repo = await createRepository();
+    await writeFile(join(repo.root, "untracked.txt"), "untracked\n", "utf8");
+
+    const captured = await gitState.captureTrackedGitState(repo.root);
+    expect(captured).toEqual({ commit: repo.commit });
+    await expect(gitState.assertTrackedGitState(repo.root, repo.commit)).resolves.toBeUndefined();
+
+    await writeFile(join(repo.root, "tracked.txt"), "changed\n", "utf8");
+    await expect(gitState.captureTrackedGitState(repo.root))
+      .rejects.toThrow(/tracked|clean|worktree/iu);
+  });
+
+  it("requires every declared build input to be tracked exactly once", async () => {
+    const repo = await createRepository();
+    await writeFile(join(repo.root, "second-tracked.txt"), "second\n", "utf8");
+    runGit(repo.root, ["add", "--", "second-tracked.txt"]);
+    runGit(repo.root, ["commit", "--quiet", "-m", "add second tracked input"]);
+    await writeFile(join(repo.root, "untracked.txt"), "untracked\n", "utf8");
+
+    await expect(gitState.assertTrackedBuildInputs(
+      repo.root,
+      ["second-tracked.txt", "tracked.txt"],
+    ))
+      .resolves.toBeUndefined();
+    await expect(gitState.assertTrackedBuildInputs(repo.root, ["untracked.txt"]))
+      .rejects.toThrow(/tracked|input|resolution/iu);
+    await expect(gitState.assertTrackedBuildInputs(repo.root, ["tracked.txt", "tracked.txt"]))
+      .rejects.toThrow(/duplicate/iu);
+    await expect(gitState.assertTrackedBuildInputs(repo.root, ["../tracked.txt"]))
+      .rejects.toThrow(/relative|normalized|path/iu);
   });
 });
 

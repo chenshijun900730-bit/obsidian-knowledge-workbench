@@ -10,6 +10,7 @@ const UTF8 = new TextDecoder("utf-8", { fatal: true });
 const KNOWN_SETTING_KEYS = new Set([
   "writeEnabled",
   "writePreviewAcknowledged",
+  "locale",
   "openAtStartup",
   "folderRules",
   "excludedPrefixes",
@@ -298,6 +299,7 @@ function buildSeed() {
     settings: {
       writeEnabled: true,
       writePreviewAcknowledged: true,
+      locale: "zh-CN",
       openAtStartup: false,
       folderRules: [],
       excludedPrefixes: [],

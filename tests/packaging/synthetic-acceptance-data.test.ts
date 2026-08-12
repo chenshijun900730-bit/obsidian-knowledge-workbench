@@ -80,6 +80,7 @@ const expectedSeed = {
   settings: {
     writeEnabled: true,
     writePreviewAcknowledged: true,
+    locale: "zh-CN",
     openAtStartup: false,
     folderRules: [],
     excludedPrefixes: [],
@@ -175,6 +176,7 @@ describe("synthetic acceptance plugin-data seed", () => {
     expect(Object.keys(settingsOf(seed))).toEqual([
       "writeEnabled",
       "writePreviewAcknowledged",
+      "locale",
       "openAtStartup",
       "folderRules",
       "excludedPrefixes",

@@ -1,5 +1,10 @@
 import type { App, Modal } from "obsidian";
 import type { AiAction } from "../core/ports";
+import {
+  createWorkbenchI18n,
+  type WorkbenchLocaleProvider,
+  type WorkbenchMessageKey,
+} from "../i18n/workbench-i18n";
 export { renderAiSuggestion } from "./ai-suggestion";
 
 export interface AiPayloadPreview {
@@ -12,7 +17,17 @@ export interface AiPayloadPreview {
 export interface AiPayloadPreviewPresenter { request(preview: AiPayloadPreview): Promise<boolean> }
 export type AiPreviewModalConstructor = abstract new (app: App) => Modal;
 
-export function createAiPayloadPreviewModalClass(ModalBase: AiPreviewModalConstructor) {
+const AI_ACTION_KEYS = {
+  summarize: "ai.action.summarize",
+  "name-cluster": "ai.action.nameCluster",
+  "explain-relation": "ai.action.explainRelation",
+  "suggest-labels": "ai.action.suggestLabels",
+} as const satisfies Record<AiAction, WorkbenchMessageKey>;
+
+export function createAiPayloadPreviewModalClass(
+  ModalBase: AiPreviewModalConstructor,
+  getLocale: WorkbenchLocaleProvider = () => "en",
+) {
   return class AiPayloadPreviewModal extends ModalBase implements AiPayloadPreviewPresenter {
     private preview: AiPayloadPreview | null = null;
     private result: Promise<boolean> | null = null;
@@ -40,10 +55,16 @@ export function createAiPayloadPreviewModalClass(ModalBase: AiPreviewModalConstr
       this.contentEl.addEventListener("keydown", this.handleEscape);
       const preview = this.preview;
       if (preview === null) return;
-      this.setTitle("Confirm private AI payload");
+      const i18n = createWorkbenchI18n(getLocale());
+      this.setTitle(i18n.t("ai.preview.title"));
       const doc = this.contentEl.ownerDocument;
       const summary = doc.createElement("p");
-      summary.textContent = `Action: ${preview.action}; endpoint origin: ${preview.endpointOrigin}; ${preview.noteCount} notes; Approximate characters: ${preview.approximateCharacters}`;
+      summary.textContent = i18n.t("ai.preview.summary", {
+        action: i18n.t(AI_ACTION_KEYS[preview.action]),
+        origin: preview.endpointOrigin,
+        count: i18n.number(preview.noteCount),
+        characters: i18n.number(preview.approximateCharacters),
+      });
       const paths = doc.createElement("ul");
       for (const path of preview.paths) {
         const item = doc.createElement("li");
@@ -53,12 +74,12 @@ export function createAiPayloadPreviewModalClass(ModalBase: AiPreviewModalConstr
       const cancel = doc.createElement("button");
       cancel.type = "button";
       cancel.dataset.action = "cancel";
-      cancel.textContent = "Cancel";
+      cancel.textContent = i18n.t("ai.preview.cancel");
       cancel.addEventListener("click", () => this.finish(false));
       const confirm = doc.createElement("button");
       confirm.type = "button";
       confirm.dataset.action = "confirm";
-      confirm.textContent = "Send selected note text";
+      confirm.textContent = i18n.t("ai.preview.confirm");
       confirm.addEventListener("click", () => this.finish(true));
       this.contentEl.append(summary, paths, cancel, confirm);
       cancel.focus();

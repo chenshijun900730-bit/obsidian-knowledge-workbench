@@ -1,4 +1,5 @@
 import type { DocumentRecord } from "../core/types";
+import type { WorkbenchLocale } from "../i18n/workbench-i18n";
 
 export interface FolderRule {
   readonly prefix: string;
@@ -14,6 +15,7 @@ export interface FolderRuleProposal {
 }
 
 export interface PluginSettings {
+  readonly locale: WorkbenchLocale;
   readonly writeEnabled: boolean;
   readonly writePreviewAcknowledged: boolean;
   readonly openAtStartup: boolean;

@@ -265,13 +265,23 @@ const decodeValidatedEntry = async (value: unknown): Promise<JournalEntry | null
   return entry;
 };
 
-const capValidatedHistory = async (journals: readonly unknown[], limit: number): Promise<unknown[]> => {
+const decodeValidatedJournals = async (journals: readonly unknown[]): Promise<readonly (JournalEntry | null)[]> =>
+  Promise.all(journals.map((value): Promise<JournalEntry | null> => (
+    isLegacySettled(value) ? Promise.resolve(null) : decodeValidatedEntry(value)
+  )));
+
+const capValidatedHistory = (
+  journals: readonly unknown[],
+  entries: readonly (JournalEntry | null)[],
+  limit: number,
+): unknown[] => {
   const capped = clone(journals) as unknown[];
+  const cappedEntries = [...entries];
   while (capped.length > limit) {
     let disposable = capped.findIndex(isLegacySettled);
     let oldest: JournalEntry | null = null;
     for (let index = 0; index < capped.length; index += 1) {
-      const entry = await decodeValidatedEntry(capped[index]);
+      const entry = cappedEntries[index];
       if (entry?.status !== "completed" && entry?.status !== "rolled-back") continue;
       if (disposable >= 0 && isLegacySettled(capped[disposable])) continue;
       if (oldest === null || entry.createdAt < oldest.createdAt || (entry.createdAt === oldest.createdAt && entry.id < oldest.id)) {
@@ -281,6 +291,7 @@ const capValidatedHistory = async (journals: readonly unknown[], limit: number):
     }
     if (disposable < 0) break;
     capped.splice(disposable, 1);
+    cappedEntries.splice(disposable, 1);
   }
   return capped;
 };
@@ -307,18 +318,22 @@ export class OperationJournal {
     let claimedId: string | null = null;
     try {
       return await this.store.mutateJournals(async (journals) => {
+        const entries = await decodeValidatedJournals(journals);
         const ids = new Set<string>();
-        for (const value of journals) {
+        for (let index = 0; index < journals.length; index += 1) {
+          const value = journals[index];
           if (isLegacySettled(value)) continue;
-          const existing = await decodeValidatedEntry(value);
-          if (existing === null) throw new Error("Recovery write-locked by malformed journal record");
+          const existing = entries[index];
+          if (existing === undefined || existing === null) {
+            throw new Error("Recovery write-locked by malformed journal record");
+          }
           if (ids.has(existing.id)) throw new Error(`Duplicate journal ID: ${existing.id}`);
           ids.add(existing.id);
           if (BLOCKING_STATUSES.has(existing.status)) {
             throw new Error("Organization writes are locked by unfinished recovery state");
           }
         }
-        const available = await capValidatedHistory(journals, 99);
+        const available = capValidatedHistory(journals, entries, 99);
         if (available.length > 99) {
           throw new Error("Cannot append journal without discarding protected recovery state");
         }

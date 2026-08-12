@@ -2,7 +2,7 @@
 
 Knowledge Workbench 是一个本地优先的 Obsidian 桌面插件：它在本机建立派生索引，提供 Today、聚焦知识地图、可解释的整理建议、变更预览与可恢复历史。默认只读，写入能力需要用户分阶段明确解锁。
 
-本仓库的自动化不会选择、安装或打开真实库，也不会发布社区插件、自动启用插件、发送遥测或发出真实 AI 请求。真实库只读 acceptance 只有一个受人工明确授权约束的专用事务入口；实现和测试不代表真实库验收已经完成。
+本仓库的自动化不会选择、安装或打开真实库，也不会发布社区插件、自动启用插件、发送遥测或发出真实 AI 请求。真实库的 normal 与 read-only acceptance 安装各有一个受人工明确授权约束的专用事务入口；实现和测试不代表真实库验收已经完成，也不代表 normal 真实库操作已经完成。
 
 ## 环境要求
 
@@ -32,7 +32,7 @@ normal 与 read-only acceptance 是两套不可混用的构建身份：
 
 | 构建身份 | 完整产物 | Manifest 名称 | 编译绑定 | 当前允许的安装方式 |
 | --- | --- | --- | --- | --- |
-| normal | 仓库根目录的 `main.js`、`manifest.json`、`styles.css` | `Knowledge Workbench` | `knowledge-workbench@<version>:normal` | `install:dev`，仅限仓库内专用合成库 |
+| normal | 事务构建的 `main.js`、`manifest.json`、`styles.css` | `Knowledge Workbench` | `knowledge-workbench@<version>:normal` | 合成库使用 `install:dev`；真实库仅在明确授权后使用 `install:normal:real` |
 | read-only acceptance | 隔离目录中的 `main.js`、`manifest.json`、`styles.css`、`acceptance-build.json` | `Knowledge Workbench (Read-only acceptance)` | `knowledge-workbench@<version>:read-only-acceptance` | 合成库按固定手册使用 `install:acceptance:dev`；真实库仅在双人工停止门之间使用 `install:acceptance:real` |
 
 只读验收构建只准备产物，不安装、不启动 Obsidian，也不访问任何 vault；准备产物不构成真实库访问授权：
@@ -44,6 +44,8 @@ npm run build:acceptance
 `install:dev` 始终安装 normal 根目录三件套，且只接受当前 worktree 内 `.dev-vault` 下的专用合成库；它不会安装 acceptance 产物。不要手工复制 acceptance 文件到任何 vault，也不要混用两套构建中的单个文件。
 
 [真实库只读事务安装与人工验收停止门](docs/runbooks/real-vault-read-only-acceptance.md)定义唯一受支持的真实库安装入口以及安装前后的人工停止边界。阅读文档、构建产物或实现通过自动化测试都不是安装、打开、启用、扫描或完成真实库验收的授权；实现和测试不代表真实库验收已经完成。
+
+[真实库 normal 目录安装手册](docs/runbooks/real-vault-normal-catalog.md)定义网络能力 normal 构建的独立事务安装入口。它只负责在插件已禁用且 Obsidian 已退出时发布三个产物；不会自动启用插件、导入 TXT、连接百度或开始核验。
 
 [专用合成库只读验收运行手册](docs/runbooks/synthetic-read-only-acceptance.md)定义固定 prepare/install、自动化停在主机控制之前、人工主机演练和一次性终态证据；它不授权任何真实库操作，也不会改变上面的真实库新授权停止门。
 
@@ -110,6 +112,14 @@ OBSIDIAN_DEV_VAULT="$(pwd)/.dev-vault/acceptance-vault" npm run install:dev
 AI 默认关闭。启用后，每次请求都会先展示动作、endpoint origin、笔记路径、数量与近似字符数；只有用户确认后才读取并发送所选正文。模型输出只显示为建议文本，不会直接进入变更计划或写入路径。
 
 持久设置只保存 Obsidian SecretStorage 的 secret ID，不保存 secret 值；也可以使用仅当前会话有效、卸载时清除的 secret。请只配置自己信任的兼容 endpoint，并阅读预览中的披露。本仓库的自动化不会访问真实 endpoint 或 credential。
+
+## 百度网盘 Cloud Catalog（预检阶段）
+
+Cloud Catalog 的目标是为百度网盘中的 PDF 建立本地可搜索目录，而不是下载 3.2 TB 原文件或把每份 PDF 转成 Markdown。PDF 原件继续留在网盘；派生目录保存在 `~/Library/Application Support/Knowledge Workbench/baidu-catalog/`，不进入 Vault，也不并入 Today、Knowledge Map 或整理写入流程。
+
+normal 构建只组合官方 OOB OAuth、Token 交换和 `GET /rest/2.0/xpan/file?method=list`。OAuth 成功不会自动枚举目录；首个真实请求只允许用户另行确认的非根小目录。当前自动化会拒绝 `/`，并禁止 acceptance 构建获得 OAuth、SecretStorage、百度列表或外部目录写入能力。
+
+设置页会把应用凭据和 OAuth Token 保存到 Obsidian SecretStorage；这能避免秘密直接写入插件 `data.json`，但不应被描述为已经证明由 macOS Keychain 保护。`Remove local credentials` 只删除本机保存的凭据，不等于服务器端撤权。真实操作前必须阅读[百度网盘云端目录小目录验收手册](docs/runbooks/baidu-cloud-catalog-small-folder.md)，接受存储属性，并再次明确批准一次真实 OOB 授权和一个不敏感小目录。阅读文档、自动化通过或此前接受 OAuth 范围均不构成该执行授权。
 
 ## Acceptance 证据
 

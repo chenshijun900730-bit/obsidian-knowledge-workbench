@@ -221,10 +221,25 @@ vi.mock("../../scripts/git-worktree-state.mjs", () => ({
     if (gitProbe.failCapture) throw new Error("sanitized test Git state unavailable");
     return Object.freeze({ commit: gitProbe.commit });
   },
+  assertTrackedBuildInputs: async (_repoRoot: string, _paths: readonly string[]) => undefined,
+  assertTrackedGitState: async (_repoRoot: string, expectedCommit: string) => {
+    gitProbe.assertCalls += 1;
+    if (
+      expectedCommit !== gitProbe.commit
+      || gitProbe.failAssertAtCall === gitProbe.assertCalls
+    ) throw new Error("sanitized test Git state changed");
+  },
+  captureTrackedGitState: async (_repoRoot: string) => {
+    gitProbe.captureCalls += 1;
+    if (gitProbe.failCapture) throw new Error("sanitized test Git state unavailable");
+    return Object.freeze({ commit: gitProbe.commit });
+  },
 }));
 
 // @ts-expect-error The installer is intentionally plain ESM without a declaration file.
 import * as realInstallerModule from "../../scripts/install-acceptance-real.mjs";
+// @ts-expect-error The shared path contract is intentionally plain ESM without declarations.
+import * as vaultCoreModule from "../../scripts/synthetic-vault-install-core.mjs";
 
 interface RealVaultInstallResult {
   readonly artifactBinding: string;
@@ -240,13 +255,23 @@ interface RealInstallerModule {
     repoRoot: string;
     vaultPath: string;
   }>) => Promise<Readonly<RealVaultInstallResult>>;
+  readonly installRealVaultNormal: (input: Readonly<{
+    action: string;
+    repoRoot: string;
+    vaultPath: string;
+  }>) => Promise<Readonly<RealVaultInstallResult>>;
 }
 
 const installer = realInstallerModule as unknown as RealInstallerModule;
-const { installRealVaultAcceptance } = installer;
+const { installRealVaultAcceptance, installRealVaultNormal } = installer;
+const { OBSIDIAN_CONFIG_DIRECTORY } = vaultCoreModule as unknown as {
+  readonly OBSIDIAN_CONFIG_DIRECTORY: string;
+};
 
 const CLI_PATH = resolve("scripts/install-acceptance-real-cli.mjs");
+const NORMAL_CLI_PATH = resolve("scripts/install-normal-real-cli.mjs");
 const AUTHORIZED_ACTION = "INSTALL_READ_ONLY_ACCEPTANCE_IN_THIS_VAULT";
+const NORMAL_AUTHORIZED_ACTION = "INSTALL_NORMAL_BUILD_IN_THIS_VAULT";
 const extractorDescriptor = Object.getOwnPropertyDescriptor(
   installRealVaultAcceptance,
   "extractFailureCategory",
@@ -296,6 +321,151 @@ function runCli(input: string, args: string[] = [], env: NodeJS.ProcessEnv = pro
     input,
   });
 }
+
+function runNormalCli(input: string, args: string[] = [], env: NodeJS.ProcessEnv = process.env) {
+  return spawnSync(process.execPath, [NORMAL_CLI_PATH, ...args], {
+    cwd: resolve("."),
+    encoding: "utf8",
+    env,
+    input,
+  });
+}
+
+describe("real-vault normal installer public entry point", () => {
+  it("exposes one dedicated private-stdin CLI script", () => {
+    const packageJson = JSON.parse(readFileSync(resolve("package.json"), "utf8")) as {
+      scripts?: Record<string, string>;
+    };
+
+    expect(packageJson.scripts?.["install:normal:real"])
+      .toBe("node scripts/install-normal-real-cli.mjs");
+    expect(existsSync(NORMAL_CLI_PATH)).toBe(true);
+    const runbook = readFileSync(
+      resolve("docs/runbooks/real-vault-normal-catalog.md"),
+      "utf8",
+    );
+    expect(runbook).toContain("INSTALL_NORMAL_BUILD_IN_THIS_VAULT");
+    expect(runbook).toContain("does not read Markdown or attachments");
+    expect(runbook).not.toContain("/Users/");
+  });
+
+  it("fails closed on an invalid private stdin request", () => {
+    const result = runNormalCli("{}\n");
+
+    expect(result.status).toBe(1);
+    expect(result.stdout).toBe("");
+    expect(result.stderr).toBe(
+      "Real-vault normal installation failed: invalid-invocation.\n",
+    );
+  });
+
+  it("classifies an unavailable target without echoing private input", () => {
+    const privatePath = "/tmp/private-normal-real-vault-do-not-echo";
+    const result = runNormalCli(`${JSON.stringify({
+      action: NORMAL_AUTHORIZED_ACTION,
+      vaultPath: privatePath,
+    })}\n`);
+
+    expect(result.status).toBe(1);
+    expect(result.stdout).toBe("");
+    expect(result.stderr).toBe(
+      "Real-vault normal installation failed: vault-invalid.\n",
+    );
+    expect(`${result.stdout}${result.stderr}`).not.toContain(privatePath);
+    expect(`${result.stdout}${result.stderr}`).not.toContain("do-not-echo");
+  });
+
+  it("rejects path-bearing arguments and environment overrides", () => {
+    const privatePath = "/tmp/private-normal-override-do-not-echo";
+    const input = `${JSON.stringify({
+      action: NORMAL_AUTHORIZED_ACTION,
+      vaultPath: privatePath,
+    })}\n`;
+    const argumentResult = runNormalCli(input, [privatePath]);
+    const environmentResult = runNormalCli(input, [], {
+      ...process.env,
+      KNOWLEDGE_WORKBENCH_REAL_VAULT: privatePath,
+    });
+
+    for (const result of [argumentResult, environmentResult]) {
+      expect(result.status).toBe(1);
+      expect(result.stdout).toBe("");
+      expect(result.stderr).toBe(
+        "Real-vault normal installation failed: invalid-invocation.\n",
+      );
+      expect(`${result.stdout}${result.stderr}`).not.toContain(privatePath);
+    }
+  });
+
+  it("publishes exactly the normal artifact and preserves opaque data", async () => {
+    const root = await realpath(await mkdtemp(join(tmpdir(), "kwb-real-normal-install-")));
+    const repoRoot = await realpath(resolve("."));
+    const vaultPath = join(root, "vault");
+    const obsidianPath = join(vaultPath, OBSIDIAN_CONFIG_DIRECTORY);
+    const targetPath = join(obsidianPath, "plugins", "knowledge-workbench");
+    const opaqueData = Buffer.from("OPAQUE plugin data\n", "utf8");
+    await mkdir(targetPath, { recursive: true });
+    await writeFile(join(obsidianPath, "community-plugins.json"), "[]\n", "utf8");
+    for (const name of ["main.js", "manifest.json", "styles.css"]) {
+      await copyFile(join(repoRoot, name), join(targetPath, name));
+    }
+    await writeFile(join(targetPath, "data.json"), opaqueData);
+
+    try {
+      const result = await installRealVaultNormal({
+        action: NORMAL_AUTHORIZED_ACTION,
+        repoRoot,
+        vaultPath,
+      });
+
+      expect(result.artifactBinding).toBe("knowledge-workbench@0.1.0:normal");
+      expect(result.priorTarget).toBe("replaced");
+      expect(await readdir(targetPath)).toEqual([
+        "data.json",
+        "main.js",
+        "manifest.json",
+        "styles.css",
+      ]);
+      expect(await readFile(join(targetPath, "data.json"))).toEqual(opaqueData);
+      expect(await readFile(join(targetPath, "manifest.json"))).toEqual(
+        await readFile(join(repoRoot, "manifest.json")),
+      );
+      expect(await readFile(join(targetPath, "styles.css"))).toEqual(
+        await readFile(join(repoRoot, "styles.css")),
+      );
+      expect((await readFile(join(targetPath, "main.js"), "utf8")))
+        .toContain("knowledge-workbench@0.1.0:normal");
+      expect(JSON.parse(await readFile(join(obsidianPath, "community-plugins.json"), "utf8")))
+        .toEqual([]);
+    } finally {
+      await rm(root, { force: true, recursive: true });
+    }
+  });
+
+  it("stops before building when Knowledge Workbench remains enabled", async () => {
+    const root = await realpath(await mkdtemp(join(tmpdir(), "kwb-real-normal-enabled-")));
+    const repoRoot = await realpath(resolve("."));
+    const vaultPath = join(root, "vault");
+    await mkdir(join(vaultPath, OBSIDIAN_CONFIG_DIRECTORY, "plugins"), { recursive: true });
+    await writeFile(
+      join(vaultPath, OBSIDIAN_CONFIG_DIRECTORY, "community-plugins.json"),
+      `${JSON.stringify(["knowledge-workbench"])}\n`,
+      "utf8",
+    );
+
+    try {
+      await expect(installRealVaultNormal({
+        action: NORMAL_AUTHORIZED_ACTION,
+        repoRoot,
+        vaultPath,
+      })).rejects.toSatisfy(
+        (error: unknown) => extractFailureCategory(error) === "plugin-enabled",
+      );
+    } finally {
+      await rm(root, { force: true, recursive: true });
+    }
+  });
+});
 
 describe("real-vault read-only acceptance installer public entry point", () => {
   it("exposes one dedicated no-argument CLI script", () => {

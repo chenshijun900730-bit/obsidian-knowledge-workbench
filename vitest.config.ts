@@ -3,9 +3,10 @@ import { configDefaults, defineConfig } from "vitest/config";
 const performance = process.env.KNOWLEDGE_WORKBENCH_PERFORMANCE === "1";
 const heavyAcceptanceTest = "tests/packaging/install-acceptance-dev-heavy.test.ts";
 const acceptanceWorkflowTests = "tests/packaging/**/*acceptance*.test.ts";
+const nestedWorktrees = ".worktrees/**";
 const baseExclude = performance
-  ? [...configDefaults.exclude]
-  : [...configDefaults.exclude, "tests/performance/**"];
+  ? [...configDefaults.exclude, nestedWorktrees]
+  : [...configDefaults.exclude, nestedWorktrees, "tests/performance/**"];
 
 export default defineConfig({
   test: {
@@ -39,7 +40,7 @@ export default defineConfig({
           environment: "node",
           include: [heavyAcceptanceTest],
           maxWorkers: 2,
-          sequence: { groupOrder: 1 },
+          sequence: { groupOrder: 2 },
         },
       },
     ],

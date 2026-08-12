@@ -9,6 +9,9 @@ import {
   READ_ONLY_ACCEPTANCE_POLICY,
   type RuntimeSafetyPolicy,
 } from "../../src/runtime/safety-policy";
+import type { WorkbenchLocale } from "../../src/i18n/workbench-i18n";
+import { SuggestionService } from "../../src/suggestions/suggestion-service";
+import { suggestionFixture } from "../helpers/suggestion-fixtures";
 
 class ModalSurface {
   readonly contentEl = document.createElementNS("http://www.w3.org/1999/xhtml", "div") as HTMLDivElement;
@@ -26,12 +29,77 @@ class ModalSurface {
 const createModal = (
   service: ChangePlanService,
   policy: RuntimeSafetyPolicy = NORMAL_RUNTIME_POLICY,
+  locale: WorkbenchLocale = "en",
 ) => {
-  const Concrete = createChangePreviewModalClass(ModalSurface as unknown as ModalConstructor, policy);
+  const Concrete = createChangePreviewModalClass(
+    ModalSurface as unknown as ModalConstructor,
+    policy,
+    () => locale,
+  );
   return new Concrete({} as App, service);
 };
 
 describe("ChangePreviewModal", () => {
+  it.each(["zh-CN", "en"] as const)(
+    "preserves an AI-assisted rationale that collides with a built-in sentinel in %s",
+    async (locale) => {
+      const suggestion = new SuggestionService(() => ({
+        source: "ai-assisted",
+        summary: "Review move",
+      })).generate(suggestionFixture().input).suggestions[0]!;
+      const operation = suggestion.operation;
+      const sourcePath = "sourcePath" in operation ? operation.sourcePath : operation.path;
+      const service = new ChangePlanService(FakeVault.withNotes([sourcePath]), () => true);
+      const preview = await service.preview(
+        [operation],
+        [],
+        { [operation.id]: suggestion.rationale },
+        { [operation.id]: suggestion.localRationale },
+      );
+      const modal = createModal(service, NORMAL_RUNTIME_POLICY, locale);
+      const result = modal.request(preview);
+
+      expect(modal.contentEl.textContent).toContain("Review move");
+      expect(modal.contentEl.textContent).not.toContain("Review the move");
+      expect(modal.contentEl.textContent).not.toContain("检查移动操作");
+      modal.contentEl.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+      await expect(result).resolves.toBeNull();
+    },
+  );
+
+  it.each([
+    ["zh-CN", "预览整理更改", "确认所选更改", "取消", "检查移动操作"],
+    ["en", "Preview organization changes", "Confirm selected changes", "Cancel", "Review the move"],
+  ] as const)("renders confirmation, ARIA, disabled state, and Escape in %s", async (
+    locale,
+    title,
+    confirmLabel,
+    cancelLabel,
+    rationaleLabel,
+  ) => {
+    const service = new ChangePlanService(FakeVault.withNotes(["原文/Keep.md"]), () => true);
+    const preview = await service.preview([{
+      id: "move",
+      kind: "move",
+      sourcePath: "原文/Keep.md",
+      targetPath: "Archive/Keep.md",
+    }]);
+    const modal = createModal(service, NORMAL_RUNTIME_POLICY, locale);
+    const result = modal.request(preview);
+    expect(modal.titleEl.textContent).toBe(title);
+    expect(modal.contentEl.querySelector('[role="group"]')?.getAttribute("aria-label")).toBeTruthy();
+    expect(modal.contentEl.textContent).toContain(confirmLabel);
+    expect(modal.contentEl.textContent).toContain(cancelLabel);
+    expect(modal.contentEl.textContent).toContain(rationaleLabel);
+    expect(modal.contentEl.textContent).toContain("原文/Keep.md");
+    const checkbox = modal.contentEl.querySelector<HTMLInputElement>('input[type="checkbox"]')!;
+    checkbox.checked = false;
+    checkbox.dispatchEvent(new Event("change", { bubbles: true }));
+    expect(modal.contentEl.querySelector<HTMLButtonElement>('[data-action="confirm"]')?.disabled).toBe(true);
+    modal.contentEl.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    await expect(result).resolves.toBeNull();
+  });
+
   it("keeps acceptance previews visible but unreachable from every confirmation path", async () => {
     const service = new ChangePlanService(FakeVault.withNotes(["a.md"]), () => true);
     const confirm = vi.spyOn(service, "confirm");
@@ -96,7 +164,7 @@ describe("ChangePreviewModal", () => {
     const result = modal.request(preview);
     expect(modal.contentEl.textContent).toContain("blocked.md → archive/blocked.md");
     expect(modal.contentEl.textContent).toContain("Blocked move");
-    expect(modal.contentEl.textContent).toContain("inbound links");
+    expect(modal.contentEl.textContent).toContain("Inbound links");
     expect(modal.contentEl.querySelector<HTMLButtonElement>('[data-action="confirm"]')?.disabled).toBe(true);
     expect(modal.contentEl.querySelector('[data-affected-count]')?.textContent).toContain("3");
 
@@ -105,7 +173,7 @@ describe("ChangePreviewModal", () => {
     blocked.dispatchEvent(new Event("change", { bubbles: true }));
     expect(modal.contentEl.querySelector<HTMLButtonElement>('[data-action="confirm"]')?.disabled).toBe(false);
     expect(modal.contentEl.querySelector('[data-affected-count]')?.textContent).toContain("1");
-    expect(modal.contentEl.textContent).not.toContain("inbound links");
+    expect(modal.contentEl.textContent).not.toContain("Inbound links");
     modal.contentEl.querySelector<HTMLButtonElement>('[data-action="confirm"]')!.click();
     await expect(result).resolves.toMatchObject({ operations: [{ id: "safe" }] });
   });
@@ -138,9 +206,29 @@ describe("ChangePreviewModal", () => {
     modal.contentEl.querySelector<HTMLButtonElement>('[data-action="confirm"]')!.click();
     await Promise.resolve();
     await Promise.resolve();
-    expect(modal.contentEl.querySelector('[role="alert"]')?.textContent).toContain("Write operations are locked");
+    expect(modal.contentEl.querySelector('[role="alert"]')?.textContent).toContain("The selected changes could not be confirmed");
     expect(modal.contentEl.querySelector<HTMLButtonElement>('[data-action="confirm"]')?.disabled).toBe(true);
     expect((modal as unknown as ModalSurface).closed).toBe(false);
+    modal.cancel();
+    await expect(result).resolves.toBeNull();
+  });
+
+  it.each(["zh-CN", "en"] as const)("never renders runtime confirmation detail in %s", async (locale) => {
+    const service = new ChangePlanService(FakeVault.withNotes(["a.md"]), () => true);
+    const preview = await service.preview([{
+      id: "a",
+      kind: "move",
+      sourcePath: "a.md",
+      targetPath: "archive/a.md",
+    }]);
+    vi.spyOn(service, "confirm").mockRejectedValue(new Error("SECRET-RUNTIME-DETAIL"));
+    const modal = createModal(service, NORMAL_RUNTIME_POLICY, locale);
+    const result = modal.request(preview);
+    modal.contentEl.querySelector<HTMLButtonElement>('[data-action="confirm"]')!.click();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(modal.contentEl.textContent).not.toContain("SECRET-RUNTIME-DETAIL");
+    expect(modal.contentEl.querySelector('[role="alert"]')?.textContent).toBeTruthy();
     modal.cancel();
     await expect(result).resolves.toBeNull();
   });

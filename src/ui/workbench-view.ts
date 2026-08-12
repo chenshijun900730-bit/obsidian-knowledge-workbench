@@ -3,19 +3,42 @@ import { VIEW_TYPE } from "../constants";
 import type { FocusedMap, MapFilter, MapSearchResult } from "../map/map-service";
 import type { TodayViewModel } from "../today/today-service";
 import type { SuggestedOperation } from "../suggestions/suggestion-service";
-import { renderMapPane } from "./map-pane";
-import { renderSuggestionsTab } from "./suggestions-tab";
-import { renderTodayPane, type TodayFilter } from "./today-pane";
+import type { TodayFilter } from "./today-pane";
 import { renderHistory, triggerHistoryDownload, type HistoryViewModel } from "./history-tab";
 import type { AiAction } from "../core/ports";
+import type { AiResult } from "../ai/ai-enhancement-service";
 import { renderAiSuggestion } from "./ai-suggestion";
 import {
   NORMAL_RUNTIME_POLICY,
   type RuntimeSafetyPolicy,
 } from "../runtime/safety-policy";
+import type {
+  CloudCatalogConnectionViewModel,
+  CloudCatalogViewModel,
+} from "../catalog/cloud-catalog-runtime";
+import type { HybridCatalogViewModel } from "../catalog/hybrid-catalog-runtime";
+import type {
+  CatalogDifferenceKind,
+  CatalogVerificationStatus,
+} from "../catalog/hybrid-catalog-types";
+import { renderCloudCatalogTab } from "./cloud-catalog-tab";
+import {
+  createWorkbenchI18n,
+  type WorkbenchI18n,
+  type WorkbenchLocale,
+  type WorkbenchMessageKey,
+} from "../i18n/workbench-i18n";
+import { renderWorkbenchShell, type WorkbenchTab } from "./workbench-shell";
+import { renderStartPage, type StartSection } from "./start-page";
+import type { SettingsSectionsSurface } from "./settings-sections";
+import { renderVerificationPage } from "./verification-page";
+import type { VerificationActionMessageCode } from "./catalog-message-presenter";
 
-export type WorkbenchTab = "workbench" | "suggestions" | "history" | "settings";
+export type { WorkbenchTab } from "./workbench-shell";
+export type { StartSection } from "./start-page";
 export type ProgressStatus = "idle" | "running" | "canceled" | "error" | "complete";
+type HostActionMessageKey = Extract<WorkbenchMessageKey, `host.action.${string}`>;
+type AiStatusMessageKey = Extract<WorkbenchMessageKey, `ai.${string}`>;
 export interface WorkbenchProgress {
   readonly status: ProgressStatus;
   readonly completed: number;
@@ -23,9 +46,20 @@ export interface WorkbenchProgress {
   readonly label: string;
 }
 export interface WorkbenchViewModel {
+  readonly locale: WorkbenchLocale;
   readonly status: "ready" | "canceled" | "error";
   readonly statusMessage?: string;
   readonly activeTab: WorkbenchTab;
+  readonly startSection: StartSection;
+  readonly catalog: CloudCatalogViewModel;
+  readonly catalogConnection?: CloudCatalogConnectionViewModel;
+  readonly hybridCatalog?: HybridCatalogViewModel;
+  readonly verificationRoot: string;
+  readonly verificationRootLocked: boolean;
+  readonly verificationActionMessageCode?: VerificationActionMessageCode;
+  readonly selectedVerificationGroupKeys: readonly string[];
+  readonly selectedCatalogId: string | null;
+  readonly catalogFiltersExpanded: boolean;
   readonly todayFilter: TodayFilter;
   readonly today: TodayViewModel;
   readonly suggestions?: readonly SuggestedOperation[];
@@ -40,6 +74,8 @@ export interface WorkbenchViewModel {
 }
 export interface WorkbenchActions {
   readonly onSelectTab: (tab: WorkbenchTab) => void;
+  readonly onSelectStartSection: (section: StartSection) => void;
+  readonly onSetLocale?: (locale: WorkbenchLocale) => void | Promise<void>;
   readonly onSelectTodayFilter: (filter: TodayFilter) => void;
   readonly onSelectMapFilter: (filter: MapFilter) => void;
   readonly onOpenNote: (path: string) => void;
@@ -62,107 +98,114 @@ export interface WorkbenchActions {
   readonly onExplainRelation?: (paths: readonly string[], targetSuggestionId?: string) => void;
   readonly onSuggestLabels?: (paths: readonly string[]) => void;
   readonly onSuggestionSelectionChange?: () => void;
+  readonly onSearchCatalog: (query: string) => void;
+  readonly onFilterCatalogFolder: (prefix: string) => void;
+  readonly onToggleCatalogStatus: (status: CatalogVerificationStatus) => void;
+  readonly onToggleCatalogDifference: (kind: CatalogDifferenceKind) => void;
+  readonly onFilterCatalogGroup: (groupKey: string) => void;
+  readonly onFilterCatalogTag: (tag: string) => void;
+  readonly onToggleCatalogCloudMissing: (include: boolean) => void;
+  readonly onCatalogPage: (page: number) => void;
+  readonly onCopyCatalogFilename: (catalogId: string) => void;
+  readonly onCopyCatalogPath: (catalogId: string) => void;
+  readonly onOpenBaidu: () => void;
+  readonly onSelectCatalogRecord: (catalogId: string) => void;
+  readonly onSetCatalogFiltersExpanded: (expanded: boolean) => void;
+  readonly onSetVerificationRoot: (value: string) => void;
+  readonly onToggleVerificationGroup: (groupKey: string) => void;
+  readonly onStartSelectedVerification: () => Promise<void>;
+  readonly onResumeSelectedVerification: () => Promise<void>;
+  readonly onCancelSelectedVerification: () => void;
+  readonly onBrowseVerificationRoot?: () => Promise<string | null>;
 }
 
-const TABS: readonly Readonly<{ id: WorkbenchTab; label: string }>[] = [
-  { id: "workbench", label: "Workbench" },
-  { id: "suggestions", label: "Organization suggestions" },
-  { id: "history", label: "Operation history" },
-  { id: "settings", label: "Settings" },
-];
-const ACCEPTANCE_BANNER_TEXT = "Read-only acceptance build. Quick Capture, organization writes, Undo, and AI are unavailable. Derived index data is stored in the plugin's data file.";
-let workbenchRootSequence = 0;
-const workbenchRootIds = new WeakMap<HTMLElement, string>();
-const idPrefixFor = (root: HTMLElement): string => {
-  const existing = workbenchRootIds.get(root);
-  if (existing !== undefined) return existing;
-  const created = `knowledge-workbench-${++workbenchRootSequence}`;
-  workbenchRootIds.set(root, created);
-  return created;
+const PROGRESS_LABEL_KEYS = {
+  Index: "progress.label.index",
+  Map: "progress.label.map",
+} as const satisfies Record<string, WorkbenchMessageKey>;
+
+const progressLabel = (label: string, i18n: WorkbenchI18n): string => {
+  const key = PROGRESS_LABEL_KEYS[label as keyof typeof PROGRESS_LABEL_KEYS];
+  return key === undefined ? label : i18n.t(key);
 };
 
-export function renderWorkbenchTabs(
-  doc: Document,
-  activeTab: WorkbenchTab,
-  onSelect: (tab: WorkbenchTab) => void,
-  idPrefix = "knowledge-workbench",
-): HTMLElement {
-  const tabs = doc.createElement("div");
-  tabs.className = "knowledge-workbench__tabs";
-  tabs.setAttribute("role", "tablist");
-  tabs.setAttribute("aria-label", "Knowledge workbench sections");
-  const buttons = TABS.map(({ id, label }) => {
-    const button = doc.createElement("button");
-    button.type = "button";
-    button.id = `${idPrefix}-tab-${id}`;
-    button.dataset.tab = id;
-    button.dataset.focusKey = `tab-${id}`;
-    button.setAttribute("role", "tab");
-    button.setAttribute("aria-selected", String(id === activeTab));
-    button.setAttribute("aria-controls", `${idPrefix}-panel`);
-    button.tabIndex = id === activeTab ? 0 : -1;
-    button.textContent = label;
-    button.addEventListener("click", () => onSelect(id));
-    tabs.append(button);
-    return button;
+const progressText = (progress: WorkbenchProgress, i18n: WorkbenchI18n): string => {
+  const amount = progress.total === undefined
+    ? i18n.number(progress.completed)
+    : `${i18n.number(progress.completed)} / ${i18n.number(progress.total)}`;
+  const label = progressLabel(progress.label, i18n);
+  if (progress.status === "running") return i18n.t("progress.workbench.running", { label, amount });
+  return i18n.t("progress.workbench.state", {
+    label,
+    status: i18n.t(`progress.status.${progress.status}`),
+    amount,
   });
-  tabs.addEventListener("keydown", (event) => {
-    const current = buttons.indexOf(event.target as HTMLButtonElement);
-    if (current < 0) return;
-    let target = current;
-    if (event.key === "ArrowRight") target = (current + 1) % buttons.length;
-    else if (event.key === "ArrowLeft") target = (current - 1 + buttons.length) % buttons.length;
-    else if (event.key === "Home") target = 0;
-    else if (event.key === "End") target = buttons.length - 1;
-    else return;
-    event.preventDefault();
-    const next = buttons[target]!;
-    next.focus();
-    onSelect(next.dataset.tab as WorkbenchTab);
-  });
-  return tabs;
-}
-
-const progressText = (progress: WorkbenchProgress): string => {
-  const amount = `${progress.completed}${progress.total === undefined ? "" : ` / ${progress.total}`}`;
-  if (progress.status === "running") return `${progress.label} running: ${amount}`;
-  const status = `${progress.status[0]!.toLocaleUpperCase("en-US")}${progress.status.slice(1)}`;
-  return `${progress.label} ${status}: ${amount}`;
 };
 
-const statusText = (model: WorkbenchViewModel): string => {
+const STATUS_MESSAGE_KEYS: Readonly<Record<string, WorkbenchMessageKey>> = {
+  "Executing changes": "host.status.executing",
+  "Changes completed": "host.status.changesCompleted",
+  "Changes rolled back": "host.status.changesRolledBack",
+  "Recovery required; organization writes are locked": "host.status.recoveryLocked",
+  "History cleared": "host.status.historyCleared",
+  "Map calculation failed": "host.status.mapFailed",
+  "Workbench projection refresh failed": "host.status.projectionFailed",
+};
+
+const localizedStatusMessage = (
+  message: string | undefined,
+  status: WorkbenchViewModel["status"],
+  i18n: WorkbenchI18n,
+): string | undefined => {
+  if (message === undefined) return undefined;
+  const key = STATUS_MESSAGE_KEYS[message];
+  if (key !== undefined) return i18n.t(key);
+  if (message.startsWith("host.action.")) {
+    return i18n.t(message as HostActionMessageKey);
+  }
+  if (message === "ai.disabled" || message === "ai.error.safe") return i18n.t(message);
+  if (message.startsWith("Plan not executed:")) return i18n.t("host.status.planNotExecuted");
+  if (message.startsWith("Read-only acceptance mode blocks")) return i18n.t("acceptance.unavailable");
+  return status === "error" ? i18n.t("status.error") : i18n.t("host.status.actionFailed");
+};
+
+const statusText = (model: WorkbenchViewModel, i18n: WorkbenchI18n): string => {
   const progress = [model.scanProgress, model.mapProgress]
     .filter((value) => value.status !== "idle")
-    .map(progressText);
-  if (model.statusMessage !== undefined) progress.push(model.statusMessage);
+    .map((value) => progressText(value, i18n));
+  const message = localizedStatusMessage(model.statusMessage, model.status, i18n);
+  if (message !== undefined) progress.push(message);
   if (progress.length > 0) return progress.join("; ");
-  if (model.status === "error") return model.statusMessage ?? "Error";
-  if (model.status === "canceled") return "Canceled";
-  return "Ready";
+  return i18n.t(`status.${model.status}`);
 };
 
 const appendProgress = (
   parent: HTMLElement,
   progress: WorkbenchProgress,
   onCancel: () => void,
+  i18n: WorkbenchI18n,
   onRetry?: () => void,
 ): void => {
   if (progress.status === "idle") return;
   const wrap = parent.ownerDocument.createElement("div");
   wrap.className = "knowledge-workbench__progress";
   const label = parent.ownerDocument.createElement("span");
-  label.textContent = progressText(progress);
+  label.textContent = progressText(progress, i18n);
   wrap.append(label);
   if (progress.status === "running") {
     const cancel = parent.ownerDocument.createElement("button");
     cancel.type = "button";
-    cancel.textContent = `Cancel ${progress.label}`;
+    cancel.textContent = i18n.t("progress.workbench.cancel", {
+      label: progressLabel(progress.label, i18n),
+    });
     cancel.addEventListener("click", onCancel);
     wrap.append(cancel);
   } else if ((progress.status === "canceled" || progress.status === "error") && onRetry !== undefined) {
     const retry = parent.ownerDocument.createElement("button");
     retry.type = "button";
-    retry.textContent = `Retry ${progress.label}`;
+    retry.textContent = i18n.t("progress.workbench.retry", {
+      label: progressLabel(progress.label, i18n),
+    });
     retry.addEventListener("click", onRetry);
     wrap.append(retry);
   }
@@ -174,9 +217,10 @@ export function renderWorkbench(
   model: WorkbenchViewModel,
   actions: WorkbenchActions,
   policy: RuntimeSafetyPolicy = NORMAL_RUNTIME_POLICY,
+  settingsSurface?: SettingsSectionsSurface,
 ): void {
   const doc = root.ownerDocument;
-  const idPrefix = idPrefixFor(root);
+  const i18n = createWorkbenchI18n(model.locale);
   const active = doc.activeElement;
   const focusKey = active !== null && root.contains(active)
     ? (active as HTMLElement).dataset.focusKey
@@ -199,62 +243,77 @@ export function renderWorkbench(
     onExplainRelation: undefined,
     onSuggestLabels: undefined,
   } : actions;
-  const status = doc.createElement("div");
-  status.className = "knowledge-workbench__status";
-  status.setAttribute("role", "status");
-  status.setAttribute("aria-live", "polite");
-  status.textContent = statusText(model);
-  const tabs = renderWorkbenchTabs(doc, model.activeTab, actions.onSelectTab, idPrefix);
-  const progress = doc.createElement("div");
-  progress.className = "knowledge-workbench__progress-row";
-  appendProgress(progress, model.scanProgress, actions.onCancelScan, actions.onRetryScan);
-  appendProgress(progress, model.mapProgress, actions.onCancelMap);
-  const panel = doc.createElement("div");
-  panel.id = `${idPrefix}-panel`;
-  panel.setAttribute("role", "tabpanel");
-  panel.setAttribute("aria-labelledby", `${idPrefix}-tab-${model.activeTab}`);
-  root.append(tabs);
+  const shell = renderWorkbenchShell(root, {
+    activePage: model.activeTab,
+    i18n,
+    connectionStatus: model.catalog.status === "unavailable"
+      ? "unavailable"
+      : model.catalogConnection?.status ?? "unavailable",
+    onSelectPage: actions.onSelectTab,
+    onSetLocale: (locale) => { void actions.onSetLocale?.(locale); },
+  });
+  shell.status.textContent = statusText(model, i18n);
+  appendProgress(shell.progress, model.scanProgress, actions.onCancelScan, i18n, actions.onRetryScan);
+  appendProgress(shell.progress, model.mapProgress, actions.onCancelMap, i18n);
   if (readOnlyAcceptance) {
     const banner = doc.createElement("div");
     banner.className = "knowledge-workbench__acceptance-banner";
     banner.dataset.acceptanceBanner = "true";
     banner.setAttribute("role", "status");
-    banner.setAttribute("aria-label", "Read-only acceptance mode is active");
-    banner.textContent = ACCEPTANCE_BANNER_TEXT;
-    root.append(banner);
+    banner.setAttribute("aria-label", i18n.t("acceptance.banner.aria"));
+    banner.textContent = i18n.t("acceptance.banner");
+    shell.status.before(banner);
   }
-  root.append(status, progress, panel);
+  const panel = shell.panel;
+  if (model.activeTab !== "settings") settingsSurface?.dispose();
   if (model.activeTab === "workbench") {
-    const split = doc.createElement("div");
-    split.className = "knowledge-workbench__split";
-    const today = doc.createElement("section");
-    today.className = "knowledge-workbench__today";
-    today.setAttribute("aria-label", "Today");
-    const map = doc.createElement("section");
-    map.className = "knowledge-workbench__map";
-    map.setAttribute("aria-label", "Knowledge map");
-    split.append(today, map);
-    panel.append(split);
-    renderTodayPane(today, model.today, model.todayFilter, surfaceActions, policy);
-    renderMapPane(map, model.map, model.mapFilter, model.searchQuery, model.searchResults, surfaceActions);
-  } else if (model.activeTab === "suggestions") {
-    renderSuggestionsTab(panel, model.suggestions ?? [], surfaceActions.onPreviewSuggestionIds ?? ((ids) => {
-      for (const id of ids) surfaceActions.onPreviewSuggestion(id);
-    }), surfaceActions.onExplainRelation, surfaceActions.onSuggestionSelectionChange, policy);
+    renderStartPage(panel, { model, actions: surfaceActions, policy });
+  } else if (model.activeTab === "verification") {
+    renderVerificationPage(panel, {
+      i18n,
+      rootPath: model.verificationRoot,
+      rootLocked: model.verificationRootLocked,
+      actionMessageCode: model.verificationActionMessageCode,
+      selectedGroupKeys: model.selectedVerificationGroupKeys,
+      connection: model.catalogConnection,
+      hybrid: model.hybridCatalog,
+      actions: {
+        onRootChange: surfaceActions.onSetVerificationRoot,
+        onToggleGroup: surfaceActions.onToggleVerificationGroup,
+        onStart: surfaceActions.onStartSelectedVerification,
+        onResume: surfaceActions.onResumeSelectedVerification,
+        onCancel: surfaceActions.onCancelSelectedVerification,
+        ...(surfaceActions.onBrowseVerificationRoot === undefined ? {} : {
+          onBrowseRoot: surfaceActions.onBrowseVerificationRoot,
+        }),
+      },
+    });
   } else if (model.activeTab === "history") {
     renderHistory(panel, model.history ?? { entries: [] }, {
       onUndo: surfaceActions.onUndoHistory ?? (() => undefined),
       onViewRecovery: surfaceActions.onViewRecovery ?? (() => undefined),
       onClear: surfaceActions.onClearHistory ?? (() => undefined),
       onExport: surfaceActions.onExportHistory ?? (() => undefined),
-    }, policy);
+    }, policy, i18n);
+  } else if (model.activeTab === "cloud-catalog") {
+    renderCloudCatalogTab(panel, model.catalog, surfaceActions, {
+      i18n: createWorkbenchI18n(model.locale),
+      selectedCatalogId: model.selectedCatalogId,
+      filtersExpanded: model.catalogFiltersExpanded,
+    });
+  } else if (settingsSurface !== undefined) {
+    settingsSurface.render(panel, model.locale);
   } else {
     const placeholder = doc.createElement("p");
     placeholder.className = "knowledge-workbench__placeholder";
-    placeholder.textContent = "Settings are available from Obsidian's settings screen.";
+    placeholder.textContent = i18n.t(readOnlyAcceptance
+      ? "acceptance.settings.placeholder"
+      : "host.settings.openObsidian");
     panel.append(placeholder);
   }
-  if (!readOnlyAcceptance && model.aiSuggestion !== undefined) renderAiSuggestion(panel, model.aiSuggestion.text);
+  if (!readOnlyAcceptance && model.aiSuggestion !== undefined) {
+    renderAiSuggestion(panel, model.aiSuggestion.text, i18n);
+  }
   if (focusKey !== undefined) {
     const target = Array.from(root.querySelectorAll<HTMLElement>("[data-focus-key]"))
       .find((candidate) => candidate.dataset.focusKey === focusKey);
@@ -272,7 +331,9 @@ export interface WorkbenchViewController {
   snapshot(): WorkbenchViewModel;
   subscribe(listener: () => void): () => void;
   selectTab(tab: WorkbenchTab): void;
+  selectStartSection(section: StartSection): void;
   setTodayFilter(filter: TodayFilter): void;
+  setLocale(locale: WorkbenchLocale): Promise<void>;
   setMapFilter(filter: MapFilter): Promise<void>;
   openNote(path: string): Promise<void>;
   startQuickCapture(): Promise<string | null>;
@@ -281,6 +342,25 @@ export interface WorkbenchViewController {
   pin(id: string): Promise<void>;
   dismiss(id: string, mtime: number): Promise<void>;
   searchMap(query: string): void;
+  searchCatalog(query: string): void;
+  selectCatalogRecord(catalogId: string): void;
+  setCatalogFiltersExpanded(expanded: boolean): void;
+  filterCatalogFolder(prefix: string): void;
+  toggleCatalogStatus(status: CatalogVerificationStatus): void;
+  toggleCatalogDifference(kind: CatalogDifferenceKind): void;
+  filterCatalogGroup(groupKey: string): void;
+  filterCatalogTag(tag: string): void;
+  toggleCatalogCloudMissing(include: boolean): void;
+  selectCatalogPage(page: number): void;
+  copyCatalogFilename(catalogId: string): Promise<void>;
+  copyCatalogPath(catalogId: string): Promise<void>;
+  openBaidu(): Promise<void>;
+  setVerificationRoot(value: string): void;
+  chooseCatalogRoot?(initialRoot: string): Promise<string | null>;
+  toggleVerificationGroup(groupKey: string): void;
+  startSelectedVerification(): Promise<void>;
+  resumeSelectedVerification(): Promise<void>;
+  cancelSelectedVerification(): void;
   selectCenter(center: Readonly<{ kind: "document" | "topic"; id: string }>): Promise<void>;
   previewSuggestion(suggestionId: string): Promise<void>;
   previewSuggestionIds(suggestionIds: readonly string[]): Promise<void>;
@@ -290,10 +370,10 @@ export interface WorkbenchViewController {
   viewRecovery(id: string): Promise<void>;
   startInitialScan(): Promise<void>;
   reportError(message: string): void;
-  summarize?(paths: readonly string[]): Promise<unknown>;
-  nameCluster?(paths: readonly string[]): Promise<unknown>;
-  explainRelation?(paths: readonly string[], targetSuggestionId?: string): Promise<unknown>;
-  suggestLabels?(paths: readonly string[]): Promise<unknown>;
+  summarize?(paths: readonly string[]): Promise<AiResult<string>>;
+  nameCluster?(paths: readonly string[]): Promise<AiResult<string>>;
+  explainRelation?(paths: readonly string[], targetSuggestionId?: string): Promise<AiResult<string>>;
+  suggestLabels?(paths: readonly string[]): Promise<AiResult<string>>;
   notifySuggestionSelectionChanged?(): void;
 }
 
@@ -307,12 +387,18 @@ export function createWorkbenchViewClass(
   return class WorkbenchView extends ItemViewBase {
     private unsubscribe: (() => void) | null = null;
 
-    constructor(leaf: WorkspaceLeaf, private readonly controller: WorkbenchViewController) {
+    constructor(
+      leaf: WorkspaceLeaf,
+      private readonly controller: WorkbenchViewController,
+      private readonly settingsSurface?: SettingsSectionsSurface,
+    ) {
       super(leaf);
     }
 
     getViewType(): string { return VIEW_TYPE; }
-    getDisplayText(): string { return "Knowledge workbench"; }
+    getDisplayText(): string {
+      return createWorkbenchI18n(this.controller.snapshot().locale).t("host.view.title");
+    }
     getIcon(): string { return "network"; }
 
     async onOpen(): Promise<void> {
@@ -324,48 +410,100 @@ export function createWorkbenchViewClass(
     async onClose(): Promise<void> {
       this.unsubscribe?.();
       this.unsubscribe = null;
+      this.settingsSurface?.dispose();
       this.contentEl.replaceChildren();
     }
 
     private render(): void {
+      const chooseCatalogRoot = policy.mode === "normal"
+        ? this.controller.chooseCatalogRoot?.bind(this.controller)
+        : undefined;
       renderWorkbench(this.contentEl, this.controller.snapshot(), {
         onSelectTab: (tab) => this.controller.selectTab(tab),
+        onSelectStartSection: (section) => this.controller.selectStartSection(section),
+        onSetLocale: (locale) => this.runAction("host.action.languageFailed", () => this.controller.setLocale(locale)),
         onSelectTodayFilter: (filter) => this.controller.setTodayFilter(filter),
-        onSelectMapFilter: (filter) => this.runAction("Map filter failed", () => this.controller.setMapFilter(filter)),
-        onOpenNote: (path) => this.runAction("Open note failed", () => this.controller.openNote(path)),
-        onQuickCapture: () => this.runAction("Quick capture failed", () => this.controller.startQuickCapture()),
+        onSelectMapFilter: (filter) => this.runAction("host.action.mapFilterFailed", () => this.controller.setMapFilter(filter)),
+        onOpenNote: (path) => this.runAction("host.action.openNoteFailed", () => this.controller.openNote(path)),
+        onQuickCapture: () => this.runAction("host.action.quickCaptureFailed", () => this.controller.startQuickCapture()),
         onCancelScan: () => this.controller.cancelScan(),
         onCancelMap: () => this.controller.cancelMap(),
-        onPin: (id) => this.runAction("Pin failed", () => this.controller.pin(id)),
-        onDismiss: (id, mtime) => this.runAction("Dismiss failed", () => this.controller.dismiss(id, mtime)),
+        onPin: (id) => this.runAction("host.action.pinFailed", () => this.controller.pin(id)),
+        onDismiss: (id, mtime) => this.runAction("host.action.dismissFailed", () => this.controller.dismiss(id, mtime)),
         onSearchMap: (query) => this.controller.searchMap(query),
-        onSelectCenter: (center) => this.runAction("Map focus failed", () => this.controller.selectCenter(center)),
-        onPreviewSuggestion: (suggestionId) => this.runAction("Change preview failed", () => this.controller.previewSuggestion(suggestionId)),
-        onPreviewSuggestionIds: (suggestionIds) => this.runAction("Change preview failed", () => this.controller.previewSuggestionIds(suggestionIds)),
-        onRetryScan: () => this.runAction("Index retry failed", () => this.controller.startInitialScan()),
-        onUndoHistory: (id) => this.runAction("Undo preview failed", () => this.controller.previewUndo(id)),
-        onViewRecovery: (id) => this.runAction("Recovery view failed", () => this.controller.viewRecovery(id)),
-        onClearHistory: () => this.runAction("History clear failed", () => this.controller.requestClearHistory()),
-        onExportHistory: () => this.runAction("History export failed", async () => {
+        onSelectCenter: (center) => this.runAction("host.action.mapFocusFailed", () => this.controller.selectCenter(center)),
+        onPreviewSuggestion: (suggestionId) => this.runAction("host.action.changePreviewFailed", () => this.controller.previewSuggestion(suggestionId)),
+        onPreviewSuggestionIds: (suggestionIds) => this.runAction("host.action.changePreviewFailed", () => this.controller.previewSuggestionIds(suggestionIds)),
+        onRetryScan: () => this.runAction("host.action.indexRetryFailed", () => this.controller.startInitialScan()),
+        onUndoHistory: (id) => this.runAction("host.action.undoPreviewFailed", () => this.controller.previewUndo(id)),
+        onViewRecovery: (id) => this.runAction("host.action.recoveryViewFailed", () => this.controller.viewRecovery(id)),
+        onClearHistory: () => this.runAction("host.action.historyClearFailed", () => this.controller.requestClearHistory()),
+        onExportHistory: () => this.runAction("host.action.historyExportFailed", async () => {
           const exportedAt = new Date().toISOString();
           const json = await this.controller.historyExportJson(exportedAt);
           triggerHistoryDownload(this.contentEl, json, `knowledge-workbench-history-${exportedAt.slice(0, 10)}.json`);
         }),
-        onSummarize: (paths) => this.runAction("AI suggestion unavailable", () => this.controller.summarize?.(paths) ?? Promise.resolve()),
-        onNameCluster: (paths) => this.runAction("AI suggestion unavailable", () => this.controller.nameCluster?.(paths) ?? Promise.resolve()),
-        onExplainRelation: (paths, targetSuggestionId) => this.runAction("AI suggestion unavailable", () => this.controller.explainRelation?.(paths, targetSuggestionId) ?? Promise.resolve()),
-        onSuggestLabels: (paths) => this.runAction("AI suggestion unavailable", () => this.controller.suggestLabels?.(paths) ?? Promise.resolve()),
+        onSummarize: (paths) => this.runAiAction(() => this.controller.summarize?.(paths)),
+        onNameCluster: (paths) => this.runAiAction(() => this.controller.nameCluster?.(paths)),
+        onExplainRelation: (paths, targetSuggestionId) => this.runAiAction(
+          () => this.controller.explainRelation?.(paths, targetSuggestionId),
+        ),
+        onSuggestLabels: (paths) => this.runAiAction(() => this.controller.suggestLabels?.(paths)),
         onSuggestionSelectionChange: () => this.controller.notifySuggestionSelectionChanged?.(),
-      }, policy);
+        onSearchCatalog: (query) => this.controller.searchCatalog(query),
+        onFilterCatalogFolder: (prefix) => this.controller.filterCatalogFolder(prefix),
+        onToggleCatalogStatus: (status) => this.controller.toggleCatalogStatus(status),
+        onToggleCatalogDifference: (kind) => this.controller.toggleCatalogDifference(kind),
+        onFilterCatalogGroup: (groupKey) => this.controller.filterCatalogGroup(groupKey),
+        onFilterCatalogTag: (tag) => this.controller.filterCatalogTag(tag),
+        onToggleCatalogCloudMissing: (include) => this.controller.toggleCatalogCloudMissing(include),
+        onCatalogPage: (page) => this.controller.selectCatalogPage(page),
+        onCopyCatalogFilename: (catalogId) => this.runAction("host.action.copyFilenameFailed", () => this.controller.copyCatalogFilename(catalogId)),
+        onCopyCatalogPath: (catalogId) => this.runAction("host.action.copyPathFailed", () => this.controller.copyCatalogPath(catalogId)),
+        onOpenBaidu: () => this.runAction("host.action.openBaiduFailed", () => this.controller.openBaidu()),
+        onSelectCatalogRecord: (catalogId) => this.controller.selectCatalogRecord(catalogId),
+        onSetCatalogFiltersExpanded: (expanded) => this.controller.setCatalogFiltersExpanded(expanded),
+        onSetVerificationRoot: (value) => this.controller.setVerificationRoot(value),
+        onToggleVerificationGroup: (groupKey) => this.controller.toggleVerificationGroup(groupKey),
+        onStartSelectedVerification: () => this.controller.startSelectedVerification(),
+        onResumeSelectedVerification: () => this.controller.resumeSelectedVerification(),
+        onCancelSelectedVerification: () => this.controller.cancelSelectedVerification(),
+        ...(chooseCatalogRoot === undefined ? {} : {
+          onBrowseVerificationRoot: () => chooseCatalogRoot(
+            this.controller.snapshot().verificationRoot,
+          ),
+        }),
+      }, policy, this.settingsSurface);
     }
 
-    private runAction(label: string, operation: () => Promise<unknown>): void {
+    private runAction(labelKey: HostActionMessageKey, operation: () => Promise<unknown>): void {
       try {
-        void operation().catch((error: unknown) => {
-          this.controller.reportError(`${label}: ${error instanceof Error ? error.message : String(error)}`);
+        void operation().catch(() => {
+          this.controller.reportError(labelKey);
         });
-      } catch (error) {
-        this.controller.reportError(`${label}: ${error instanceof Error ? error.message : String(error)}`);
+      } catch {
+        this.controller.reportError(labelKey);
+      }
+    }
+
+    private runAiAction(operation: () => Promise<AiResult<string>> | undefined): void {
+      try {
+        const result = operation();
+        if (result === undefined) {
+          this.controller.reportError("ai.disabled" satisfies AiStatusMessageKey);
+          return;
+        }
+        void result.then((value) => {
+          if (value.kind === "local-fallback") {
+            this.controller.reportError((value.reason === "disabled"
+              ? "ai.disabled"
+              : "ai.error.safe") satisfies AiStatusMessageKey);
+          }
+        }).catch(() => {
+          this.controller.reportError("ai.error.safe" satisfies AiStatusMessageKey);
+        });
+      } catch {
+        this.controller.reportError("ai.error.safe" satisfies AiStatusMessageKey);
       }
     }
   };

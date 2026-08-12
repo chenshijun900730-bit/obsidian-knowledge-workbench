@@ -1,4 +1,8 @@
 import type { App, Modal } from "obsidian";
+import {
+  createWorkbenchI18n,
+  type WorkbenchLocaleProvider,
+} from "../i18n/workbench-i18n";
 
 export interface QuickCaptureRequest {
   request(): Promise<string | null>;
@@ -10,7 +14,10 @@ export interface ModalConstructor {
   new (app: App): Modal;
 }
 
-export function createQuickCaptureModalClass(ModalBase: ModalConstructor) {
+export function createQuickCaptureModalClass(
+  ModalBase: ModalConstructor,
+  getLocale: WorkbenchLocaleProvider = () => "en",
+) {
   return class QuickCaptureModal extends ModalBase implements QuickCaptureRequest {
     private result: Promise<string | null> | null = null;
     private settleResult: ((value: string | null) => void) | null = null;
@@ -27,12 +34,13 @@ export function createQuickCaptureModalClass(ModalBase: ModalConstructor) {
     }
 
     onOpen(): void {
-      this.setTitle("Quick capture");
+      const i18n = createWorkbenchI18n(getLocale());
+      this.setTitle(i18n.t("quickCapture.title"));
       this.contentEl.replaceChildren();
       const form = this.contentEl.ownerDocument.createElement("form");
       form.className = "knowledge-workbench__capture-form";
       const label = this.contentEl.ownerDocument.createElement("label");
-      label.textContent = "Note title";
+      label.textContent = i18n.t("quickCapture.field.title");
       const input = this.contentEl.ownerDocument.createElement("input");
       input.type = "text";
       input.autocomplete = "off";
@@ -42,11 +50,11 @@ export function createQuickCaptureModalClass(ModalBase: ModalConstructor) {
       actions.className = "knowledge-workbench__item-actions";
       const cancel = this.contentEl.ownerDocument.createElement("button");
       cancel.type = "button";
-      cancel.textContent = "Cancel";
+      cancel.textContent = i18n.t("quickCapture.cancel");
       cancel.addEventListener("click", () => this.cancel());
       const create = this.contentEl.ownerDocument.createElement("button");
       create.type = "submit";
-      create.textContent = "Create";
+      create.textContent = i18n.t("quickCapture.create");
       actions.append(cancel, create);
       form.append(label, actions);
       form.addEventListener("submit", (event) => {

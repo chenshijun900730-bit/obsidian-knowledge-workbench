@@ -1,6 +1,7 @@
 // @ts-expect-error jsdom is a Vitest runtime dependency without bundled declarations.
 import * as jsdomRuntime from "jsdom";
 import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
+import { DISABLED_CLOUD_CATALOG_RUNTIME } from "../../src/catalog/disabled-cloud-catalog-runtime";
 import { ClassificationService } from "../../src/classification/classification-service";
 import { PLUGIN_DATA_SCHEMA_VERSION } from "../../src/constants";
 import type { PluginDataPort } from "../../src/core/ports";
@@ -104,6 +105,7 @@ const historicalUnsafeData = (): PluginData => ({
   settings: {
     writeEnabled: true,
     writePreviewAcknowledged: true,
+    locale: "zh-CN",
     openAtStartup: true,
     folderRules: [],
     excludedPrefixes: [],
@@ -327,6 +329,8 @@ const createAcceptanceControllerFixture = async () => {
       createClient,
       delay: vi.fn(async () => undefined),
     },
+    catalog: DISABLED_CLOUD_CATALOG_RUNTIME,
+    catalogConfirmation: { request: async () => false },
   };
   const controller = new WorkbenchController(dependencies);
   const suggestions = controller.refreshSuggestions();
@@ -384,6 +388,8 @@ describe("read-only acceptance automated safety", () => {
       "createChangePreview",
       "createHistoryConfirmation",
       "createSettingsTab",
+      "createCatalog",
+      "createCatalogConfirmation",
     ]);
     expect(runtime.policy).toEqual(READ_ONLY_ACCEPTANCE_POLICY);
     expect(Object.isFrozen(runtime.policy)).toBe(true);
@@ -395,6 +401,8 @@ describe("read-only acceptance automated safety", () => {
     });
     expect(Object.isFrozen(runtime.artifact)).toBe(true);
     expect("createAi" in runtime).toBe(false);
+    expect("createWorkbenchSettingsSurface" in runtime).toBe(false);
+    expect("createCatalogDirectoryPicker" in runtime).toBe(false);
 
     const candidateWrites = {
       renameFile: vi.fn(async () => undefined),
@@ -403,13 +411,24 @@ describe("read-only acceptance automated safety", () => {
     expect(runtime.selectVaultWrites(candidateWrites)).toBe(READ_ONLY_VAULT_WRITE_PORT);
     expect(candidateWrites.renameFile).not.toHaveBeenCalled();
     expect(candidateWrites.setOwnedField).not.toHaveBeenCalled();
-    await expect(runtime.createQuickCapture({} as never).capture()).resolves.toBeNull();
-    await expect(runtime.createHistoryConfirmation({} as never).request()).resolves.toBe(false);
+    await expect(runtime.createQuickCapture({} as never, () => "zh-CN").capture()).resolves.toBeNull();
+    await expect(runtime.createHistoryConfirmation({} as never, () => "zh-CN").request()).resolves.toBe(false);
+    const catalog = runtime.createCatalog({} as never);
+    expect(catalog.connection).toBeUndefined();
+    expect(catalog.directoryDiscovery).toBeUndefined();
+    expect(catalog.snapshot()).toMatchObject({
+      status: "unavailable",
+      messageCode: "catalog-unavailable",
+    });
+    await expect(
+      runtime.createCatalogConfirmation({} as never, () => "zh-CN").request("/样本"),
+    ).resolves.toBe(false);
 
     const confirm = vi.fn(async () => { throw new Error("must not confirm"); });
     const previewPresenter = runtime.createChangePreview(
       {} as never,
       { confirm } as unknown as ChangePlanService,
+      () => "en",
     );
     const previewResult = previewPresenter.request(acceptancePreview());
     const acceptanceDocument = acceptanceDom.window.document;
@@ -456,13 +475,11 @@ describe("read-only acceptance automated safety", () => {
       {} as never,
       {} as never,
       settingsController as never,
+      () => "zh-CN",
     ) as unknown as { readonly containerEl: HTMLElement; display(): void };
     settingsTab.display();
     expect(settingsTab.containerEl.textContent).toContain(
-      "Organization writes are unavailable in the read-only acceptance build.",
-    );
-    expect(settingsTab.containerEl.textContent).toContain(
-      "AI configuration and requests are unavailable in the read-only acceptance build.",
+      "只读验收版本不提供整理写入、AI 配置或请求，也不提供云端连接、本地导入和核验。",
     );
     expect(settingsTab.containerEl.querySelector('[data-write-enabled="true"]')).toBeNull();
     expect(settingsTab.containerEl.querySelector('[data-ai-enabled="true"]')).toBeNull();

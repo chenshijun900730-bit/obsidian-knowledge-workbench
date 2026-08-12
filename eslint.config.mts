@@ -3,7 +3,7 @@ import globals from "globals";
 import { defineConfig, globalIgnores } from "eslint/config";
 
 export default defineConfig(
-  globalIgnores(["node_modules", "coverage", ".dev-vault/**", "dist/**", "main.js", "package-lock.json", "versions.json"]),
+  globalIgnores(["node_modules", "coverage", ".dev-vault/**", ".worktrees/**", "dist/**", "main.js", "package-lock.json", "versions.json"]),
   {
     languageOptions: {
       globals: {

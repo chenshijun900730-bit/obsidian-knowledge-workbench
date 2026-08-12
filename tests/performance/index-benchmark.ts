@@ -1,5 +1,6 @@
 import { cpus, platform } from "node:os";
 import { performance } from "node:perf_hooks";
+import { DISABLED_CLOUD_CATALOG_RUNTIME } from "../../src/catalog/disabled-cloud-catalog-runtime";
 import { ClassificationService } from "../../src/classification/classification-service";
 import type { PluginDataPort } from "../../src/core/ports";
 import type { DocumentRecord } from "../../src/core/types";
@@ -202,6 +203,8 @@ export async function benchmarkIndex(fixture: GeneratedFixture): Promise<Benchma
       historyConfirmation: { request: () => Promise.resolve(false) },
       clock,
       projectionScheduler: measuredScheduler,
+      catalog: DISABLED_CLOUD_CATALOG_RUNTIME,
+      catalogConfirmation: { request: async () => false },
     });
 
     // Initial projection work and view subscription are setup, not incremental samples.

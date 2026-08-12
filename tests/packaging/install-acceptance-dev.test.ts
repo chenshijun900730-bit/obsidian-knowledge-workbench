@@ -648,6 +648,8 @@ async function clonePreparedRepository(): Promise<RepositoryFixture> {
   });
   await cp(join(templateRoot, ".dev-vault"), join(repoRoot, ".dev-vault"), { recursive: true });
   const canonical = await realpath(repoRoot);
+  runGit(canonical, ["config", "user.email", "acceptance@example.invalid"]);
+  runGit(canonical, ["config", "user.name", "Acceptance Test"]);
   expect(runGit(canonical, ["status", "--porcelain=v1", "--untracked-files=all"])).toBe("");
   return pathsFor(canonical);
 }

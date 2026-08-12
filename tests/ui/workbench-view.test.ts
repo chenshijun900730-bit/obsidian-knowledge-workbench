@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import { createWorkbenchViewClass, renderWorkbench, type ItemViewConstructor } from "../../src/ui/workbench-view";
 import { createQuickCaptureModalClass, type ModalConstructor } from "../../src/ui/quick-capture-modal";
 import { createSettingsTabClass, type PluginSettingTabConstructor } from "../../src/ui/settings-tab";
+import { createSettingsSectionsSurface } from "../../src/ui/settings-sections";
 import {
   activateWorkbench,
   activateWorkbenchWithRetry,
@@ -30,6 +31,12 @@ import {
   quickCaptureFixture,
   type ProjectionSchedulerDependency,
 } from "../helpers/ui-fixtures";
+import {
+  FakeCloudCatalogConnectionRuntime,
+  FakeCloudCatalogRuntime,
+  FakeHybridCatalogRuntime,
+} from "../fakes/fake-cloud-catalog-runtime";
+import { HybridCatalogError } from "../../src/catalog/hybrid-catalog-types";
 
 const createTestDiv = (): HTMLDivElement => document.createElementNS(
   "http://www.w3.org/1999/xhtml",
@@ -37,6 +44,369 @@ const createTestDiv = (): HTMLDivElement => document.createElementNS(
 ) as HTMLDivElement;
 
 describe("workbench", () => {
+  it.each([
+    [
+      "zh-CN",
+      ["今日", "快速记录", "查看笔记", "知识地图", "搜索知识地图", "选择详情", "AI 建议"],
+      ["整理建议", "预览所选", "用 AI 解释所选关系"],
+      ["筛选今日项目", "筛选知识地图节点", "聚焦知识图谱"],
+    ],
+    [
+      "en",
+      ["Today", "Quick capture", "Review note", "Knowledge map", "Search map", "Selection details", "AI suggestion"],
+      ["Organization suggestions", "Preview selected", "Explain selected relation with AI"],
+      ["Filter today items", "Filter map nodes", "Focused knowledge graph"],
+    ],
+  ] as const)("renders Today, map, suggestions, AI, and ARIA text in %s", (
+    locale,
+    overviewLabels,
+    suggestionLabels,
+    ariaLabels,
+  ) => {
+    const root = createTestDiv();
+    const suggestion = {
+      operation: {
+        id: "suggestion",
+        kind: "move" as const,
+        sourcePath: "原文/Keep.md",
+        targetPath: "Archive/Keep.md",
+      },
+      localRationale: {
+        source: "local" as const,
+        summary: "runtime rationale",
+        signals: ["folder-rule"],
+        confidence: "high" as const,
+        impact: 80,
+      },
+      rationale: {
+        source: "local" as const,
+        summary: "runtime rationale",
+        signals: ["folder-rule"],
+        confidence: "high" as const,
+        impact: 80,
+      },
+    };
+    const base = {
+      ...populatedWorkbenchModel(),
+      locale,
+      aiSuggestion: { action: "summarize" as const, text: "MODEL-OUTPUT" },
+      suggestions: [suggestion],
+    };
+    renderWorkbench(root, base, noOpWorkbenchActions());
+    for (const label of overviewLabels) expect(root.textContent).toContain(label);
+    for (const label of ariaLabels) expect(root.querySelector(`[aria-label="${label}"]`)).not.toBeNull();
+    expect(root.textContent).toContain("MODEL-OUTPUT");
+
+    renderWorkbench(root, { ...base, startSection: "suggestions" }, noOpWorkbenchActions());
+    for (const label of suggestionLabels) expect(root.textContent).toContain(label);
+    expect(root.textContent).toContain("原文/Keep.md");
+    expect(root.querySelector<HTMLButtonElement>("button:disabled")).not.toBeNull();
+  });
+
+  it.each([
+    ["zh-CN", "快速记录", "笔记标题", "创建", "取消"],
+    ["en", "Quick capture", "Note title", "Create", "Cancel"],
+  ] as const)("renders the quick-capture modal in %s with focus and Escape behavior", async (
+    locale,
+    title,
+    field,
+    create,
+    cancel,
+  ) => {
+    class LocalizedModalSurface {
+      readonly contentEl = createTestDiv();
+      readonly titleEl = document.createElementNS("http://www.w3.org/1999/xhtml", "h2") as HTMLHeadingElement;
+      constructor(readonly app: App) {}
+      onOpen(): void {}
+      onClose(): void {}
+      open(): void { document.body.append(this.titleEl, this.contentEl); this.onOpen(); }
+      close(): void { this.onClose(); this.titleEl.remove(); this.contentEl.remove(); }
+      setTitle(value: string): this { this.titleEl.textContent = value; return this; }
+    }
+    const QuickCaptureModal = createQuickCaptureModalClass(
+      LocalizedModalSurface as unknown as ModalConstructor,
+      () => locale,
+    );
+    const modal = new QuickCaptureModal({} as App);
+    const result = modal.request();
+    expect(modal.titleEl.textContent).toBe(title);
+    expect(modal.contentEl.textContent).toContain(field);
+    expect(modal.contentEl.textContent).toContain(create);
+    expect(modal.contentEl.textContent).toContain(cancel);
+    expect(document.activeElement).toBe(modal.contentEl.querySelector("input"));
+    modal.contentEl.querySelector("form")?.dispatchEvent(new KeyboardEvent("keydown", {
+      key: "Escape",
+      bubbles: true,
+    }));
+    await expect(result).resolves.toBeNull();
+  });
+
+  it("mounts the shared grouped settings surface on the settings destination", async () => {
+    const root = createTestDiv();
+    const startup = vi.fn(async () => undefined);
+    const controller = {
+      settings: () => ({
+        writeEnabled: false,
+        writePreviewAcknowledged: false,
+        locale: "zh-CN" as const,
+        openAtStartup: false,
+        folderRules: [],
+        excludedPrefixes: [],
+        aiEnabled: false,
+        aiEndpoint: "",
+        aiModel: "",
+        secretId: "",
+      }),
+      folderRuleProposals: () => [],
+      previewSampleChange: () => undefined,
+      setOpenAtStartup: startup,
+      setLocale: async () => undefined,
+      setWriteEnabled: async () => undefined,
+      applyFolderRules: async () => undefined,
+      setExcludedPrefixes: async () => undefined,
+    };
+    const surface = createSettingsSectionsSurface({
+      app: {} as App,
+      controller,
+      policy: NORMAL_RUNTIME_POLICY,
+    });
+
+    renderWorkbench(root, {
+      ...populatedWorkbenchModel(),
+      activeTab: "settings",
+    }, noOpWorkbenchActions(), NORMAL_RUNTIME_POLICY, surface);
+
+    expect(Array.from(root.querySelectorAll("[data-settings-section]"))
+      .map((node) => node.getAttribute("data-settings-section"))).toEqual([
+      "language", "baidu", "large-catalog", "verification", "privacy-ai",
+    ]);
+    const startupInput = root.querySelector<HTMLInputElement>('input[type="checkbox"]')!;
+    startupInput.checked = true;
+    startupInput.dispatchEvent(new Event("change", { bubbles: true }));
+    await Promise.resolve();
+    expect(startup).toHaveBeenCalledWith(true);
+  });
+
+  it("always renders the dedicated verification page on the verification destination", () => {
+    const root = createTestDiv();
+    renderWorkbench(root, {
+      ...populatedWorkbenchModel(),
+      activeTab: "verification",
+      suggestions: [{
+        operation: { id: "legacy-suggestion", kind: "rename", sourcePath: "A.md", targetPath: "B.md" },
+        localRationale: { source: "local", summary: "legacy", signals: [], confidence: "high", impact: 1 },
+        rationale: { source: "local", summary: "legacy", signals: [], confidence: "high", impact: 1 },
+      }],
+    }, noOpWorkbenchActions());
+
+    expect(root.querySelector(".knowledge-workbench__verification-page")).not.toBeNull();
+    expect(root.textContent).toContain("云端核验能力不可用");
+    expect(root.querySelector('[aria-label="Organization suggestions"]')).toBeNull();
+  });
+
+  it("keeps a controller-owned resume mismatch across runtime-driven full rerenders", async () => {
+    class ItemViewSurface {
+      readonly contentEl = createTestDiv();
+    }
+    const groupKey = `group:${"e".repeat(64)}`;
+    const active = {
+      importedAt: 1,
+      pdfCount: 1,
+      unverifiedCount: 1,
+      verifiedCount: 0,
+      differenceCount: 0,
+      cloudMissingCount: 0,
+      groupCount: 1,
+      verifiedGroupCount: 0,
+      groups: [{
+        groupKey,
+        label: "Science",
+        pdfCount: 1,
+        mode: "recursive" as const,
+        verificationStatus: "unverified" as const,
+      }],
+    };
+    const pausedBatch = {
+      batchId: "batch-paused",
+      status: "paused" as const,
+      stopReason: "time-limit" as const,
+      resumeAvailable: true,
+      runOrdinal: 1,
+      remainingGroupCount: 1,
+      pdfCount: 0,
+      directoryCount: 0,
+      ignoredFileCount: 0,
+      listRequestCount: 1,
+      cumulativeListRequestCount: 1,
+    };
+    const hybrid = new FakeHybridCatalogRuntime({ status: "paused", active, batch: pausedBatch });
+    const connection = new FakeCloudCatalogConnectionRuntime({ status: "authorized" });
+    const fixture = controllerFixture({
+      catalog: new FakeCloudCatalogRuntime({}, connection, hybrid),
+      catalogLargeScanConfirmation: { request: async () => true },
+    });
+    fixture.controller.setVerificationRoot("/Wrong-candidate");
+    fixture.controller.selectTab("verification");
+    hybrid.beforeResume = () => {
+      hybrid.setSnapshot({ status: "scanning", active, batch: pausedBatch });
+      hybrid.setSnapshot({
+        status: "error",
+        active,
+        batch: pausedBatch,
+        messageCode: "hybrid-cloud-root-mismatch",
+      });
+      throw new HybridCatalogError("hybrid-cloud-root-mismatch");
+    };
+
+    const ConcreteWorkbenchView = createWorkbenchViewClass(
+      ItemViewSurface as unknown as ItemViewConstructor,
+      NORMAL_RUNTIME_POLICY,
+    );
+    const view = new ConcreteWorkbenchView({} as WorkspaceLeaf, fixture.controller);
+    document.body.append(view.contentEl);
+    await view.onOpen();
+    expect(view.contentEl.textContent).not.toContain("batch-paused");
+    view.contentEl.querySelector<HTMLButtonElement>('[data-action="resume-verification"]')?.click();
+
+    await vi.waitFor(() => {
+      expect(view.contentEl.textContent).toContain("恢复根目录不匹配");
+    });
+    expect(view.contentEl.textContent).toContain("修改候选父目录后再次恢复");
+    expect(view.contentEl.textContent).not.toContain("已保存的核验检查点不可用");
+
+    hybrid.beforeResume = undefined;
+    const input = view.contentEl.querySelector<HTMLInputElement>('[data-verification-root="true"]')!;
+    input.value = "/Correct-candidate";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    expect(view.contentEl.textContent).not.toContain("恢复根目录不匹配");
+    expect(view.contentEl.textContent).not.toContain("已保存的核验检查点不可用");
+    expect(fixture.controller.snapshot().verificationActionMessageCode).toBeUndefined();
+
+    hybrid.setSnapshot({
+      status: "error",
+      active,
+      batch: pausedBatch,
+      messageCode: "hybrid-cloud-root-mismatch",
+    });
+    expect(view.contentEl.textContent).not.toContain("恢复根目录不匹配");
+
+    const scanProgress = {
+      status: "scanning" as const,
+      directoryCount: 8,
+      completedDirectoryCount: 7,
+      pdfCount: 25,
+      ignoredFileCount: 2,
+      pendingDirectoryCount: 1,
+      listRequestCount: 13,
+      elapsedMs: 900,
+      budget: {
+        maxPdfCount: 1_000,
+        maxDirectoryCount: 20,
+        maxListRequestCount: 25,
+        maxDurationMs: 120_000,
+      },
+    };
+    connection.setSnapshot({ status: "authorized", scanProgress });
+    expect(view.contentEl.textContent).not.toContain("恢复根目录不匹配");
+
+    connection.setSnapshot({ status: "partial", messageCode: "baidu-token-expired", scanProgress });
+    expect(view.contentEl.textContent).toContain("授权已过期");
+    expect(view.contentEl.textContent).not.toContain("恢复根目录不匹配");
+    connection.setSnapshot({ status: "authorized", scanProgress: { ...scanProgress, listRequestCount: 14 } });
+    expect(view.contentEl.textContent).toContain("恢复根目录不匹配");
+
+    hybrid.setSnapshot({
+      status: "error",
+      active,
+      batch: pausedBatch,
+      messageCode: "hybrid-batch-invalid",
+    });
+    expect(view.contentEl.textContent).toContain("已保存的核验检查点不可用");
+    hybrid.setSnapshot({ status: "paused", active, batch: pausedBatch });
+    view.contentEl.querySelector<HTMLButtonElement>('[data-action="resume-verification"]')?.click();
+    await vi.waitFor(() => expect(hybrid.resumeRoots).toEqual(["/Correct-candidate"]));
+
+    await view.onClose();
+    view.contentEl.remove();
+    fixture.controller.dispose();
+  });
+
+  it("surfaces malformed non-empty roots for both Start and Resume without runtime calls", async () => {
+    class ItemViewSurface {
+      readonly contentEl = createTestDiv();
+    }
+    const groupKey = `group:${"f".repeat(64)}`;
+    const active = {
+      importedAt: 1,
+      pdfCount: 1,
+      unverifiedCount: 1,
+      verifiedCount: 0,
+      differenceCount: 0,
+      cloudMissingCount: 0,
+      groupCount: 1,
+      verifiedGroupCount: 0,
+      groups: [{
+        groupKey,
+        label: "Science",
+        pdfCount: 1,
+        mode: "recursive" as const,
+        verificationStatus: "unverified" as const,
+      }],
+    };
+    const hybrid = new FakeHybridCatalogRuntime({
+      status: "paused",
+      active,
+      batch: {
+        batchId: "batch-malformed-root",
+        status: "paused",
+        stopReason: "time-limit",
+        resumeAvailable: true,
+        runOrdinal: 1,
+        remainingGroupCount: 1,
+        pdfCount: 0,
+        directoryCount: 0,
+        ignoredFileCount: 0,
+        listRequestCount: 1,
+        cumulativeListRequestCount: 1,
+      },
+    });
+    let confirmationCalls = 0;
+    const fixture = controllerFixture({
+      catalog: new FakeCloudCatalogRuntime(
+        {},
+        new FakeCloudCatalogConnectionRuntime({ status: "authorized" }),
+        hybrid,
+      ),
+      catalogLargeScanConfirmation: {
+        request: async () => { confirmationCalls += 1; return true; },
+      },
+    });
+    fixture.controller.setVerificationRoot("malformed-relative-root");
+    fixture.controller.toggleVerificationGroup(groupKey);
+    fixture.controller.selectTab("verification");
+    const ConcreteWorkbenchView = createWorkbenchViewClass(
+      ItemViewSurface as unknown as ItemViewConstructor,
+      NORMAL_RUNTIME_POLICY,
+    );
+    const view = new ConcreteWorkbenchView({} as WorkspaceLeaf, fixture.controller);
+    document.body.append(view.contentEl);
+    await view.onOpen();
+
+    view.contentEl.querySelector<HTMLButtonElement>('[data-action="start-verification"]')?.click();
+    await vi.waitFor(() => expect(view.contentEl.textContent).toContain("修正父目录格式"));
+    view.contentEl.querySelector<HTMLButtonElement>('[data-action="resume-verification"]')?.click();
+    await Promise.resolve();
+
+    expect(view.contentEl.textContent).toContain("修正父目录格式后重试");
+    expect(view.contentEl.textContent).not.toContain("malformed-relative-root");
+    expect(confirmationCalls).toBe(0);
+    expect(hybrid.startInputs).toEqual([]);
+    expect(hybrid.resumeRoots).toEqual([]);
+    await view.onClose();
+    view.contentEl.remove();
+    fixture.controller.dispose();
+  });
+
   it("renders the exact acceptance banner before status and removes every AI and Quick Capture path", () => {
     const root = createTestDiv();
     const quickCapture = vi.fn();
@@ -55,23 +425,14 @@ describe("workbench", () => {
     }), READ_ONLY_ACCEPTANCE_POLICY);
 
     expect(root.classList.contains("knowledge-workbench--read-only-acceptance")).toBe(true);
-    expect(Array.from(root.children).map((child) => child.className)).toEqual([
-      "knowledge-workbench__tabs",
-      "knowledge-workbench__acceptance-banner",
-      "knowledge-workbench__status",
-      "knowledge-workbench__progress-row",
-      "",
-    ]);
+    expect(root.querySelector(".knowledge-workbench__shell")).not.toBeNull();
     const banner = root.querySelector<HTMLElement>('[data-acceptance-banner="true"]');
     expect(banner?.getAttribute("role")).toBe("status");
     expect(banner?.textContent).toBe(
-      "Read-only acceptance build. Quick Capture, organization writes, Undo, and AI are unavailable. Derived index data is stored in the plugin's data file.",
+      "只读验收版本。快速记录、整理写入、撤销和 AI 均不可用。派生索引数据保存在插件数据文件中。",
     );
-    const capture = root.querySelector<HTMLButtonElement>('[data-action="quick-capture"]')!;
-    expect(capture.disabled).toBe(true);
-    expect(capture.getAttribute("aria-label")).toContain("creates Markdown");
-    capture.disabled = false;
-    capture.click();
+    const capture = root.querySelector<HTMLButtonElement>('[data-action="quick-capture"]');
+    expect(capture).toBeNull();
     expect(quickCapture).not.toHaveBeenCalled();
     expect(root.textContent).not.toContain("stale private AI result");
     expect(root.querySelector(".knowledge-workbench__ai-actions")).toBeNull();
@@ -89,12 +450,17 @@ describe("workbench", () => {
       localRationale: { source: "local" as const, summary: "Folder-derived note kind", signals: ["folder-rule:Notes"], confidence: "high" as const, impact: 80 },
       rationale: { source: "local" as const, summary: "Folder-derived note kind", signals: ["folder-rule:Notes"], confidence: "high" as const, impact: 80 },
     };
-    const model = { ...populatedWorkbenchModel(), activeTab: "suggestions" as const, suggestions: [suggestion] };
+    const model = {
+      ...populatedWorkbenchModel(),
+      activeTab: "workbench" as const,
+      startSection: "suggestions" as const,
+      suggestions: [suggestion],
+    };
     renderWorkbench(root, model, noOpWorkbenchActions({
       onExplainRelation: vi.fn(),
     }), READ_ONLY_ACCEPTANCE_POLICY);
-    expect(Array.from(root.querySelectorAll("button")).some((button) => button.textContent === "Explain selected relation with AI")).toBe(false);
-    expect(Array.from(root.querySelectorAll("button")).some((button) => button.textContent === "Preview selected")).toBe(true);
+    expect(Array.from(root.querySelectorAll("button")).some((button) => button.textContent === "用 AI 解释所选关系")).toBe(false);
+    expect(Array.from(root.querySelectorAll("button")).some((button) => button.textContent === "预览所选")).toBe(true);
   });
 
   it("renders every AI result as text-only under the exact AI suggestion label", () => {
@@ -103,9 +469,64 @@ describe("workbench", () => {
       ...populatedWorkbenchModel(),
       aiSuggestion: { action: "summarize", text: '<img src=x onerror="globalThis.pwned=true">' },
     }, noOpWorkbenchActions());
-    expect(root.textContent).toContain("AI suggestion");
+    expect(root.textContent).toContain("AI 建议");
     expect(root.textContent).toContain("<img");
     expect(root.querySelector("img")).toBeNull();
+  });
+
+  it.each([
+    ["zh-CN", false, "disabled", "当前版本不提供 AI。", "使用 AI 总结"],
+    ["en", false, "disabled", "AI is unavailable in this build.", "Summarize with AI"],
+    ["zh-CN", true, "service-unavailable", "AI 建议暂不可用；本地结果保持不变。", "使用 AI 总结"],
+    ["en", true, "service-unavailable", "The AI suggestion is unavailable. Local results remain unchanged.", "Summarize with AI"],
+  ] as const)("surfaces a safe fulfilled AI fallback in %s when enabled=%s", async (
+    locale,
+    aiEnabled,
+    reason,
+    expectedStatus,
+    actionLabel,
+  ) => {
+    class ItemViewSurface {
+      readonly contentEl = createTestDiv();
+    }
+    const fixture = controllerFixture({
+      aiEnabled,
+      aiClient: {
+        complete: async () => { throw new Error("SECRET-RUNTIME-DETAIL"); },
+      },
+    });
+    fixture.store.setSettingsForTest({
+      ...fixture.store.settings(),
+      folderRules: [{ prefix: "Notes", kind: "note" }],
+    });
+    await fixture.controller.setLocale(locale);
+    const localSuggestions = fixture.controller.refreshSuggestions();
+    expect(localSuggestions.length).toBeGreaterThan(0);
+    await fixture.controller.selectCenter({ kind: "document", id: "a" });
+    const summarize = vi.spyOn(fixture.controller, "summarize");
+    const ConcreteWorkbenchView = createWorkbenchViewClass(
+      ItemViewSurface as unknown as ItemViewConstructor,
+      NORMAL_RUNTIME_POLICY,
+    );
+    const view = new ConcreteWorkbenchView({} as WorkspaceLeaf, fixture.controller);
+    document.body.append(view.contentEl);
+    await view.onOpen();
+
+    Array.from(view.contentEl.querySelectorAll<HTMLButtonElement>("button"))
+      .find((button) => button.textContent === actionLabel)?.click();
+    await vi.waitFor(() => expect(summarize).toHaveBeenCalledOnce());
+    await expect(summarize.mock.results[0]!.value).resolves.toEqual({
+      kind: "local-fallback",
+      reason,
+    });
+    await vi.waitFor(() => expect(view.contentEl.querySelector('[role="status"]')?.textContent)
+      .toContain(expectedStatus));
+    expect(view.contentEl.textContent).not.toContain("SECRET-RUNTIME-DETAIL");
+    expect(fixture.controller.snapshot().suggestions).toEqual(localSuggestions);
+
+    await view.onClose();
+    view.contentEl.remove();
+    fixture.controller.dispose();
   });
 
   it("routes explicit map AI actions using selected paths rather than note bodies", () => {
@@ -118,9 +539,9 @@ describe("workbench", () => {
       onSuggestLabels: (paths) => { calls.push(["suggest-labels", [...paths]]); },
     }));
     Array.from(root.querySelectorAll<HTMLButtonElement>("button"))
-      .find((button) => button.textContent === "Summarize with AI")?.click();
+      .find((button) => button.textContent === "使用 AI 总结")?.click();
     Array.from(root.querySelectorAll<HTMLButtonElement>("button"))
-      .find((button) => button.textContent === "Explain relation with AI")?.click();
+      .find((button) => button.textContent === "使用 AI 解释关系")?.click();
     expect(calls).toEqual([
       ["summarize", ["Notes/Alpha.md"]],
       ["explain-relation", ["Notes/Alpha.md"], undefined],
@@ -129,8 +550,34 @@ describe("workbench", () => {
   it("renders equal Today and map regions with accessible labels", () => {
     const root = createTestDiv();
     renderWorkbench(root, {
+      locale: "zh-CN" as const,
       status: "ready",
       activeTab: "workbench",
+      startSection: "overview",
+      catalog: {
+        status: "no-snapshot",
+        source: "none",
+        pdfCount: 0,
+        verificationCounts: { unverified: 0, verified: 0, difference: 0, cloudMissing: 0 },
+        query: "",
+        folderPrefix: "",
+        verificationStatuses: [],
+        differenceKinds: [],
+        topLevelGroupId: "",
+        hierarchyTag: "",
+        includeCloudMissing: false,
+        groups: [],
+        hierarchyTags: [],
+        page: 0,
+        pageSize: 50,
+        total: 0,
+        items: [],
+      },
+      verificationRoot: "",
+      verificationRootLocked: false,
+      selectedVerificationGroupKeys: [],
+      selectedCatalogId: null,
+      catalogFiltersExpanded: false,
       todayFilter: "all",
       today: { newItems: [], continueItems: [], nextItems: [] },
       map: { nodes: [], edges: [], selected: null, truncated: false },
@@ -141,6 +588,7 @@ describe("workbench", () => {
       mapProgress: { status: "idle", completed: 0, label: "Map" },
     }, {
       onSelectTab: () => undefined,
+      onSelectStartSection: () => undefined,
       onSelectTodayFilter: () => undefined,
       onSelectMapFilter: () => undefined,
       onOpenNote: () => undefined,
@@ -153,25 +601,38 @@ describe("workbench", () => {
       onSelectCenter: () => undefined,
       onPreviewSuggestion: () => undefined,
       onRetryScan: () => undefined,
+      onSearchCatalog: () => undefined,
+      onFilterCatalogFolder: () => undefined,
+      onToggleCatalogStatus: () => undefined,
+      onToggleCatalogDifference: () => undefined,
+      onFilterCatalogGroup: () => undefined,
+      onFilterCatalogTag: () => undefined,
+      onToggleCatalogCloudMissing: () => undefined,
+      onCatalogPage: () => undefined,
+      onCopyCatalogFilename: () => undefined,
+      onCopyCatalogPath: () => undefined,
+      onOpenBaidu: () => undefined,
+      onSelectCatalogRecord: () => undefined,
+      onSetCatalogFiltersExpanded: () => undefined,
+      onSetVerificationRoot: () => undefined,
+      onToggleVerificationGroup: () => undefined,
+      onStartSelectedVerification: async () => undefined,
+      onResumeSelectedVerification: async () => undefined,
+      onCancelSelectedVerification: () => undefined,
     });
-    expect(Array.from(root.querySelectorAll('[role="tab"]')).map((value) => value.textContent)).toEqual([
-      "Workbench",
-      "Organization suggestions",
-      "Operation history",
-      "Settings",
-    ]);
-    expect(root.querySelector('[aria-label="Today"]')).not.toBeNull();
-    expect(root.querySelector('[aria-label="Knowledge map"]')).not.toBeNull();
-    expect(root.querySelector('[role="status"]')?.textContent).toContain("Ready");
+    expect(root.querySelector('[role="tablist"]')).toBeNull();
+    expect(root.textContent).not.toContain("WorkbenchOrganization suggestionsOperation historyCloud CatalogSettings");
+    expect(root.querySelector('[aria-label="今日"]')).not.toBeNull();
+    expect(root.querySelector('[aria-label="知识地图"]')).not.toBeNull();
+    expect(root.querySelector('[role="status"]')?.textContent).toContain("就绪");
   });
 
-  it("points every ARIA tab control at a real stable tabpanel", () => {
+  it("labels the main page region with its selected navigation button", () => {
     const root = createTestDiv();
     renderWorkbench(root, populatedWorkbenchModel(), noOpWorkbenchActions());
-    for (const tab of Array.from(root.querySelectorAll<HTMLElement>('[role="tab"][aria-controls]'))) {
-      const controlled = tab.getAttribute("aria-controls")!;
-      expect(root.querySelector(`#${controlled}`), `${tab.textContent} controls ${controlled}`).not.toBeNull();
-    }
+    const selected = root.querySelector<HTMLElement>('[data-workbench-page="workbench"]')!;
+    const panel = root.querySelector<HTMLElement>("main")!;
+    expect(panel.getAttribute("aria-labelledby")).toBe(selected.id);
   });
 
   it("keeps actions as native buttons with visible labels", () => {
@@ -180,33 +641,34 @@ describe("workbench", () => {
     expect(root.querySelector(".knowledge-workbench__split")).not.toBeNull();
     for (const button of Array.from(root.querySelectorAll("button"))) {
       expect(button.textContent?.trim() || button.getAttribute("aria-label")).toBeTruthy();
-      if (button.getAttribute("role") !== "tab") expect(button.tabIndex).toBeGreaterThanOrEqual(0);
+      expect(button.tabIndex).toBeGreaterThanOrEqual(0);
     }
     expect(root.querySelector(".knowledge-workbench__node--circle")?.textContent).toBe("Alpha");
     expect(root.querySelector(".knowledge-workbench__node--square")?.textContent).toBe("Beta");
     expect(root.querySelector(".knowledge-workbench__node--diamond")?.textContent).toBe("Systems");
-    expect(root.querySelector(".knowledge-workbench__relation--confirmed")?.textContent).toContain("Confirmed");
-    expect(root.querySelector(".knowledge-workbench__relation--inferred")?.textContent).toContain("Inferred");
-    expect(root.querySelector(".knowledge-workbench__details")?.textContent).toContain("Topics");
-    expect(root.querySelector(".knowledge-workbench__details")?.textContent).toContain("Connected nodes");
+    expect(root.querySelector(".knowledge-workbench__relation--confirmed")?.textContent).toContain("已确认");
+    expect(root.querySelector(".knowledge-workbench__relation--inferred")?.textContent).toContain("推断");
+    expect(root.querySelector(".knowledge-workbench__details")?.textContent).toContain("主题");
+    expect(root.querySelector(".knowledge-workbench__details")?.textContent).toContain("关联节点");
   });
 
-  it("supports complete keyboard tabs and preserves focused tab across rendering", () => {
+  it("moves navigation focus without selecting and preserves it across rendering", () => {
     const selected: string[] = [];
     const root = createTestDiv();
     const model = populatedWorkbenchModel();
     const actions = noOpWorkbenchActions({ onSelectTab: (tab) => selected.push(tab) });
     document.body.append(root);
     renderWorkbench(root, model, actions);
-    const first = root.querySelector<HTMLButtonElement>('[role="tab"][data-tab="workbench"]')!;
+    const first = root.querySelector<HTMLButtonElement>('[data-workbench-page="workbench"]')!;
     first.focus();
     first.dispatchEvent(new KeyboardEvent("keydown", { key: "End", bubbles: true }));
-    expect(selected).toEqual(["settings"]);
-    expect(document.activeElement?.textContent).toBe("Settings");
+    expect(selected).toEqual([]);
+    expect(document.activeElement?.getAttribute("data-workbench-page")).toBe("settings");
     renderWorkbench(root, { ...model, activeTab: "settings" }, actions);
-    expect(document.activeElement?.textContent).toBe("Settings");
+    expect(document.activeElement?.getAttribute("data-workbench-page")).toBe("settings");
     document.activeElement?.dispatchEvent(new KeyboardEvent("keydown", { key: "Home", bubbles: true }));
-    expect(selected).toEqual(["settings", "workbench"]);
+    expect(selected).toEqual([]);
+    expect(document.activeElement?.getAttribute("data-workbench-page")).toBe("workbench");
     root.remove();
   });
 
@@ -240,6 +702,82 @@ describe("workbench", () => {
     view.contentEl.remove();
   });
 
+  it("preserves the rebuilt Start section button focus after a controller-driven section change", async () => {
+    class ItemViewSurface {
+      readonly contentEl = createTestDiv();
+    }
+    const fixture = controllerFixture();
+    const ConcreteWorkbenchView = createWorkbenchViewClass(ItemViewSurface as unknown as ItemViewConstructor, NORMAL_RUNTIME_POLICY);
+    const view = new ConcreteWorkbenchView({} as WorkspaceLeaf, fixture.controller);
+    document.body.append(view.contentEl);
+    await view.onOpen();
+
+    const before = view.contentEl.querySelector<HTMLButtonElement>('[data-start-section="suggestions"]')!;
+    before.focus();
+    before.click();
+    const after = view.contentEl.querySelector<HTMLButtonElement>('[data-start-section="suggestions"]')!;
+
+    expect(fixture.controller.snapshot().startSection).toBe("suggestions");
+    expect(after).not.toBe(before);
+    expect(after.getAttribute("aria-pressed")).toBe("true");
+    expect(document.activeElement).toBe(after);
+
+    await view.onClose();
+    view.contentEl.remove();
+  });
+
+  it("preserves locale-control focus across the controller rerender after language change", async () => {
+    class ItemViewSurface {
+      readonly contentEl = createTestDiv();
+    }
+    const fixture = controllerFixture();
+    const ConcreteWorkbenchView = createWorkbenchViewClass(ItemViewSurface as unknown as ItemViewConstructor, NORMAL_RUNTIME_POLICY);
+    const view = new ConcreteWorkbenchView({} as WorkspaceLeaf, fixture.controller);
+    document.body.append(view.contentEl);
+    await view.onOpen();
+
+    const first = view.contentEl.querySelector<HTMLSelectElement>("[data-workbench-locale]")!;
+    first.focus();
+    first.value = "en";
+    first.dispatchEvent(new Event("change", { bubbles: true }));
+    await vi.waitFor(() => expect(fixture.controller.snapshot().locale).toBe("en"));
+
+    const second = view.contentEl.querySelector<HTMLSelectElement>("[data-workbench-locale]")!;
+    expect(document.activeElement).toBe(second);
+    await view.onClose();
+    view.contentEl.remove();
+  });
+
+  it.each([
+    ["zh-CN", "知识地图筛选失败"],
+    ["en", "Map filter failed"],
+  ] as const)("renders only a localized safe action failure in %s", async (locale, message) => {
+    class ItemViewSurface {
+      readonly contentEl = createTestDiv();
+    }
+    const fixture = controllerFixture();
+    await fixture.controller.setLocale(locale);
+    vi.spyOn(fixture.controller, "setMapFilter").mockRejectedValue(
+      new Error("SECRET-RUNTIME-DETAIL"),
+    );
+    const ConcreteWorkbenchView = createWorkbenchViewClass(
+      ItemViewSurface as unknown as ItemViewConstructor,
+      NORMAL_RUNTIME_POLICY,
+    );
+    const view = new ConcreteWorkbenchView({} as WorkspaceLeaf, fixture.controller);
+    await view.onOpen();
+    const map = view.contentEl.querySelector<HTMLElement>(".knowledge-workbench__map")!;
+    const filter = Array.from(map.querySelectorAll<HTMLButtonElement>("button"))
+      .find((button) => button.textContent === (locale === "zh-CN" ? "笔记" : "Notes"));
+    expect(filter).toBeDefined();
+    filter?.click();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(view.contentEl.textContent).toContain(message);
+    expect(view.contentEl.textContent).not.toContain("SECRET-RUNTIME-DETAIL");
+    await view.onClose();
+  });
+
   it("shows named cancel controls only while running and announces terminal state", () => {
     const root = createTestDiv();
     const model = populatedWorkbenchModel();
@@ -248,16 +786,16 @@ describe("workbench", () => {
       scanProgress: { status: "running", completed: 3, total: 10, label: "Index" },
       mapProgress: { status: "running", completed: 500, label: "Map" },
     }, noOpWorkbenchActions());
-    expect(Array.from(root.querySelectorAll("button")).map((button) => button.textContent)).toContain("Cancel Index");
-    expect(Array.from(root.querySelectorAll("button")).map((button) => button.textContent)).toContain("Cancel Map");
-    expect(root.querySelector('[role="status"]')?.textContent).toContain("Index running");
+    expect(Array.from(root.querySelectorAll("button")).map((button) => button.textContent)).toContain("取消索引");
+    expect(Array.from(root.querySelectorAll("button")).map((button) => button.textContent)).toContain("取消知识地图");
+    expect(root.querySelector('[role="status"]')?.textContent).toContain("索引 正在运行");
     renderWorkbench(root, {
       ...model,
       scanProgress: { status: "canceled", completed: 3, total: 10, label: "Index" },
     }, noOpWorkbenchActions());
-    expect(root.querySelector('[role="status"]')?.textContent).toContain("Index Canceled");
-    expect(Array.from(root.querySelectorAll("button")).some((button) => button.textContent?.startsWith("Cancel"))).toBe(false);
-    expect(Array.from(root.querySelectorAll("button")).some((button) => button.textContent === "Retry Index")).toBe(true);
+    expect(root.querySelector('[role="status"]')?.textContent).toContain("索引 已取消");
+    expect(Array.from(root.querySelectorAll("button")).some((button) => button.textContent?.startsWith("取消"))).toBe(false);
+    expect(Array.from(root.querySelectorAll("button")).some((button) => button.textContent === "重试索引")).toBe(true);
   });
 
   it("announces simultaneous running and terminal scan/map states without hiding either", () => {
@@ -268,25 +806,25 @@ describe("workbench", () => {
       scanProgress: { status: "running", completed: 2, total: 4, label: "Index" },
       mapProgress: { status: "canceled", completed: 500, label: "Map" },
     }, noOpWorkbenchActions());
-    expect(root.querySelector('[role="status"]')?.textContent).toContain("Index running");
-    expect(root.querySelector('[role="status"]')?.textContent).toContain("Map Canceled");
-    expect(root.querySelector(".knowledge-workbench__progress-row")?.textContent).toContain("Map Canceled");
+    expect(root.querySelector('[role="status"]')?.textContent).toContain("索引 正在运行");
+    expect(root.querySelector('[role="status"]')?.textContent).toContain("知识地图 已取消");
+    expect(root.querySelector(".knowledge-workbench__progress-row")?.textContent).toContain("知识地图 已取消");
 
     renderWorkbench(root, {
       ...model,
       scanProgress: { status: "error", completed: 2, total: 4, label: "Index" },
       mapProgress: { status: "running", completed: 1_000, label: "Map" },
     }, noOpWorkbenchActions());
-    expect(root.querySelector('[role="status"]')?.textContent).toContain("Index Error");
-    expect(root.querySelector('[role="status"]')?.textContent).toContain("Map running");
-    expect(root.querySelector(".knowledge-workbench__progress-row")?.textContent).toContain("Index Error");
+    expect(root.querySelector('[role="status"]')?.textContent).toContain("索引 错误");
+    expect(root.querySelector('[role="status"]')?.textContent).toContain("知识地图 正在运行");
+    expect(root.querySelector(".knowledge-workbench__progress-row")?.textContent).toContain("索引 错误");
 
     renderWorkbench(root, {
       ...model,
       scanProgress: { status: "complete", completed: 4, total: 4, label: "Index" },
       mapProgress: { status: "idle", completed: 0, label: "Map" },
     }, noOpWorkbenchActions());
-    expect(root.querySelector(".knowledge-workbench__progress-row")?.textContent).toContain("Index Complete");
+    expect(root.querySelector(".knowledge-workbench__progress-row")?.textContent).toContain("索引 已完成");
   });
 
   it("routes map search input and result selection through actions", () => {
@@ -345,7 +883,7 @@ describe("workbench", () => {
       onOpenNote: (path) => opens.push(path),
     }));
     Array.from(root.querySelectorAll<HTMLButtonElement>(".knowledge-workbench__today-item button"))
-      .find((button) => button.textContent === "Review suggestion")?.click();
+      .find((button) => button.textContent === "预览建议")?.click();
     expect(previews).toEqual(["suggestion-1"]);
     expect(opens).toEqual([]);
   });
@@ -361,15 +899,16 @@ describe("workbench", () => {
     };
     renderWorkbench(root, {
       ...populatedWorkbenchModel(),
-      activeTab: "suggestions",
+      activeTab: "workbench",
+      startSection: "suggestions",
       suggestions: [suggestion],
     }, noOpWorkbenchActions({
       onPreviewSuggestionIds: (ids) => previews.push([...ids]),
       onSuggestionSelectionChange: () => { selectionChanges += 1; },
     }));
-    expect(root.querySelector('[aria-label="Organization suggestions"]')).not.toBeNull();
+    expect(root.querySelector('[aria-label="整理建议"]')).not.toBeNull();
     const preview = Array.from(root.querySelectorAll<HTMLButtonElement>("button"))
-      .find((button) => button.textContent === "Preview selected")!;
+      .find((button) => button.textContent === "预览所选")!;
     expect(preview.disabled).toBe(true);
     const checkbox = root.querySelector<HTMLInputElement>('input[value="set-kind"]')!;
     checkbox.checked = true;
@@ -1257,7 +1796,7 @@ describe("workbench", () => {
     expect(instance).toBeInstanceOf(ItemViewSurface);
     expect(instance).toBeInstanceOf(ConcreteWorkbenchView);
     await instance.onOpen();
-    expect(instance.contentEl.querySelector('[aria-label="Today"]')).not.toBeNull();
+    expect(instance.contentEl.querySelector('[aria-label="今日"]')).not.toBeNull();
     await instance.onClose();
   });
 
@@ -1271,10 +1810,11 @@ describe("workbench", () => {
     const view = new WorkbenchView({} as WorkspaceLeaf, fixture.controller);
     await view.onOpen();
     Array.from(view.contentEl.querySelectorAll<HTMLButtonElement>(".knowledge-workbench__today-item button"))
-      .find((button) => button.textContent === "Pin")?.click();
+      .find((button) => button.textContent === "置顶")?.click();
     await Promise.resolve();
     await Promise.resolve();
-    expect(view.contentEl.querySelector('[role="status"]')?.textContent).toContain("Pin failed: pin store failed");
+    expect(view.contentEl.querySelector('[role="status"]')?.textContent).toContain("置顶失败");
+    expect(view.contentEl.textContent).not.toContain("pin store failed");
     await view.onClose();
   });
 
@@ -1287,10 +1827,11 @@ describe("workbench", () => {
     const view = new WorkbenchView({} as WorkspaceLeaf, fixture.controller);
     await view.onOpen();
     Array.from(view.contentEl.querySelectorAll<HTMLButtonElement>(".knowledge-workbench__today-item button"))
-      .find((button) => button.textContent === "Review note")?.click();
+      .find((button) => button.textContent === "查看笔记")?.click();
     await Promise.resolve();
     await Promise.resolve();
-    expect(view.contentEl.querySelector('[role="status"]')?.textContent).toContain("Open note failed: leaf unavailable");
+    expect(view.contentEl.querySelector('[role="status"]')?.textContent).toContain("打开笔记失败");
+    expect(view.contentEl.textContent).not.toContain("leaf unavailable");
     await view.onClose();
   });
 
@@ -1303,10 +1844,11 @@ describe("workbench", () => {
     const view = new WorkbenchView({} as WorkspaceLeaf, fixture.controller);
     await view.onOpen();
     Array.from(view.contentEl.querySelectorAll<HTMLButtonElement>("button"))
-      .find((button) => button.textContent === "Quick capture")?.click();
+      .find((button) => button.textContent === "快速记录")?.click();
     await Promise.resolve();
     await Promise.resolve();
-    expect(view.contentEl.querySelector('[role="status"]')?.textContent).toContain("Quick capture failed: create failed");
+    expect(view.contentEl.querySelector('[role="status"]')?.textContent).toContain("快速记录失败");
+    expect(view.contentEl.textContent).not.toContain("create failed");
     await view.onClose();
   });
 
@@ -1586,6 +2128,7 @@ describe("workbench", () => {
       settings: () => ({
         writeEnabled: false,
         writePreviewAcknowledged: false,
+        locale: "zh-CN" as const,
         openAtStartup: false,
         folderRules: [],
         excludedPrefixes: ["Archive"],
@@ -1603,6 +2146,7 @@ describe("workbench", () => {
       }],
       previewSampleChange: () => { calls.push("review"); },
       setOpenAtStartup: async () => { calls.push("startup"); },
+      setLocale: async () => undefined,
       setWriteEnabled: async () => { calls.push("write"); },
       applyFolderRules: async () => { calls.push("rules"); },
       setExcludedPrefixes: async () => { calls.push("exclusions"); },
@@ -1610,17 +2154,17 @@ describe("workbench", () => {
     const SettingsTab = createSettingsTabClass(SettingsSurface as unknown as PluginSettingTabConstructor, undefined, NORMAL_RUNTIME_POLICY);
     const tab = new SettingsTab({} as App, {} as never, controller);
     (tab as unknown as { display(): void }).display();
-    expect(tab.containerEl.textContent).toContain("Write operations are locked");
+    expect(tab.containerEl.textContent).toContain("写入操作已锁定");
     const proposal = tab.containerEl.querySelector<HTMLInputElement>('input[data-folder-rule="References"]')!;
     expect(proposal.checked).toBe(false);
     Array.from(tab.containerEl.querySelectorAll<HTMLButtonElement>("button"))
-      .find((button) => button.textContent === "Review a sample change")?.click();
+      .find((button) => button.textContent === "查看示例变更")?.click();
     proposal.checked = true;
     proposal.dispatchEvent(new Event("change", { bubbles: true }));
     Array.from(tab.containerEl.querySelectorAll<HTMLButtonElement>("button"))
-      .find((button) => button.textContent === "Confirm selected rules")?.click();
+      .find((button) => button.textContent === "确认所选规则")?.click();
     Array.from(tab.containerEl.querySelectorAll<HTMLButtonElement>("button"))
-      .find((button) => button.textContent === "Apply exclusions")?.click();
+      .find((button) => button.textContent === "应用排除项")?.click();
     await Promise.resolve();
     expect(calls).toEqual(["review", "rules", "exclusions"]);
   });
@@ -1632,6 +2176,7 @@ describe("workbench", () => {
     const baseSettings = {
       writeEnabled: false,
       writePreviewAcknowledged: true,
+      locale: "zh-CN" as const,
       openAtStartup: false,
       folderRules: [],
       excludedPrefixes: [],
@@ -1646,6 +2191,7 @@ describe("workbench", () => {
       folderRuleProposals: () => [],
       previewSampleChange: () => undefined,
       setOpenAtStartup: async () => undefined,
+      setLocale: async () => undefined,
       setWriteEnabled: async (value: boolean) => { values.push(value); },
       applyFolderRules: async () => undefined,
       setExcludedPrefixes: async () => undefined,
@@ -1653,7 +2199,7 @@ describe("workbench", () => {
     const SettingsTab = createSettingsTabClass(SettingsSurface as unknown as PluginSettingTabConstructor, undefined, NORMAL_RUNTIME_POLICY);
     const tab = new SettingsTab({} as App, {} as never, controller);
     (tab as unknown as { display(): void }).display();
-    expect(tab.containerEl.textContent).not.toContain("Write operations are locked");
+    expect(tab.containerEl.textContent).not.toContain("写入操作已锁定");
     const write = tab.containerEl.querySelector<HTMLInputElement>('input[data-write-enabled="true"]')!;
     expect(write.checked).toBe(false);
     write.checked = true;
@@ -1678,6 +2224,7 @@ describe("workbench", () => {
       settings: () => ({
         writeEnabled: false,
         writePreviewAcknowledged: false,
+        locale: "zh-CN" as const,
         openAtStartup: false,
         folderRules: [],
         excludedPrefixes: ["Archive"],
@@ -1695,6 +2242,7 @@ describe("workbench", () => {
       }],
       previewSampleChange: () => undefined,
       setOpenAtStartup: async () => undefined,
+      setLocale: async () => undefined,
       setWriteEnabled: async () => undefined,
       applyFolderRules: async () => undefined,
       setExcludedPrefixes: async (prefixes: readonly string[]) => { applied.push([...prefixes]); },
@@ -1707,13 +2255,13 @@ describe("workbench", () => {
       ["References", false],
       ["Archive", true],
     ]);
-    expect(tab.containerEl.textContent).toContain("12 notes");
+    expect(tab.containerEl.textContent).toContain("12 篇笔记");
     expect(tab.containerEl.textContent).toContain("References/A.md");
-    expect(tab.containerEl.textContent).toContain("Existing exclusion");
+    expect(tab.containerEl.textContent).toContain("已有排除项");
     rows[0]!.checked = true;
     rows[0]!.dispatchEvent(new Event("change", { bubbles: true }));
     Array.from(tab.containerEl.querySelectorAll<HTMLButtonElement>("button"))
-      .find((button) => button.textContent === "Apply exclusions")?.click();
+      .find((button) => button.textContent === "应用排除项")?.click();
     await Promise.resolve();
     expect(applied).toEqual([["References", "Archive"]]);
   });
@@ -1727,6 +2275,7 @@ describe("workbench", () => {
       settings: () => ({
         writeEnabled: false,
         writePreviewAcknowledged: false,
+        locale: "zh-CN" as const,
         openAtStartup: false,
         folderRules: [],
         excludedPrefixes: ["Archive"],
@@ -1738,6 +2287,7 @@ describe("workbench", () => {
       folderRuleProposals: () => [],
       previewSampleChange: () => undefined,
       setOpenAtStartup: async () => undefined,
+      setLocale: async () => undefined,
       setWriteEnabled: async () => undefined,
       applyFolderRules: async () => undefined,
       setExcludedPrefixes: async () => {
@@ -1749,15 +2299,15 @@ describe("workbench", () => {
     const tab = new SettingsTab({} as App, {} as never, controller);
     (tab as unknown as { display(): void }).display();
     const apply = Array.from(tab.containerEl.querySelectorAll<HTMLButtonElement>("button"))
-      .find((button) => button.textContent === "Apply exclusions")!;
+      .find((button) => button.textContent === "应用排除项")!;
     apply.click();
     await Promise.resolve();
     await Promise.resolve();
-    expect(tab.containerEl.querySelector('[role="status"]')?.textContent).toContain("Error: disk unavailable");
+    expect(tab.containerEl.querySelector('[role="status"]')?.textContent).toContain("保存失败，请重试");
     apply.click();
     await Promise.resolve();
     await Promise.resolve();
-    expect(tab.containerEl.querySelector('[role="status"]')?.textContent).toContain("Saved");
+    expect(tab.containerEl.querySelector('[role="status"]')?.textContent).toContain("已保存");
     expect(attempts).toBe(2);
   });
 
@@ -1773,6 +2323,7 @@ describe("workbench", () => {
       settings: () => ({
         writeEnabled: persistedWrite,
         writePreviewAcknowledged: true,
+        locale: "zh-CN" as const,
         openAtStartup: persistedStartup,
         folderRules: [],
         excludedPrefixes: [],
@@ -1788,6 +2339,7 @@ describe("workbench", () => {
         if (startupAttempts === 1) throw new Error("startup failed");
         persistedStartup = value;
       },
+      setLocale: async () => undefined,
       setWriteEnabled: async (value: boolean) => {
         writeAttempts += 1;
         if (writeAttempts === 1) throw new Error("write failed");
@@ -1807,7 +2359,7 @@ describe("workbench", () => {
     await Promise.resolve();
     await Promise.resolve();
     expect(startup.checked).toBe(false);
-    expect(tab.containerEl.querySelector('[role="status"]')?.textContent).toContain("Error: startup failed");
+    expect(tab.containerEl.querySelector('[role="status"]')?.textContent).toContain("保存失败，请重试");
     startup.checked = true;
     startup.dispatchEvent(new Event("change", { bubbles: true }));
     await Promise.resolve();
@@ -1819,7 +2371,7 @@ describe("workbench", () => {
     await Promise.resolve();
     await Promise.resolve();
     expect(write.checked).toBe(false);
-    expect(tab.containerEl.querySelector('[role="status"]')?.textContent).toContain("Error: write failed");
+    expect(tab.containerEl.querySelector('[role="status"]')?.textContent).toContain("保存失败，请重试");
     write.checked = true;
     write.dispatchEvent(new Event("change", { bubbles: true }));
     await Promise.resolve();
