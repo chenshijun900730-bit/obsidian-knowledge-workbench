@@ -1,0 +1,41 @@
+{
+  "name": "knowledge-workbench",
+  "version": "0.1.0",
+  "description": "A local-first knowledge workbench for Obsidian.",
+  "main": "main.js",
+  "type": "module",
+  "scripts": {
+    "dev": "node esbuild.config.mjs development normal",
+    "build": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production normal",
+    "build:acceptance": "tsc -noEmit -skipLibCheck && node scripts/build-acceptance.mjs",
+    "prepare:acceptance:synthetic": "node scripts/prepare-acceptance-synthetic-cli.mjs",
+    "install:acceptance:dev": "node scripts/install-acceptance-dev-cli.mjs",
+    "install:acceptance:real": "node scripts/install-acceptance-real-cli.mjs",
+    "record:read-only-acceptance": "node scripts/record-read-only-acceptance.mjs",
+    "validate:read-only-acceptance": "node scripts/validate-read-only-acceptance.mjs",
+    "lint": "eslint .",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
+    "test:performance": "KNOWLEDGE_WORKBENCH_PERFORMANCE=1 vitest run tests/performance/index.bench.test.ts tests/performance/workbench-open.bench.test.ts --no-file-parallelism --maxWorkers=1 --testTimeout=180000 --hookTimeout=180000 --reporter=verbose",
+    "install:dev": "npm run build && node scripts/install-dev.mjs",
+    "validate:acceptance": "node scripts/validate-acceptance.mjs",
+    "verify": "npm run lint && npm test && npm run build"
+  },
+  "engines": { "node": "^20.19.0 || ^22.13.0 || >=24.0.0" },
+  "devDependencies": {
+    "@eslint/js": "9.39.4",
+    "@types/node": "22.15.17",
+    "@vitest/coverage-v8": "4.1.10",
+    "esbuild": "0.25.5",
+    "eslint": "9.39.4",
+    "eslint-plugin-obsidianmd": "0.4.0",
+    "globals": "17.6.0",
+    "jiti": "2.6.1",
+    "jsdom": "29.1.1",
+    "obsidian": "1.13.1",
+    "typescript": "5.8.3",
+    "typescript-eslint": "8.59.1",
+    "vitest": "4.1.10"
+  }
+}

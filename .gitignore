@@ -1,0 +1,12 @@
+.DS_Store
+.superpowers/
+.worktrees/
+node_modules/
+dist/
+coverage/
+*.log
+main.js
+*.map
+data.json
+# Dedicated synthetic vaults and strict acceptance metrics.
+.dev-vault/
