@@ -2,6 +2,7 @@
   "name": "knowledge-workbench",
   "version": "0.1.0",
   "description": "A local-first knowledge workbench for Obsidian.",
+  "license": "MIT",
   "main": "main.js",
   "type": "module",
   "scripts": {

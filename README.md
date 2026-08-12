@@ -170,3 +170,7 @@ npm run validate:acceptance
 先在 Obsidian 中禁用插件，再删除专用 vault 的 `.obsidian/plugins/knowledge-workbench`。卸载不会撤销此前由用户确认执行的文件移动或 frontmatter 字段，也不会自动删除 Obsidian SecretStorage 中的条目。插件目录中的 `data.json` 会随目录删除；如需保留历史导出，请先在 History 中导出允许字段 JSON。
 
 开发安装与卸载仅面向专用合成测试库；不要把本流程指向真实资料库。
+
+## 许可证
+
+本项目采用 [MIT License](LICENSE)。

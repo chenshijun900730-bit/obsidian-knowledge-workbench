@@ -1,0 +1,76 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: Lint, test, and build
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Check out the full repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22.13.0
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Run the complete test suite serially
+        run: npm test -- --no-file-parallelism --maxWorkers=1
+
+      - name: Build the normal plugin
+        run: npm run build
+
+      - name: Build the read-only acceptance plugin
+        run: npm run build:acceptance
+
+  catalog-performance:
+    name: Catalog performance gates
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22.13.0
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run the 100k and 70k catalog gates
+        env:
+          KNOWLEDGE_WORKBENCH_PERFORMANCE: "1"
+        run: >-
+          npx vitest run
+          tests/performance/catalog-search.bench.test.ts
+          tests/performance/hybrid-catalog-search.bench.test.ts
+          --no-file-parallelism
+          --maxWorkers=1
+          --testTimeout=180000
+          --reporter=verbose
