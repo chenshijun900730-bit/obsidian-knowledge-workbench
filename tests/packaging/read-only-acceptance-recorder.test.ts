@@ -348,6 +348,8 @@ async function lightweightRepository(): Promise<string> {
   runGit(created, ["config", "user.email", "acceptance@example.invalid"]);
   runGit(created, ["config", "user.name", "Acceptance Recorder Test"]);
   runGit(created, ["config", "core.hooksPath", "/dev/null"]);
+  runGit(created, ["config", "gc.auto", "0"]);
+  runGit(created, ["config", "maintenance.auto", "false"]);
   runGit(created, ["add", "."]);
   runGit(created, ["commit", "--quiet", "-m", "recorder boundary fixture"]);
   await mkdir(join(created, ".dev-vault"), { mode: 0o700 });

@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   chmod,
   cp,
@@ -743,8 +743,9 @@ async function replaceRegularFileWithBytes(path: string, bytes: Uint8Array): Pro
   after: Readonly<{ dev: bigint; ino: bigint }>;
 }>> {
   const beforeStat = await lstat(path, { bigint: true });
-  await unlink(path);
-  await writeFile(path, bytes, { flag: "wx" });
+  const replacementPath = `${path}.replacement-${randomUUID()}`;
+  await writeFile(replacementPath, bytes, { flag: "wx" });
+  await rename(replacementPath, path);
   const afterStat = await lstat(path, { bigint: true });
   const before = Object.freeze({ dev: beforeStat.dev, ino: beforeStat.ino });
   const after = Object.freeze({ dev: afterStat.dev, ino: afterStat.ino });

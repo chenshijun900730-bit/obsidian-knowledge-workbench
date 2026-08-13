@@ -37,11 +37,11 @@ jobs:
       - name: Lint
         run: npm run lint
 
-      - name: Run the complete test suite serially
-        run: npm test -- --no-file-parallelism --maxWorkers=1
-
       - name: Build the normal plugin
         run: npm run build
+
+      - name: Run the complete test suite serially
+        run: npm test -- --no-file-parallelism --maxWorkers=1
 
       - name: Build the read-only acceptance plugin
         run: npm run build:acceptance
