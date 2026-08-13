@@ -706,7 +706,7 @@ describe("local acceptance evidence public boundary", () => {
     });
   }, 600_000);
 
-  it("gathers anchored current evidence, accepts legal derived data, and isolates note drift", async () => {
+  it("classifies pre-enable evidence and anchored fixture drift", async () => {
     const repoRoot = await createCurrentTaskRepository();
     const legacyPath = join(repoRoot, ".dev-vault", "acceptance.json");
     const legacyBytes = Buffer.from("legacy normal acceptance sentinel\n", "utf8");
@@ -779,9 +779,20 @@ describe("local acceptance evidence public boundary", () => {
     expect(wrongCorpus.contentUnchanged).toBe("failed");
     await writeFile(statePath, stateBytes);
     await writeFile(receiptPath, receiptBytes);
+    expect(await readFile(legacyPath)).toEqual(legacyBytes);
+  }, 600_000);
 
+  it("gathers normalized evidence and classifies plugin data states", async () => {
+    const repoRoot = await createCurrentTaskRepository();
+    const legacyPath = join(repoRoot, ".dev-vault", "acceptance.json");
+    const legacyBytes = Buffer.from("legacy normal acceptance sentinel\n", "utf8");
+    await writeFile(legacyPath, legacyBytes);
+
+    await prepareAcceptance({ repoRoot });
+    await installAcceptance({ repoRoot });
     await normalizeInstalledData(repoRoot);
 
+    const dataPath = installedDataPath(repoRoot);
     const reportPath = join(repoRoot, ".dev-vault", "read-only-acceptance-report.json");
     await expect(readFile(reportPath)).rejects.toMatchObject({ code: "ENOENT" });
     const gathered = await localEvidence.gatherLocalAcceptanceEvidence(repoRoot);
@@ -852,6 +863,23 @@ describe("local acceptance evidence public boundary", () => {
     expect(missingHistory.recoveryAbsent).toBe("passed");
     expect(missingHistory.finalHostStopped).toBe("passed");
     await writeFile(dataPath, normalizedDataBytes);
+    expect(await readFile(legacyPath)).toEqual(legacyBytes);
+  }, 600_000);
+
+  it("isolates host-boundary and synthetic-note drift", async () => {
+    const repoRoot = await createCurrentTaskRepository();
+    const legacyPath = join(repoRoot, ".dev-vault", "acceptance.json");
+    const legacyBytes = Buffer.from("legacy normal acceptance sentinel\n", "utf8");
+    await writeFile(legacyPath, legacyBytes);
+
+    await prepareAcceptance({ repoRoot });
+    await installAcceptance({ repoRoot });
+    await normalizeInstalledData(repoRoot);
+
+    const receiptPath = join(repoRoot, ".dev-vault", "read-only-acceptance-receipt.json");
+    const reportPath = join(repoRoot, ".dev-vault", "read-only-acceptance-report.json");
+    const gathered = await localEvidence.gatherLocalAcceptanceEvidence(repoRoot);
+    const report = composeReadOnlyAcceptanceReport(gathered, decodeHostObservation(validHost()));
 
     const markerPath = join(
       repoRoot,
