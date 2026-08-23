@@ -390,7 +390,7 @@ npx vitest run tests/unit/catalog/cloud-directory-page-validator.test.ts tests/u
 
 Expected: PASS. Existing scans still reject `/`; only the synthetic locator lists it.
 
-- [ ] **Step 6: Commit the locator**
+- [x] **Step 6: Commit the locator**
 
 ```bash
 git add src/catalog/cloud-directory-page-validator.ts src/catalog/cloud-directory-locator.ts src/catalog/cloud-directory-discovery-service.ts tests/unit/catalog/cloud-directory-page-validator.test.ts tests/unit/catalog/cloud-directory-locator.test.ts tests/unit/catalog/cloud-directory-discovery-service.test.ts
@@ -412,11 +412,11 @@ git commit -m "feat(目录): 增加受限同名云端定位"
 - Modify: `tests/ui/workbench-controller.test.ts`
 - Modify: `tests/packaging/composition-roots.test.ts`
 
-- [ ] **Step 1: Write failing composition and controller tests**
+- [x] **Step 1: Write failing composition and controller tests**
 
 Prove normal composition exposes one locator and discovery over the same fake source; cloud disposal disposes both once; credential replacement/revoke cancels lookup and clears only session cache; offline/disabled/acceptance expose neither locator nor picker factory; blank initial path opens; invalid nonblank path rejects; snapshots combine recent/cache/groups; remember uses `clock.now()` without journals or secrets; clear affects only recent; local selection never calls scan/verify/resume/OAuth/locator; and missing locator still leaves local candidates/manual entry.
 
-- [ ] **Step 2: Run focused tests and observe interface failures**
+- [x] **Step 2: Run focused tests and observe interface failures**
 
 ```bash
 npx vitest run tests/unit/runtime/runtime-composition.test.ts tests/integration/catalog-offline-composition.test.ts tests/integration/read-only-acceptance-automated-safety.test.ts tests/ui/workbench-controller.test.ts tests/packaging/composition-roots.test.ts
@@ -424,7 +424,7 @@ npx vitest run tests/unit/runtime/runtime-composition.test.ts tests/integration/
 
 Expected: FAIL because the runtime lacks a locator and picker opening still normalizes a mandatory root.
 
-- [ ] **Step 3: Add the locator to normal composition**
+- [x] **Step 3: Add the locator to normal composition**
 
 Extend `CloudCatalogRuntime` with `readonly directoryLocator?: CloudDirectoryLocatorRuntime`. Pass it separately to `CloudCatalogRuntimeService`, dispose it exactly once, and keep disabled constants without it. In normal composition, build both services from the same source:
 
@@ -435,7 +435,7 @@ const directoryLocator = new CloudDirectoryLocatorService(baiduSource, { now });
 
 Do not construct a second OAuth, credential, or Baidu source adapter. Change `RuntimeComposition.createCatalogDirectoryPicker` to accept only `app` and `getLocale`; request-scoped candidate and locator capabilities come from the controller. Keep `main-acceptance.ts` without the factory.
 
-- [ ] **Step 4: Implement the controller-owned candidate runtime**
+- [x] **Step 4: Implement the controller-owned candidate runtime**
 
 Change the picker request to:
 
@@ -497,7 +497,7 @@ return picker.request({
 
 Before replacing or revoking credentials, call `directoryLocator?.cancel()` and `directoryDiscovery?.clear()`. Do not clear persisted recent history.
 
-- [ ] **Step 5: Rerun composition and controller tests**
+- [x] **Step 5: Rerun composition and controller tests**
 
 ```bash
 npx vitest run tests/unit/runtime/runtime-composition.test.ts tests/integration/catalog-offline-composition.test.ts tests/integration/read-only-acceptance-automated-safety.test.ts tests/ui/workbench-controller.test.ts tests/packaging/composition-roots.test.ts

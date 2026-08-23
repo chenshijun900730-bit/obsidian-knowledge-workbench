@@ -137,10 +137,9 @@ const runtime = Object.freeze({
       request: (input) => new ConcreteCatalogLargeScanConfirmationModal(app).request(input),
     };
   },
-  createCatalogDirectoryPicker: (app, discovery, getLocale) => ({
+  createCatalogDirectoryPicker: (app, getLocale) => ({
     request: (input) => new ConcreteCloudDirectoryPickerModal(
       app,
-      discovery,
       () => createWorkbenchI18n(getLocale()),
     ).request(input),
   }),

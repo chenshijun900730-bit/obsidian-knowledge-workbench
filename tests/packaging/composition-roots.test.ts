@@ -107,6 +107,7 @@ describe("composition-root dependency graphs", () => {
       "src/catalog/cloud-catalog-connection-runtime.ts",
       "src/catalog/catalog-scan-service.ts",
       "src/catalog/cloud-directory-discovery-service.ts",
+      "src/catalog/cloud-directory-locator.ts",
       "src/ui/cloud-directory-picker.ts",
     ];
 
@@ -130,6 +131,7 @@ describe("composition-root dependency graphs", () => {
       expect(output, forbidden).not.toContain(forbidden);
     }
     expect(output).not.toContain("CloudDirectoryDiscoveryService");
+    expect(output).not.toContain("CloudDirectoryLocatorService");
     expect(output).not.toMatch(/method=download|\/filemanager|["']dlink["']/u);
   });
 
@@ -154,6 +156,7 @@ describe("composition-root dependency graphs", () => {
       "src/catalog/cloud-catalog-connection-runtime.ts",
       "src/catalog/catalog-scan-service.ts",
       "src/catalog/cloud-directory-discovery-service.ts",
+      "src/catalog/cloud-directory-locator.ts",
       "src/ui/cloud-directory-picker.ts",
     ]));
     expect(output).toMatch(/requestUrl/u);
@@ -161,6 +164,7 @@ describe("composition-root dependency graphs", () => {
     expect(output).toContain("maxListRequestCount");
     expect(output).toContain("maxDurationMs");
     expect(output).toContain("CloudDirectoryDiscoveryService");
+    expect(output).toContain("CloudDirectoryLocatorService");
     expect(output).not.toMatch(/method=download|\/filemanager|["']dlink["']/u);
 
     const sourceAdapter = await readFile(
@@ -181,5 +185,12 @@ describe("composition-root dependency graphs", () => {
     expect(catalogCompositionSource).toContain("homedir()");
     expect(catalogCompositionSource).toContain('"Application Support"');
     expect(catalogCompositionSource).not.toMatch(/vaultBasePath|configDirectory/u);
+    expect(catalogCompositionSource.match(/new BaiduCatalogSourceAdapter/gu)).toHaveLength(1);
+    expect(catalogCompositionSource).toMatch(
+      /new CloudDirectoryDiscoveryService\(baiduSource/u,
+    );
+    expect(catalogCompositionSource).toMatch(
+      /new CloudDirectoryLocatorService\(baiduSource/u,
+    );
   });
 });

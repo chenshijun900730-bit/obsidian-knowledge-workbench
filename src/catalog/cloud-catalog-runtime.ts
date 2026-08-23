@@ -17,6 +17,7 @@ import {
 } from "./hybrid-catalog-types";
 import { UnifiedCatalogSearchService } from "./unified-catalog-search-service";
 import type { CloudDirectoryDiscoveryRuntime } from "./cloud-directory-discovery-service";
+import type { CloudDirectoryLocatorRuntime } from "./cloud-directory-locator";
 
 const PAGE_SIZE = 50 as const;
 const STATUS_VALUES: readonly CatalogVerificationStatus[] = ["unverified", "verified", "difference"];
@@ -127,6 +128,7 @@ export interface CloudCatalogRuntime {
   readonly connection?: CloudCatalogConnectionRuntime;
   readonly hybrid?: HybridCatalogRuntime;
   readonly directoryDiscovery?: CloudDirectoryDiscoveryRuntime;
+  readonly directoryLocator?: CloudDirectoryLocatorRuntime;
   initialize(): Promise<void>;
   snapshot(): CloudCatalogViewModel;
   subscribe(listener: () => void): () => void;
@@ -243,6 +245,7 @@ export class CloudCatalogRuntimeService implements CloudCatalogRuntime {
   readonly connection?: CloudCatalogConnectionRuntime;
   readonly hybrid?: HybridCatalogRuntime;
   readonly directoryDiscovery?: CloudDirectoryDiscoveryRuntime;
+  readonly directoryLocator?: CloudDirectoryLocatorRuntime;
   private viewModel: CloudCatalogViewModel = initialViewModel();
   private legacySearch: CatalogSearchService | undefined;
   private unifiedSearch: UnifiedCatalogSearchService | undefined;
@@ -258,10 +261,12 @@ export class CloudCatalogRuntimeService implements CloudCatalogRuntime {
     hybrid?: HybridCatalogRuntime,
     private readonly unified?: Pick<UnifiedCatalogStorePort, "loadActiveUnified">,
     directoryDiscovery?: CloudDirectoryDiscoveryRuntime,
+    directoryLocator?: CloudDirectoryLocatorRuntime,
   ) {
     this.connection = connection;
     this.hybrid = hybrid;
     this.directoryDiscovery = directoryDiscovery;
+    this.directoryLocator = directoryLocator;
     this.unsubscribeConnection = connection?.subscribe(() => this.emit());
   }
 
@@ -406,9 +411,10 @@ export class CloudCatalogRuntimeService implements CloudCatalogRuntime {
     this.disposed = true;
     this.unsubscribeConnection?.();
     this.unsubscribeConnection = undefined;
-    this.connection?.dispose();
-    this.hybrid?.dispose();
+    this.directoryLocator?.dispose();
     this.directoryDiscovery?.dispose();
+    this.hybrid?.dispose();
+    this.connection?.dispose();
     this.listeners.clear();
     this.clearSearch();
     this.viewModel = {

@@ -418,6 +418,7 @@ describe("read-only acceptance automated safety", () => {
     const catalog = runtime.createCatalog({} as never);
     expect(catalog.connection).toBeUndefined();
     expect(catalog.directoryDiscovery).toBeUndefined();
+    expect(catalog.directoryLocator).toBeUndefined();
     expect(catalog.snapshot()).toMatchObject({
       status: "unavailable",
       messageCode: "catalog-unavailable",

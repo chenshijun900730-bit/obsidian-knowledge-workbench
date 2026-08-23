@@ -7,12 +7,17 @@ import {
 import { controllerFixture } from "../helpers/ui-fixtures";
 import { HybridCatalogError } from "../../src/catalog/hybrid-catalog-types";
 import type { CloudDirectoryDiscoveryRuntime } from "../../src/catalog/cloud-directory-discovery-service";
+import type { CloudDirectoryLocatorRuntime } from "../../src/catalog/cloud-directory-locator";
+import type {
+  CloudDirectoryPickerPresenter,
+  CloudDirectoryPickerRequest,
+} from "../../src/ui/cloud-directory-picker";
 
 describe("WorkbenchController cloud catalog filters", () => {
-  it("validates and normalizes a picker root before any directory capability is called", async () => {
+  it("opens the picker with a blank initial path and still rejects invalid nonblank paths", async () => {
     const searchQueries: string[] = [];
     const discoverCalls: string[] = [];
-    const pickerCalls: string[] = [];
+    const pickerCalls: Array<string | null> = [];
     const discovery: CloudDirectoryDiscoveryRuntime = {
       searchCached(query) { searchQueries.push(query); return []; },
       snapshotCached: () => [],
@@ -35,28 +40,198 @@ describe("WorkbenchController cloud catalog filters", () => {
     });
     const internals = fixture.controller as unknown as {
       readonly dependencies: {
-        catalogDirectoryPicker?: Readonly<{
-          request(input: Readonly<{ initialRoot: string }>): Promise<string | null>;
-        }>;
+        catalogDirectoryPicker?: CloudDirectoryPickerPresenter;
       };
     };
     internals.dependencies.catalogDirectoryPicker = {
       async request(input) {
-        pickerCalls.push(input.initialRoot);
+        pickerCalls.push(input.initialPath);
         return "/Synthetic/Chosen";
       },
     };
 
-    for (const invalid of ["", "/", "Synthetic", "/Synthetic//Child"]) {
+    await expect(fixture.controller.chooseCatalogRoot("   "))
+      .resolves.toBe("/Synthetic/Chosen");
+    for (const invalid of ["/", "Synthetic", "/Synthetic//Child"]) {
       await expect(fixture.controller.chooseCatalogRoot(invalid))
         .rejects.toThrow("invalid-scan-root");
     }
     await expect(fixture.controller.chooseCatalogRoot("/Synthetic/e\u0301"))
       .resolves.toBe("/Synthetic/Chosen");
 
-    expect(pickerCalls).toEqual(["/Synthetic/é"]);
+    expect(pickerCalls).toEqual([null, "/Synthetic/é"]);
     expect(searchQueries).toEqual([]);
     expect(discoverCalls).toEqual([]);
+    fixture.controller.dispose();
+  });
+
+  it("builds one dynamic local candidate runtime and persists only recent paths atomically", async () => {
+    const discovery: CloudDirectoryDiscoveryRuntime = {
+      searchCached: () => [],
+      snapshotCached: () => [{
+        fsId: "cached-1",
+        path: "/Cached/Science",
+        filename: "Science",
+      }],
+      discoverMore: async (rootPath) => ({
+        status: "complete",
+        stopReason: "complete",
+        rootPath,
+        directoryCount: 0,
+        listRequestCount: 1,
+        elapsedMs: 1,
+      }),
+      clear: () => undefined,
+      dispose: () => undefined,
+    };
+    const hybrid = new FakeHybridCatalogRuntime({
+      status: "ready",
+      active: {
+        importedAt: 1,
+        pdfCount: 1,
+        unverifiedCount: 1,
+        verifiedCount: 0,
+        differenceCount: 0,
+        cloudMissingCount: 0,
+        groupCount: 1,
+        verifiedGroupCount: 0,
+        groups: [{
+          groupKey: "group:science",
+          label: "Science",
+          pdfCount: 1,
+          mode: "recursive",
+          verificationStatus: "unverified",
+        }],
+      },
+    });
+    const locator = {
+      locateByName: async () => { throw new Error("must-not-locate"); },
+      cancel: () => undefined,
+      dispose: () => undefined,
+    } satisfies CloudDirectoryLocatorRuntime;
+    const catalog = new FakeCloudCatalogRuntime({}, undefined, hybrid, discovery, locator);
+    const fixture = controllerFixture({ catalog });
+    fixture.store.setSettingsForTest({
+      ...fixture.store.settings(),
+      recentCloudDirectories: {
+        schemaVersion: 1,
+        items: [{
+          path: "/Recent/Literature",
+          filename: "Literature",
+          lastUsedAt: "1970-01-01T00:00:00.001Z",
+        }],
+      },
+    });
+    let request: CloudDirectoryPickerRequest | undefined;
+    const internals = fixture.controller as unknown as {
+      readonly dependencies: { catalogDirectoryPicker?: CloudDirectoryPickerPresenter };
+    };
+    internals.dependencies.catalogDirectoryPicker = {
+      request: async (input) => { request = input; return "/Recent/Literature"; },
+    };
+
+    await fixture.controller.chooseCatalogRoot("");
+    expect(request?.locator).toBe(locator);
+    expect(request?.candidates.snapshot()).toEqual([
+      expect.objectContaining({ source: "recent", path: "/Recent/Literature" }),
+      expect.objectContaining({ source: "session-cache", path: "/Cached/Science" }),
+      expect.objectContaining({ source: "txt-group", filename: "Science" }),
+    ]);
+
+    const journalBefore = [fixture.journal.listCalls, fixture.journal.clearCalls];
+    await request?.candidates.remember("/Recent/New");
+    expect(fixture.store.settings().recentCloudDirectories.items[0]).toEqual({
+      path: "/Recent/New",
+      filename: "New",
+      lastUsedAt: "1970-01-01T00:00:00.100Z",
+    });
+    expect([fixture.journal.listCalls, fixture.journal.clearCalls]).toEqual(journalBefore);
+    expect(fixture.store.settings()).toMatchObject({
+      locale: "zh-CN",
+      secretId: "",
+    });
+
+    await request?.candidates.clearRecent();
+    expect(fixture.store.settings().recentCloudDirectories.items).toEqual([]);
+    expect(request?.candidates.snapshot()).toEqual([
+      expect.objectContaining({ source: "session-cache", path: "/Cached/Science" }),
+      expect.objectContaining({ source: "txt-group", filename: "Science" }),
+    ]);
+    fixture.controller.dispose();
+  });
+
+  it("cancels lookup and clears session discovery before replacing or revoking credentials", async () => {
+    const events: string[] = [];
+    const connection = new FakeCloudCatalogConnectionRuntime();
+    connection.saveApplicationCredentials = async (input) => {
+      events.push("save");
+      connection.savedCredentials.push(structuredClone(input));
+    };
+    connection.beginAuthorization = async () => {
+      events.push("authorize");
+      return { expiresAt: 1 };
+    };
+    connection.revoke = async () => { events.push("revoke"); };
+    const discovery = {
+      searchCached: () => [],
+      snapshotCached: () => [],
+      discoverMore: async () => { throw new Error("must-not-discover"); },
+      clear: () => { events.push("clear"); },
+      dispose: () => undefined,
+    } satisfies CloudDirectoryDiscoveryRuntime;
+    const locator = {
+      locateByName: async () => { throw new Error("must-not-locate"); },
+      cancel: () => { events.push("cancel"); },
+      dispose: () => undefined,
+    } satisfies CloudDirectoryLocatorRuntime;
+    const catalog = new FakeCloudCatalogRuntime({}, connection, undefined, discovery, locator);
+    const fixture = controllerFixture({ catalog });
+    fixture.store.setSettingsForTest({
+      ...fixture.store.settings(),
+      recentCloudDirectories: {
+        schemaVersion: 1,
+        items: [{
+          path: "/Recent/Kept",
+          filename: "Kept",
+          lastUsedAt: "1970-01-01T00:00:00.001Z",
+        }],
+      },
+    });
+
+    await fixture.controller.connectCatalog({ appKey: "app", secretKey: "secret" });
+    await fixture.controller.revokeCatalog();
+
+    expect(events).toEqual([
+      "cancel", "clear", "save", "authorize",
+      "cancel", "clear", "revoke",
+    ]);
+    expect(fixture.store.settings().recentCloudDirectories.items).toHaveLength(1);
+    fixture.controller.dispose();
+  });
+
+  it("keeps a local picker usable without discovery or locator and causes no cloud action", async () => {
+    const connection = new FakeCloudCatalogConnectionRuntime();
+    const hybrid = new FakeHybridCatalogRuntime({ status: "empty" });
+    const fixture = controllerFixture({
+      catalog: new FakeCloudCatalogRuntime({}, connection, hybrid),
+    });
+    let request: CloudDirectoryPickerRequest | undefined;
+    const internals = fixture.controller as unknown as {
+      readonly dependencies: { catalogDirectoryPicker?: CloudDirectoryPickerPresenter };
+    };
+    internals.dependencies.catalogDirectoryPicker = {
+      request: async (input) => { request = input; return "/Manual/Choice"; },
+    };
+
+    await expect(fixture.controller.chooseCatalogRoot(""))
+      .resolves.toBe("/Manual/Choice");
+
+    expect(request).not.toHaveProperty("locator");
+    expect(request?.candidates.snapshot()).toEqual([]);
+    expect(connection.startScanCalls).toEqual([]);
+    expect(connection.beginAuthorizationCalls).toBe(0);
+    expect(hybrid.startInputs).toEqual([]);
+    expect(hybrid.resumeRoots).toEqual([]);
     fixture.controller.dispose();
   });
 

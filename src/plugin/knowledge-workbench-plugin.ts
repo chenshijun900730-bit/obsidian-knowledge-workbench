@@ -138,12 +138,7 @@ export function createKnowledgeWorkbenchPluginClass(runtime: RuntimeComposition)
         getLocale,
       );
       const catalogDirectoryPicker = runtime.createCatalogDirectoryPicker !== undefined
-        && catalog.directoryDiscovery !== undefined
-        ? runtime.createCatalogDirectoryPicker(
-          this.app,
-          catalog.directoryDiscovery,
-          getLocale,
-        )
+        ? runtime.createCatalogDirectoryPicker(this.app, getLocale)
         : undefined;
       const changePlans = new ChangePlanService(vaultAdapter, () => {
         const settings = store.settings();

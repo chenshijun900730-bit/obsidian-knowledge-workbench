@@ -304,6 +304,10 @@ class FixtureStore {
     this.settingsValue = detached(settings);
   }
 
+  async updateSettings(change: (settings: PluginSettings) => PluginSettings): Promise<void> {
+    await this.saveSettings(change(this.settings()));
+  }
+
   async setPin(id: string, pinnedAt: number | null): Promise<void> {
     this.throwIfFailing();
     const pins = { ...this.operationalValue.pins };

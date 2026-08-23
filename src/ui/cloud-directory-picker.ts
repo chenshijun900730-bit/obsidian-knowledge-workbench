@@ -5,10 +5,21 @@ import {
   type CloudDirectoryDiscoverySummary,
 } from "../catalog/cloud-directory-discovery-service";
 import type { RankedCloudDirectory } from "../catalog/cloud-directory-search";
+import {
+  rankCloudDirectoryCandidates,
+  type CloudDirectoryCandidateRuntime,
+} from "../catalog/cloud-directory-candidates";
+import type { CloudDirectoryLocatorRuntime } from "../catalog/cloud-directory-locator";
 import { normalizeCatalogScanRoot, normalizeCloudAbsolutePath } from "../catalog/catalog-path";
 import type { WorkbenchI18n, WorkbenchMessageKey } from "../i18n/workbench-i18n";
 
 export interface CloudDirectoryPickerRequest {
+  readonly initialPath: string | null;
+  readonly candidates: CloudDirectoryCandidateRuntime;
+  readonly locator?: CloudDirectoryLocatorRuntime;
+}
+
+interface LegacyCloudDirectoryPickerRequest {
   readonly initialRoot: string;
 }
 
@@ -34,7 +45,7 @@ const safeDirectory = (
     const path = normalizeCloudAbsolutePath(candidate.path);
     const filename = candidate.filename.normalize("NFC");
     if (
-      (path !== rootPath && !path.startsWith(`${rootPath}/`))
+      (rootPath !== "/" && path !== rootPath && !path.startsWith(`${rootPath}/`))
       || path.slice(path.lastIndexOf("/") + 1) !== filename
       || isPdfFilename(filename)
     ) return null;
@@ -82,18 +93,42 @@ export function createCloudDirectoryPickerModalClass(
     private requestRoot: string | null = null;
     private settled = false;
     private opener: HTMLElement | null = null;
+    private readonly discovery: CloudDirectoryDiscoveryRuntime | undefined;
+    private readonly getI18n: () => WorkbenchI18n;
+    private requestCandidates: CloudDirectoryCandidateRuntime | null = null;
 
+    constructor(app: App, getI18n: () => WorkbenchI18n);
     constructor(
       app: App,
-      private readonly discovery: CloudDirectoryDiscoveryRuntime,
-      private readonly getI18n: () => WorkbenchI18n,
+      discovery: CloudDirectoryDiscoveryRuntime,
+      getI18n: () => WorkbenchI18n,
+    );
+    constructor(
+      app: App,
+      discoveryOrI18n: CloudDirectoryDiscoveryRuntime | (() => WorkbenchI18n),
+      legacyGetI18n?: () => WorkbenchI18n,
     ) {
       super(app);
+      if (typeof discoveryOrI18n === "function") {
+        this.discovery = undefined;
+        this.getI18n = discoveryOrI18n;
+      } else {
+        this.discovery = discoveryOrI18n;
+        if (legacyGetI18n === undefined) throw new Error("missing-i18n-provider");
+        this.getI18n = legacyGetI18n;
+      }
     }
 
-    request(input: CloudDirectoryPickerRequest): Promise<string | null> {
+    request(input: CloudDirectoryPickerRequest): Promise<string | null>;
+    request(input: LegacyCloudDirectoryPickerRequest): Promise<string | null>;
+    request(
+      input: CloudDirectoryPickerRequest | LegacyCloudDirectoryPickerRequest,
+    ): Promise<string | null> {
       if (this.result !== null) return this.result;
-      const rootPath = normalizeCatalogScanRoot(input.initialRoot);
+      const rootPath = "initialRoot" in input
+        ? normalizeCatalogScanRoot(input.initialRoot)
+        : input.initialPath === null ? "/" : normalizeCatalogScanRoot(input.initialPath);
+      this.requestCandidates = "candidates" in input ? input.candidates : null;
       this.requestRoot = rootPath;
       this.opener = this.contentEl.ownerDocument.activeElement as HTMLElement | null;
       this.abortController = new AbortController();
@@ -186,7 +221,21 @@ export function createCloudDirectoryPickerModalClass(
       };
       const searchCached = (): void => {
         try {
-          renderResults(this.discovery.searchCached(this.query));
+          const candidates = this.discovery?.searchCached(this.query) ?? rankCloudDirectoryCandidates({
+            candidates: this.requestCandidates?.snapshot() ?? [],
+            query: this.query,
+            enabledSources: new Set(["recent", "session-cache", "cloud-locator", "txt-group"]),
+            selectedPath: this.selectedPath,
+          }).flatMap((ranked): readonly RankedCloudDirectory[] => (
+            ranked.candidate.kind === "exact"
+              ? [{
+                path: ranked.candidate.path,
+                filename: ranked.candidate.filename,
+                score: ranked.score,
+              }]
+              : []
+          ));
+          renderResults(candidates);
           status.textContent = "";
         } catch {
           renderResults([]);
@@ -242,7 +291,13 @@ export function createCloudDirectoryPickerModalClass(
       confirmDiscovery.addEventListener("click", () => {
         confirmDiscovery.disabled = true;
         status.textContent = i18n.t("directoryPicker.discovery.running");
-        void this.discovery.discoverMore(rootPath, signal).then((value) => {
+        const discovery = this.discovery;
+        if (discovery === undefined) {
+          confirmDiscovery.disabled = false;
+          status.textContent = i18n.t("directoryPicker.error");
+          return;
+        }
+        void discovery.discoverMore(rootPath, signal).then((value) => {
           if (signal.aborted) return;
           searchCached();
           status.textContent = partialDiscovery(value)
@@ -309,6 +364,7 @@ export function createCloudDirectoryPickerModalClass(
       this.selectedPath = null;
       this.confirmationVisible = false;
       this.requestRoot = null;
+      this.requestCandidates = null;
       this.contentEl.replaceChildren();
       this.opener?.focus({ preventScroll: true });
       this.opener = null;

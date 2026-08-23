@@ -57,8 +57,10 @@ describe("normal cloud catalog composition", () => {
     const offline = createOfflineCloudCatalogRuntime();
     expect(offline.hybrid).toBeUndefined();
     expect(offline.directoryDiscovery).toBeUndefined();
+    expect(offline.directoryLocator).toBeUndefined();
     expect(DISABLED_CLOUD_CATALOG_RUNTIME.hybrid).toBeUndefined();
     expect(DISABLED_CLOUD_CATALOG_RUNTIME.directoryDiscovery).toBeUndefined();
+    expect(DISABLED_CLOUD_CATALOG_RUNTIME.directoryLocator).toBeUndefined();
     offline.dispose();
   });
 
@@ -70,6 +72,7 @@ describe("normal cloud catalog composition", () => {
 
     for (const source of sources) {
       expect(source).not.toContain("cloud-directory-discovery-service");
+      expect(source).not.toContain("cloud-directory-locator");
       expect(source).not.toContain("baidu-catalog-source-adapter");
     }
   });
@@ -128,6 +131,7 @@ describe("normal cloud catalog composition", () => {
 
     await runtime.initialize();
     expect(runtime.directoryDiscovery).toBeDefined();
+    expect(runtime.directoryLocator).toBeDefined();
     expect(runtime.directoryDiscovery?.searchCached("synthetic")).toEqual([]);
     expect(runtime.connection?.snapshot()).toEqual({ status: "unconfigured" });
     expect(runtime.snapshot()).toMatchObject({ status: "no-snapshot", total: 0 });
@@ -171,6 +175,18 @@ describe("normal cloud catalog composition", () => {
     const discoveryUrl = new URL(requests[2]!.url);
     expect(discoveryUrl.searchParams.get("method")).toBe("list");
     expect(discoveryUrl.searchParams.get("dir")).toBe("/synthetic-small-folder");
+
+    responses.push({ status: 200, text: JSON.stringify({ errno: 0, list: [] }) });
+    await expect(runtime.directoryLocator?.locateByName("synthetic"))
+      .resolves.toMatchObject({
+        status: "complete",
+        stopReason: "complete",
+        listRequestCount: 1,
+      });
+    expect(requests).toHaveLength(4);
+    const locatorUrl = new URL(requests[3]!.url);
+    expect(locatorUrl.searchParams.get("method")).toBe("list");
+    expect(locatorUrl.searchParams.get("dir")).toBe("/");
 
     expect((await stat(catalogRoot)).isDirectory()).toBe(true);
     runtime.dispose();
