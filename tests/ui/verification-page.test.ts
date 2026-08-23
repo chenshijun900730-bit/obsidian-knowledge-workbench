@@ -72,14 +72,20 @@ describe("verification page", () => {
     const onBrowseRoot = vi.fn(async () => "/Synthetic/9-文学253册");
     renderVerificationPage(root, {
       ...model(),
-      rootPath: "/Synthetic",
+      rootPath: "",
       actions: actions({ onRootChange, onBrowseRoot }),
     });
 
     const browse = root.querySelector<HTMLButtonElement>(
       '[data-action="browse-verification-root"]',
     )!;
-    expect(browse.textContent).toBe("浏览网盘目录");
+    expect(browse.textContent).toBe("选择目录");
+    expect(root.querySelector('[data-cloud-directory-current="true"]')?.textContent)
+      .toContain("尚未选择目录");
+    expect(root.querySelector<HTMLDetailsElement>("details[data-cloud-directory-advanced]")?.open)
+      .toBe(false);
+    expect(root.querySelector<HTMLButtonElement>('[data-action="start-verification"]')?.disabled)
+      .toBe(true);
     browse.click();
     await Promise.resolve();
     await Promise.resolve();
@@ -88,6 +94,117 @@ describe("verification page", () => {
     expect(onRootChange).toHaveBeenCalledWith("/Synthetic/9-文学253册");
     expect(root.querySelector<HTMLInputElement>('[data-verification-root="true"]')?.value)
       .toBe("/Synthetic/9-文学253册");
+    expect(root.querySelector<HTMLButtonElement>('[data-action="start-verification"]')?.disabled)
+      .toBe(false);
+  });
+
+  it("does not expose a directory picker when the host has no picker factory", () => {
+    const root = testRoot();
+    const withoutBrowse = actions();
+    const { onBrowseRoot: _onBrowseRoot, ...remainingActions } = withoutBrowse;
+    renderVerificationPage(root, {
+      ...model(),
+      actions: remainingActions,
+    });
+
+    const choose = root.querySelector<HTMLButtonElement>(
+      '[data-action="browse-verification-root"]',
+    );
+    expect(choose?.hidden).toBe(true);
+    expect(choose?.disabled).toBe(true);
+  });
+
+  it("uses local non-root validation to gate start and resume without invoking either action", () => {
+    const root = testRoot();
+    const onStart = vi.fn(async () => undefined);
+    const onResume = vi.fn(async () => undefined);
+    renderVerificationPage(root, {
+      ...model({
+        status: "paused",
+        active,
+        batch: {
+          batchId: "batch-local-root-gate",
+          status: "paused",
+          stopReason: "time-limit",
+          resumeAvailable: true,
+          runOrdinal: 1,
+          remainingGroupCount: 1,
+          pdfCount: 1,
+          directoryCount: 1,
+          ignoredFileCount: 0,
+          listRequestCount: 1,
+          cumulativeListRequestCount: 1,
+        },
+      }),
+      rootPath: "",
+      actions: actions({ onStart, onResume }),
+    });
+    const input = root.querySelector<HTMLInputElement>('[data-verification-root="true"]')!;
+    const start = root.querySelector<HTMLButtonElement>('[data-action="start-verification"]')!;
+    const resume = root.querySelector<HTMLButtonElement>('[data-action="resume-verification"]')!;
+
+    expect(start.disabled).toBe(true);
+    expect(resume.disabled).toBe(true);
+    for (const invalid of ["/", "relative", "/Synthetic//Science"]) {
+      input.value = invalid;
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+      expect(start.disabled).toBe(true);
+      expect(resume.disabled).toBe(true);
+    }
+    input.value = "/Synthetic";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    expect(start.disabled).toBe(false);
+    expect(resume.disabled).toBe(false);
+    expect(onStart).not.toHaveBeenCalled();
+    expect(onResume).not.toHaveBeenCalled();
+  });
+
+  it("admits only one pending start or resume action at a time", async () => {
+    const root = testRoot();
+    let resolveStart!: () => void;
+    let resolveResume!: () => void;
+    const onStart = vi.fn(async () => new Promise<void>((resolve) => { resolveStart = resolve; }));
+    const onResume = vi.fn(async () => new Promise<void>((resolve) => { resolveResume = resolve; }));
+    renderVerificationPage(root, {
+      ...model({
+        status: "paused",
+        active,
+        batch: {
+          batchId: "batch-pending-action-gate",
+          status: "paused",
+          stopReason: "time-limit",
+          resumeAvailable: true,
+          runOrdinal: 1,
+          remainingGroupCount: 1,
+          pdfCount: 1,
+          directoryCount: 1,
+          ignoredFileCount: 0,
+          listRequestCount: 1,
+          cumulativeListRequestCount: 1,
+        },
+      }),
+      rootPath: "/Synthetic",
+      actions: actions({ onStart, onResume }),
+    });
+    const start = root.querySelector<HTMLButtonElement>('[data-action="start-verification"]')!;
+    const resume = root.querySelector<HTMLButtonElement>('[data-action="resume-verification"]')!;
+
+    start.click();
+    start.click();
+    expect(onStart).toHaveBeenCalledOnce();
+    expect(start.disabled).toBe(true);
+    expect(resume.disabled).toBe(true);
+    resolveStart();
+    await vi.waitFor(() => expect(resume.disabled).toBe(false));
+
+    resume.click();
+    resume.click();
+    expect(onResume).toHaveBeenCalledOnce();
+    expect(start.disabled).toBe(true);
+    expect(resume.disabled).toBe(true);
+    resolveResume();
+    await Promise.resolve();
+    await Promise.resolve();
   });
 
   it("renders scanning and cancellation controls", () => {
@@ -316,6 +433,8 @@ describe("verification page", () => {
 
     const input = root.querySelector<HTMLInputElement>('[data-verification-root="true"]')!;
     expect(input.disabled).toBe(true);
+    expect(root.querySelector<HTMLButtonElement>('[data-action="browse-verification-root"]')?.disabled)
+      .toBe(true);
     input.value = "/Changed";
     input.dispatchEvent(new Event("input", { bubbles: true }));
     expect(rootChange).not.toHaveBeenCalled();

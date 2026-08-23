@@ -219,23 +219,296 @@ describe("shared grouped settings surface", () => {
     });
     surface.render(root, "zh-CN");
     const input = root.querySelector<HTMLInputElement>('[data-catalog-scan-root="true"]')!;
-    input.value = "/Synthetic";
-    input.dispatchEvent(new Event("input", { bubbles: true }));
-
-    root.querySelector<HTMLButtonElement>(
+    const details = input.closest("details");
+    const choose = root.querySelector<HTMLButtonElement>(
       '[data-action="browse-catalog-scan-root"]',
-    )!.click();
+    )!;
+
+    expect(root.querySelector('[data-cloud-directory-current="true"]')?.textContent)
+      .toContain("尚未选择目录");
+    expect(details?.open).toBe(false);
+    expect(choose.textContent).toBe("选择目录");
+    expect(root.querySelector<HTMLButtonElement>('[data-action="catalog-start-scan"]')?.disabled)
+      .toBe(true);
+
+    choose.click();
     await Promise.resolve();
     await Promise.resolve();
 
-    expect(chooseCatalogRoot).toHaveBeenCalledWith("/Synthetic");
+    expect(chooseCatalogRoot).toHaveBeenCalledWith("");
     expect(input.value).toBe("/Synthetic/9-文学253册");
+    expect(root.querySelector('[data-cloud-directory-current="true"]')?.textContent)
+      .toContain("/Synthetic/9-文学253册");
+    expect(root.querySelector<HTMLButtonElement>('[data-action="catalog-start-scan"]')?.disabled)
+      .toBe(false);
     expect(setOpenAtStartup).not.toHaveBeenCalled();
     expect(setLocale).not.toHaveBeenCalled();
     expect(requestCatalogScan).not.toHaveBeenCalled();
     surface.render(root, "zh-CN");
     expect(root.querySelector<HTMLInputElement>('[data-catalog-scan-root="true"]')?.value)
       .toBe("/Synthetic/9-文学253册");
+  });
+
+  it("keeps scan and category verification gated by a valid non-root draft and busy state", () => {
+    const groupKey = `group:${"c".repeat(64)}`;
+    let connectionListener = (): void => undefined;
+    let hybridListener = (): void => undefined;
+    let connectionStatus: "authorized" | "scanning" = "authorized";
+    let hybridStatus: "ready" | "scanning" = "ready";
+    const controller = connectedControllerFixture({
+      catalogConnection: () => ({ status: connectionStatus }),
+      subscribeCatalogConnection: (listener) => {
+        connectionListener = listener;
+        return () => { connectionListener = (): void => undefined; };
+      },
+      hybridCatalog: () => ({
+        status: hybridStatus,
+        active: {
+          importedAt: 1,
+          pdfCount: 1,
+          unverifiedCount: 1,
+          verifiedCount: 0,
+          differenceCount: 0,
+          cloudMissingCount: 0,
+          groupCount: 1,
+          verifiedGroupCount: 0,
+          groups: [{
+            groupKey,
+            label: "Science",
+            pdfCount: 1,
+            mode: "recursive",
+            verificationStatus: "unverified",
+          }],
+        },
+      }),
+      subscribeHybridCatalog: (listener) => {
+        hybridListener = listener;
+        return () => { hybridListener = (): void => undefined; };
+      },
+      previewCatalogTxt: async () => undefined,
+      requestCatalogTxtImport: async () => undefined,
+      requestLargeCatalogVerification: async () => undefined,
+      requestResumeLargeCatalogVerification: async () => undefined,
+      cancelLargeCatalogVerification: () => undefined,
+      validateCatalogScanRoot: (value) => {
+        if (!value.startsWith("/") || value === "/" || value.includes("//")) {
+          throw new Error("invalid-root");
+        }
+        return value;
+      },
+    });
+    const root = createTestDiv();
+    createSettingsSectionsSurface({
+      app: {} as App,
+      controller,
+      policy: NORMAL_RUNTIME_POLICY,
+    }).render(root, "zh-CN");
+    const scanInput = root.querySelector<HTMLInputElement>('[data-catalog-scan-root="true"]')!;
+    const scanStart = root.querySelector<HTMLButtonElement>('[data-action="catalog-start-scan"]')!;
+    const verificationInput = root.querySelector<HTMLInputElement>(
+      '[data-catalog-large-scan-root="true"]',
+    )!;
+    const verificationStart = root.querySelector<HTMLButtonElement>(
+      '[data-action="catalog-start-large-verification"]',
+    )!;
+    const group = root.querySelector<HTMLInputElement>(`[data-catalog-group-key="${groupKey}"]`)!;
+
+    expect(root.querySelector<HTMLButtonElement>('[data-action="browse-catalog-scan-root"]')?.hidden)
+      .toBe(true);
+    expect(root.querySelector<HTMLButtonElement>(
+      '[data-action="browse-catalog-large-scan-root"]',
+    )?.hidden).toBe(true);
+
+    expect(scanStart.disabled).toBe(true);
+    for (const invalid of ["/", "relative", "/Synthetic//Science"]) {
+      scanInput.value = invalid;
+      scanInput.dispatchEvent(new Event("input", { bubbles: true }));
+      expect(scanStart.disabled).toBe(true);
+    }
+    scanInput.value = "/Synthetic";
+    scanInput.dispatchEvent(new Event("input", { bubbles: true }));
+    expect(scanStart.disabled).toBe(false);
+
+    group.checked = true;
+    group.dispatchEvent(new Event("change", { bubbles: true }));
+    expect(verificationStart.disabled).toBe(true);
+    verificationInput.value = "/Synthetic";
+    verificationInput.dispatchEvent(new Event("input", { bubbles: true }));
+    expect(verificationStart.disabled).toBe(false);
+
+    connectionStatus = "scanning";
+    hybridStatus = "scanning";
+    connectionListener();
+    hybridListener();
+    expect(scanStart.disabled).toBe(true);
+    expect(verificationStart.disabled).toBe(true);
+    expect(scanInput.disabled).toBe(true);
+    expect(verificationInput.disabled).toBe(true);
+  });
+
+  it("admits only one pending scan or category verification action", async () => {
+    const groupKey = `group:${"e".repeat(64)}`;
+    const scanGate = deferred();
+    const verificationGate = deferred();
+    const resumeGate = deferred();
+    const requestCatalogScan = vi.fn(async () => scanGate.promise);
+    const requestLargeCatalogVerification = vi.fn(async () => verificationGate.promise);
+    const requestResumeLargeCatalogVerification = vi.fn(async () => resumeGate.promise);
+    const controller = connectedControllerFixture({
+      requestCatalogScan,
+      hybridCatalog: () => ({
+        status: "paused",
+        active: {
+          importedAt: 1,
+          pdfCount: 1,
+          unverifiedCount: 1,
+          verifiedCount: 0,
+          differenceCount: 0,
+          cloudMissingCount: 0,
+          groupCount: 1,
+          verifiedGroupCount: 0,
+          groups: [{
+            groupKey,
+            label: "Science",
+            pdfCount: 1,
+            mode: "recursive",
+            verificationStatus: "unverified",
+          }],
+        },
+        batch: {
+          batchId: "batch-settings-pending-gate",
+          status: "paused",
+          stopReason: "time-limit",
+          resumeAvailable: true,
+          runOrdinal: 1,
+          remainingGroupCount: 1,
+          pdfCount: 1,
+          directoryCount: 1,
+          ignoredFileCount: 0,
+          listRequestCount: 1,
+          cumulativeListRequestCount: 1,
+        },
+      }),
+      subscribeHybridCatalog: () => () => undefined,
+      previewCatalogTxt: async () => undefined,
+      requestCatalogTxtImport: async () => undefined,
+      requestLargeCatalogVerification,
+      requestResumeLargeCatalogVerification,
+      cancelLargeCatalogVerification: () => undefined,
+      validateCatalogScanRoot: (value) => {
+        if (!value.startsWith("/") || value === "/" || value.includes("//")) {
+          throw new Error("invalid-root");
+        }
+        return value;
+      },
+    });
+    const root = createTestDiv();
+    createSettingsSectionsSurface({
+      app: {} as App,
+      controller,
+      policy: NORMAL_RUNTIME_POLICY,
+    }).render(root, "zh-CN");
+
+    const scanInput = root.querySelector<HTMLInputElement>('[data-catalog-scan-root="true"]')!;
+    const scanStart = root.querySelector<HTMLButtonElement>('[data-action="catalog-start-scan"]')!;
+    scanInput.value = "/Synthetic/Scan";
+    scanInput.dispatchEvent(new Event("input", { bubbles: true }));
+    scanStart.click();
+    scanStart.click();
+    expect(requestCatalogScan).toHaveBeenCalledOnce();
+    expect(scanStart.disabled).toBe(true);
+    scanGate.resolve();
+    await vi.waitFor(() => expect(scanStart.disabled).toBe(false));
+
+    const group = root.querySelector<HTMLInputElement>(`[data-catalog-group-key="${groupKey}"]`)!;
+    const verificationInput = root.querySelector<HTMLInputElement>(
+      '[data-catalog-large-scan-root="true"]',
+    )!;
+    const verificationStart = root.querySelector<HTMLButtonElement>(
+      '[data-action="catalog-start-large-verification"]',
+    )!;
+    const verificationResume = root.querySelector<HTMLButtonElement>(
+      '[data-action="catalog-resume-large-verification"]',
+    )!;
+    group.checked = true;
+    group.dispatchEvent(new Event("change", { bubbles: true }));
+    verificationInput.value = "/Synthetic/Parent";
+    verificationInput.dispatchEvent(new Event("input", { bubbles: true }));
+
+    verificationStart.click();
+    verificationStart.click();
+    expect(requestLargeCatalogVerification).toHaveBeenCalledOnce();
+    expect(verificationStart.disabled).toBe(true);
+    expect(verificationResume.disabled).toBe(true);
+    verificationGate.resolve();
+    await vi.waitFor(() => expect(verificationResume.disabled).toBe(false));
+
+    verificationResume.click();
+    verificationResume.click();
+    expect(requestResumeLargeCatalogVerification).toHaveBeenCalledOnce();
+    expect(verificationStart.disabled).toBe(true);
+    expect(verificationResume.disabled).toBe(true);
+    resumeGate.resolve();
+  });
+
+  it("preserves independent scan and verification drafts plus groups across a language rerender", () => {
+    const groupKey = `group:${"b".repeat(64)}`;
+    const controller = connectedControllerFixture({
+      hybridCatalog: () => ({
+        status: "ready",
+        active: {
+          importedAt: 1,
+          pdfCount: 1,
+          unverifiedCount: 1,
+          verifiedCount: 0,
+          differenceCount: 0,
+          cloudMissingCount: 0,
+          groupCount: 1,
+          verifiedGroupCount: 0,
+          groups: [{
+            groupKey,
+            label: "Science",
+            pdfCount: 1,
+            mode: "recursive",
+            verificationStatus: "unverified",
+          }],
+        },
+      }),
+      subscribeHybridCatalog: () => () => undefined,
+      previewCatalogTxt: async () => undefined,
+      requestCatalogTxtImport: async () => undefined,
+      requestLargeCatalogVerification: async () => undefined,
+      requestResumeLargeCatalogVerification: async () => undefined,
+      cancelLargeCatalogVerification: () => undefined,
+    });
+    const root = createTestDiv();
+    const surface = createSettingsSectionsSurface({
+      app: {} as App,
+      controller,
+      policy: NORMAL_RUNTIME_POLICY,
+    });
+    surface.render(root, "zh-CN");
+    const scan = root.querySelector<HTMLInputElement>('[data-catalog-scan-root="true"]')!;
+    const verification = root.querySelector<HTMLInputElement>(
+      '[data-catalog-large-scan-root="true"]',
+    )!;
+    const group = root.querySelector<HTMLInputElement>(`[data-catalog-group-key="${groupKey}"]`)!;
+    scan.value = "/Synthetic/Scan";
+    scan.dispatchEvent(new Event("input", { bubbles: true }));
+    verification.value = "/Synthetic/Verification";
+    verification.dispatchEvent(new Event("input", { bubbles: true }));
+    group.checked = true;
+    group.dispatchEvent(new Event("change", { bubbles: true }));
+
+    surface.render(root, "en");
+
+    expect(root.querySelector<HTMLInputElement>('[data-catalog-scan-root="true"]')?.value)
+      .toBe("/Synthetic/Scan");
+    expect(root.querySelector<HTMLInputElement>('[data-catalog-large-scan-root="true"]')?.value)
+      .toBe("/Synthetic/Verification");
+    expect(root.querySelector<HTMLInputElement>(`[data-catalog-group-key="${groupKey}"]`)?.checked)
+      .toBe(true);
+    expect(root.textContent).toContain("Current directory");
   });
 
   it("rolls persistent controls back when saving fails", async () => {

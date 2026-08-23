@@ -405,6 +405,7 @@ describe("hybrid catalog settings", () => {
       '[data-catalog-large-scan-root="true"]',
     )!;
     cloudRoot.value = "/Synthetic";
+    cloudRoot.dispatchEvent(new Event("input", { bubbles: true }));
     tab.containerEl.querySelector<HTMLButtonElement>(
       '[data-action="catalog-start-large-verification"]',
     )!.click();
@@ -541,13 +542,17 @@ describe("hybrid catalog settings", () => {
       '[data-catalog-large-scan-root="true"]',
     )!;
     root.value = "/Category 1";
+    root.dispatchEvent(new Event("input", { bubbles: true }));
+    expect(tab.containerEl.querySelector<HTMLButtonElement>(
+      '[data-action="catalog-start-large-verification"]',
+    )?.disabled).toBe(true);
     tab.containerEl.querySelector<HTMLButtonElement>(
       '[data-action="catalog-start-large-verification"]',
     )!.click();
     await Promise.resolve();
 
     expect(scans).toEqual([]);
-    expect(tab.containerEl.querySelector('[role="status"]')?.textContent)
+    expect(tab.containerEl.querySelector('[data-catalog-parent-root-error="true"]')?.textContent)
       .toBe("核验根目录必须是所选分类的 API 父目录");
     expect(root.value).toBe("/Category 1");
   });
@@ -624,6 +629,7 @@ describe("hybrid catalog settings", () => {
       '[data-catalog-large-scan-root="true"]',
     )!;
     root.value = "/Synthetic";
+    root.dispatchEvent(new Event("input", { bubbles: true }));
     tab.containerEl.querySelector<HTMLButtonElement>(
       '[data-action="catalog-resume-large-verification"]',
     )!.click();

@@ -31,7 +31,10 @@ import {
 import { renderWorkbenchShell, type WorkbenchTab } from "./workbench-shell";
 import { renderStartPage, type StartSection } from "./start-page";
 import type { SettingsSectionsSurface } from "./settings-sections";
-import { renderVerificationPage } from "./verification-page";
+import {
+  renderVerificationPage,
+  type VerificationPageSurface,
+} from "./verification-page";
 import type { VerificationActionMessageCode } from "./catalog-message-presenter";
 
 export type { WorkbenchTab } from "./workbench-shell";
@@ -152,6 +155,13 @@ const STATUS_MESSAGE_KEYS: Readonly<Record<string, WorkbenchMessageKey>> = {
   "Workbench projection refresh failed": "host.status.projectionFailed",
 };
 
+const verificationPageSurfaces = new WeakMap<HTMLElement, VerificationPageSurface>();
+
+const disposeVerificationPage = (root: HTMLElement): void => {
+  verificationPageSurfaces.get(root)?.dispose();
+  verificationPageSurfaces.delete(root);
+};
+
 const localizedStatusMessage = (
   message: string | undefined,
   status: WorkbenchViewModel["status"],
@@ -232,6 +242,7 @@ export function renderWorkbench(
         direction: (active as HTMLInputElement).selectionDirection,
       }
     : null;
+  disposeVerificationPage(root);
   root.replaceChildren();
   root.classList.add("knowledge-workbench");
   const readOnlyAcceptance = policy.mode === "read-only-acceptance";
@@ -269,7 +280,7 @@ export function renderWorkbench(
   if (model.activeTab === "workbench") {
     renderStartPage(panel, { model, actions: surfaceActions, policy });
   } else if (model.activeTab === "verification") {
-    renderVerificationPage(panel, {
+    verificationPageSurfaces.set(root, renderVerificationPage(panel, {
       i18n,
       rootPath: model.verificationRoot,
       rootLocked: model.verificationRootLocked,
@@ -287,7 +298,7 @@ export function renderWorkbench(
           onBrowseRoot: surfaceActions.onBrowseVerificationRoot,
         }),
       },
-    });
+    }));
   } else if (model.activeTab === "history") {
     renderHistory(panel, model.history ?? { entries: [] }, {
       onUndo: surfaceActions.onUndoHistory ?? (() => undefined),
@@ -411,6 +422,7 @@ export function createWorkbenchViewClass(
       this.unsubscribe?.();
       this.unsubscribe = null;
       this.settingsSurface?.dispose();
+      disposeVerificationPage(this.contentEl);
       this.contentEl.replaceChildren();
     }
 

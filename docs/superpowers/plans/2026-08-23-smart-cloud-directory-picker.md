@@ -576,7 +576,7 @@ npx vitest run tests/ui/cloud-directory-picker.test.ts tests/unit/i18n/workbench
 
 Expected: PASS with no real cloud path or credential in test source.
 
-- [ ] **Step 7: Commit the modal**
+- [x] **Step 7: Commit the modal**
 
 ```bash
 git add src/ui/cloud-directory-picker.ts src/i18n/workbench-i18n.ts styles.css src/main.ts tests/ui/cloud-directory-picker.test.ts tests/unit/i18n/workbench-i18n.test.ts tests/packaging/ui-localization-boundary.test.ts
@@ -597,11 +597,11 @@ git commit -m "feat(目录): 重做本地优先选择交互"
 - Modify: `styles.css`
 - Modify: `src/i18n/workbench-i18n.ts`
 
-- [ ] **Step 1: Write failing shared-field and host tests**
+- [x] **Step 1: Write failing shared-field and host tests**
 
 Across settings scan, settings category verification, and workbench verification, test empty/current cards, empty-path selection, fill-only behavior, valid-root start gating, no automatic start/resume/locator, closed advanced manual entry, local validation, root refusal, busy/locked disabling, cancel preserving prior draft, language rerender preserving path/groups, and narrow long-path wrapping.
 
-- [ ] **Step 2: Run shared-field and host tests**
+- [x] **Step 2: Run shared-field and host tests**
 
 ```bash
 npx vitest run tests/ui/cloud-directory-field.test.ts tests/ui/settings-sections.test.ts tests/ui/verification-page.test.ts tests/ui/workbench-view.test.ts
@@ -609,7 +609,7 @@ npx vitest run tests/ui/cloud-directory-field.test.ts tests/ui/settings-sections
 
 Expected: FAIL because manual input remains primary.
 
-- [ ] **Step 3: Implement the shared field**
+- [x] **Step 3: Implement the shared field**
 
 Create this pure DOM interface:
 
@@ -645,17 +645,17 @@ export function createCloudDirectoryField(
 
 The helper owns DOM and one local draft only. Render current card, primary choose button, and closed advanced `<details>` with manual input and local validation. `valid()` calls the supplied validator and returns false for blank, `/`, and malformed paths. Do not import catalog runtime, store, secrets, or Baidu ports.
 
-- [ ] **Step 4: Replace settings and verification root controls**
+- [x] **Step 4: Replace settings and verification root controls**
 
 In settings, replace both visible path labels with shared fields while preserving session draft members. Recompute start disabled state after selection, manual input, connection, group selection, and busy changes.
 
 In verification page, preserve `rootLocked`, route selection only through `onRootChange`, and retain the selected-category-is-root guard. In workbench view, keep browse as a path-returning action with no automatic start.
 
-- [ ] **Step 5: Add translations and responsive card CSS**
+- [x] **Step 5: Add translations and responsive card CSS**
 
 Add current directory, empty, selected-session, choose, advanced manual entry, invalid path, and local recent-storage disclosure in both languages. Ensure name/path wrap and actions remain reachable.
 
-- [ ] **Step 6: Rerun UI and safety tests**
+- [x] **Step 6: Rerun UI and safety tests**
 
 ```bash
 npx vitest run tests/ui/cloud-directory-field.test.ts tests/ui/settings-sections.test.ts tests/ui/verification-page.test.ts tests/ui/workbench-view.test.ts tests/ui/workbench-controller.test.ts tests/ui/read-only-acceptance-surfaces.test.ts

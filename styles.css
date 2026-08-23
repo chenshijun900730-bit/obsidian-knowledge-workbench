@@ -337,6 +337,69 @@
   align-items: start;
 }
 .knowledge-workbench__verification-actions { display: flex; flex-wrap: wrap; gap: var(--size-4-2); }
+.knowledge-workbench__directory-field {
+  display: grid;
+  gap: var(--size-4-3);
+  min-width: 0;
+}
+.knowledge-workbench__directory-field-current {
+  display: grid;
+  gap: var(--size-4-2);
+  min-width: 0;
+  padding: var(--size-4-4);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-m);
+  background: var(--background-secondary);
+}
+.knowledge-workbench__directory-field-identity,
+.knowledge-workbench__directory-field-manual {
+  display: grid;
+  gap: var(--size-4-1);
+  min-width: 0;
+}
+.knowledge-workbench__directory-field-empty,
+.knowledge-workbench__directory-field-storage,
+.knowledge-workbench__directory-field-validation,
+.knowledge-workbench__directory-field-locked { margin: 0; color: var(--text-muted); }
+.knowledge-workbench__directory-field-name { min-width: 0; }
+.knowledge-workbench__directory-field-path {
+  min-width: 0;
+  margin: 0;
+  color: var(--text-muted);
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+.knowledge-workbench__directory-field-state {
+  width: fit-content;
+  padding: 0 var(--size-4-2);
+  border-radius: var(--radius-s);
+  background: var(--background-primary-alt);
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+}
+.knowledge-workbench__directory-field-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--size-4-2);
+  min-width: 0;
+}
+.knowledge-workbench__directory-field-advanced {
+  min-width: 0;
+  padding: var(--size-4-3);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-s);
+}
+.knowledge-workbench__directory-field-advanced[open] {
+  display: grid;
+  gap: var(--size-4-2);
+}
+.knowledge-workbench__directory-field-manual input { width: 100%; min-width: 0; }
+.knowledge-workbench__directory-field button:focus-visible,
+.knowledge-workbench__directory-field input:focus-visible,
+.knowledge-workbench__directory-field summary:focus-visible {
+  outline: 2px solid var(--interactive-accent);
+  outline-offset: 2px;
+}
 .knowledge-workbench__directory-picker {
   display: grid;
   gap: var(--size-4-3);
@@ -453,6 +516,13 @@
   .knowledge-workbench__directory-picker-actions > button,
   .knowledge-workbench__directory-picker-tools > button {
     flex: 1 1 100%;
+    min-width: 0;
+  }
+}
+@container knowledge-workbench (max-width: 22.5rem) {
+  .knowledge-workbench__directory-field-actions > button,
+  .knowledge-workbench__directory-field-advanced > button {
+    width: 100%;
     min-width: 0;
   }
 }

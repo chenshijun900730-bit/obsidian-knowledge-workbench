@@ -17,6 +17,12 @@ import {
   type WorkbenchMessageKey,
 } from "../i18n/workbench-i18n";
 import { presentCatalogMessage } from "./catalog-message-presenter";
+import {
+  createCloudDirectoryField,
+  type CloudDirectoryFieldSurface,
+} from "./cloud-directory-field";
+import { connectionCanVerify } from "./verification-connection-semantics";
+import { normalizeCatalogScanRoot } from "../catalog/catalog-path";
 
 export interface SettingsController {
   settings(): PluginSettings;
@@ -185,6 +191,7 @@ export function createSettingsSectionsSurface(
     private disposed = true;
     private renderAbortController: AbortController | null = null;
     private readonly sessionInputs = new Set<HTMLInputElement>();
+    private readonly cloudDirectoryFields = new Set<CloudDirectoryFieldSurface>();
     render(root: HTMLElement, locale: WorkbenchLocale): void {
       this.renderGeneration += 1;
       const generation = this.renderGeneration;
@@ -192,6 +199,7 @@ export function createSettingsSectionsSurface(
       this.renderAbortController?.abort();
       this.renderAbortController = new AbortController();
       const renderSignal = this.renderAbortController.signal;
+      this.disposeCloudDirectoryFields();
       this.clearSessionInputValues();
       this.clearCatalogAuthorizationExpiryTimer();
       this.unsubscribeCatalogConnection?.();
@@ -511,6 +519,7 @@ export function createSettingsSectionsSurface(
       const catalog = doc.createElement("section");
       catalog.className = "knowledge-workbench__catalog-settings";
       catalog.append(heading(doc, 3, i18n.t("settings.surface.cloudCatalog")));
+      let recomputeLargeVerificationActions = (): void => undefined;
       const connection = controller.catalogConnection?.();
       if (policy.configuration === "read-only") {
         const locked = doc.createElement("p");
@@ -700,63 +709,61 @@ export function createSettingsSectionsSurface(
         cancelAuthorization.dataset.action = "catalog-cancel-authorization";
         authorizationActions.append(submitAuthorization, cancelAuthorization);
 
-        const rootLabel = doc.createElement("label");
-        rootLabel.className = "knowledge-workbench__settings-row";
-        const rootText = doc.createElement("span");
-        rootText.textContent = i18n.t("settings.surface.scanRoot");
-        const root = doc.createElement("input");
-        root.type = "text";
-        root.autocomplete = "off";
-        root.placeholder = "/样本";
+        let scanBusy = connection.status === "scanning";
+        let scanActionPending = false;
+        let recomputeScanActions = (): void => undefined;
+        const scanDirectoryField = createCloudDirectoryField(doc, i18n, {
+          path: this.catalogScanRootDraft,
+          disabled: scanBusy,
+          locked: false,
+        }, {
+          onChoose: () => controller.chooseCatalogRoot?.(this.catalogScanRootDraft)
+            ?? Promise.resolve(null),
+          onManualChange: (value) => {
+            this.catalogScanRootDraft = value;
+            recomputeScanActions();
+          },
+          onValidate: validateCatalogScanRoot,
+        });
+        this.cloudDirectoryFields.add(scanDirectoryField);
+        const root = scanDirectoryField.manualInput;
         root.dataset.catalogScanRoot = "true";
+        root.dataset.focusKey = "settings-catalog-scan-root";
         trackSessionInput(root);
-        root.value = this.catalogScanRootDraft;
-        listen(root, "input", () => { this.catalogScanRootDraft = root.value; });
-        rootLabel.append(rootText, root);
-
+        scanDirectoryField.chooseButton.dataset.action = "browse-catalog-scan-root";
+        scanDirectoryField.chooseButton.dataset.focusKey = "settings-catalog-scan-root-choose";
+        scanDirectoryField.root.querySelector<HTMLButtonElement>(
+          '[data-action="validate-cloud-directory"]',
+        )?.setAttribute("data-action", "catalog-validate-root");
+        if (controller.chooseCatalogRoot === undefined) {
+          scanDirectoryField.chooseButton.hidden = true;
+          scanDirectoryField.chooseButton.disabled = true;
+        }
         const scanActions = doc.createElement("div");
         scanActions.className = "knowledge-workbench__settings-row";
-        if (controller.chooseCatalogRoot !== undefined) {
-          const browse = button(i18n.t("verification.browse"), () => {
-            browse.disabled = true;
-            void controller.chooseCatalogRoot?.(root.value).then((value) => {
-              if (!isCurrent() || value === null || value === undefined) return;
-              root.value = value;
-              this.catalogScanRootDraft = value;
-            }).catch(() => {
-              if (isCurrent()) status.textContent = i18n.t("directoryPicker.error");
-            }).finally(() => {
-              if (isCurrent()) browse.disabled = false;
-            });
-          });
-          browse.dataset.action = "browse-catalog-scan-root";
-          scanActions.append(browse);
-        }
-        const validate = button(i18n.t("settings.surface.validatePath"), () => {
-          try {
-            root.value = validateCatalogScanRoot(root.value);
-            status.textContent = i18n.t("settings.surface.scanRootValid");
-          } catch {
-            status.textContent = i18n.t("settings.surface.scanRootInvalid");
-          }
-          scanActions.insertAdjacentElement("afterend", status);
-        });
-        validate.dataset.action = "catalog-validate-root";
         const start = button(i18n.t("settings.surface.startScan"), () => {
+          if (start.disabled || scanActionPending) return;
+          scanActionPending = true;
+          recomputeScanActions();
           void run(
             "settings.save.cloudScan",
-            () => requestCatalogScan(root.value, () => {
+            () => requestCatalogScan(this.catalogScanRootDraft, () => {
               if (!isCurrent()) return;
-              root.value = "";
               this.catalogScanRootDraft = "";
+              scanDirectoryField.setPath("");
+              recomputeScanActions();
             }),
             scanActions,
             undefined,
             "settings.error.cloudUnavailable",
-          );
+          ).finally(() => {
+            if (!isCurrent()) return;
+            scanActionPending = false;
+            recomputeScanActions();
+          });
         });
         start.dataset.action = "catalog-start-scan";
-        scanActions.append(validate, start);
+        scanActions.append(start);
         let cancel: HTMLButtonElement | undefined;
         if (controller.cancelCatalogScan !== undefined) {
           cancel = button(i18n.t("settings.surface.cancelScan"), () => controller.cancelCatalogScan?.());
@@ -788,6 +795,22 @@ export function createSettingsSectionsSurface(
           requestProgress.textContent = progress.requestProgress;
           timeProgress.textContent = progress.timeProgress;
           stopReason.textContent = progress.stopReason;
+          scanBusy = current?.status === "scanning";
+          scanDirectoryField.updateState({ disabled: scanBusy, locked: false });
+          if (controller.chooseCatalogRoot === undefined) {
+            scanDirectoryField.chooseButton.hidden = true;
+            scanDirectoryField.chooseButton.disabled = true;
+          }
+          recomputeScanActions = () => {
+            const latest = controller.catalogConnection?.();
+            start.disabled = scanActionPending
+              || scanBusy
+              || !connectionCanVerify(latest)
+              || latest?.messageCode !== undefined
+              || !scanDirectoryField.valid();
+          };
+          recomputeScanActions();
+          recomputeLargeVerificationActions();
           if (cancel !== undefined) {
             const scanning = current?.status === "scanning";
             cancel.hidden = !scanning;
@@ -813,7 +836,7 @@ export function createSettingsSectionsSurface(
         );
         verificationSection.content.append(
           catalogProgress,
-          rootLabel,
+          scanDirectoryField.root,
           scanActions,
         );
       }
@@ -904,43 +927,50 @@ export function createSettingsSectionsSurface(
         groupChoices.className = "knowledge-workbench__catalog-group-choices";
         const selectedGroupKeys = this.largeCatalogSelectedGroupKeys;
 
-        const rootLabel = doc.createElement("label");
-        rootLabel.className = "knowledge-workbench__settings-row";
-        const rootText = doc.createElement("span");
-        rootText.textContent = i18n.t("settings.surface.verificationRoot");
-        const root = doc.createElement("input");
-        root.type = "text";
-        root.autocomplete = "off";
-        root.placeholder = "/library";
-        root.dataset.catalogLargeScanRoot = "true";
-        trackSessionInput(root);
-        root.value = this.largeCatalogVerificationRoot;
-        listen(root, "input", () => {
-          this.largeCatalogVerificationRoot = root.value;
+        let verificationBusy = hybrid.status === "importing" || hybrid.status === "scanning";
+        let verificationActionPending = false;
+        const validateVerificationRoot = controller.validateCatalogScanRoot?.bind(controller)
+          ?? normalizeCatalogScanRoot;
+        const verificationDirectoryField = createCloudDirectoryField(doc, i18n, {
+          path: this.largeCatalogVerificationRoot,
+          disabled: verificationBusy,
+          locked: false,
+        }, {
+          onChoose: () => controller.chooseCatalogRoot?.(this.largeCatalogVerificationRoot)
+            ?? Promise.resolve(null),
+          onManualChange: (value) => {
+            this.largeCatalogVerificationRoot = value;
+            recomputeLargeVerificationActions();
+          },
+          onValidate: validateVerificationRoot,
         });
-        rootLabel.append(rootText, root);
+        this.cloudDirectoryFields.add(verificationDirectoryField);
+        const root = verificationDirectoryField.manualInput;
+        root.dataset.catalogLargeScanRoot = "true";
+        root.dataset.focusKey = "settings-catalog-verification-root";
+        trackSessionInput(root);
+        verificationDirectoryField.chooseButton.dataset.action = "browse-catalog-large-scan-root";
+        verificationDirectoryField.chooseButton.dataset.focusKey = "settings-catalog-verification-root-choose";
+        if (controller.chooseCatalogRoot === undefined) {
+          verificationDirectoryField.chooseButton.hidden = true;
+          verificationDirectoryField.chooseButton.disabled = true;
+        }
         const rootHint = doc.createElement("p");
         rootHint.textContent = i18n.t("settings.surface.verificationRootHint");
+        const parentRootError = doc.createElement("p");
+        parentRootError.dataset.catalogParentRootError = "true";
+        parentRootError.setAttribute("role", "status");
+        parentRootError.setAttribute("aria-live", "polite");
+        parentRootError.setAttribute("aria-atomic", "true");
+        parentRootError.textContent = i18n.t("settings.surface.parentRootRequired");
+        parentRootError.hidden = true;
         const verificationActions = doc.createElement("div");
         verificationActions.className = "knowledge-workbench__settings-row";
-        if (controller.chooseCatalogRoot !== undefined) {
-          const browse = button(i18n.t("verification.browse"), () => {
-            browse.disabled = true;
-            void controller.chooseCatalogRoot?.(root.value).then((value) => {
-              if (!isCurrent() || value === null || value === undefined) return;
-              root.value = value;
-              this.largeCatalogVerificationRoot = value;
-            }).catch(() => {
-              if (isCurrent()) status.textContent = i18n.t("directoryPicker.error");
-            }).finally(() => {
-              if (isCurrent()) browse.disabled = false;
-            });
-          });
-          browse.dataset.action = "browse-catalog-large-scan-root";
-          verificationActions.append(browse);
-        }
         const startVerification = button(i18n.t("settings.surface.startVerification"), () => {
-          const rootPath = root.value;
+          if (startVerification.disabled || verificationActionPending) return;
+          verificationActionPending = true;
+          recomputeLargeVerificationActions();
+          const rootPath = this.largeCatalogVerificationRoot;
           const groupKeys = [...selectedGroupKeys];
           const rootLeaf = rootPath.normalize("NFC").split("/").at(-1) ?? "";
           const selectedGroupIsRoot = (controller.hybridCatalog?.()?.active?.groups ?? []).some((group) => (
@@ -949,6 +979,8 @@ export function createSettingsSectionsSurface(
             && group.label.normalize("NFC") === rootLeaf
           ));
           if (selectedGroupIsRoot) {
+            verificationActionPending = false;
+            recomputeLargeVerificationActions();
             verificationActions.insertAdjacentElement("afterend", status);
             status.textContent = i18n.t("settings.surface.parentRootRequired");
             return;
@@ -960,29 +992,42 @@ export function createSettingsSectionsSurface(
               groupKeys,
               () => {
                 if (!isCurrent()) return;
-                root.value = "";
                 this.largeCatalogVerificationRoot = "";
+                verificationDirectoryField.setPath("");
+                recomputeLargeVerificationActions();
               },
             ),
             verificationActions,
             undefined,
             "settings.error.verificationUnavailable",
-          );
+          ).finally(() => {
+            if (!isCurrent()) return;
+            verificationActionPending = false;
+            recomputeLargeVerificationActions();
+          });
         });
         startVerification.dataset.action = "catalog-start-large-verification";
         const resumeVerification = button(i18n.t("settings.surface.resumeVerification"), () => {
-          const rootPath = root.value;
+          if (resumeVerification.disabled || verificationActionPending) return;
+          verificationActionPending = true;
+          recomputeLargeVerificationActions();
+          const rootPath = this.largeCatalogVerificationRoot;
           void run(
             "settings.save.categoryResume",
             () => requestResumeLargeCatalogVerification(rootPath, () => {
               if (!isCurrent()) return;
-              root.value = "";
               this.largeCatalogVerificationRoot = "";
+              verificationDirectoryField.setPath("");
+              recomputeLargeVerificationActions();
             }),
             verificationActions,
             undefined,
             "settings.error.verificationUnavailable",
-          );
+          ).finally(() => {
+            if (!isCurrent()) return;
+            verificationActionPending = false;
+            recomputeLargeVerificationActions();
+          });
         });
         resumeVerification.dataset.action = "catalog-resume-large-verification";
         const cancelVerification = button(i18n.t("settings.surface.cancelVerification"), () => {
@@ -1052,7 +1097,7 @@ export function createSettingsSectionsSurface(
               } else {
                 selectedGroupKeys.delete(group.groupKey);
               }
-              startVerification.disabled = busy || selectedGroupKeys.size === 0;
+              recomputeLargeVerificationActions();
             });
             const label = doc.createElement("span");
             label.textContent = i18n.t("settings.group.verification", {
@@ -1065,9 +1110,39 @@ export function createSettingsSectionsSurface(
           }
           previewTxt.disabled = busy;
           importTxt.disabled = busy || current?.candidate === undefined;
-          startVerification.disabled = busy || selectedGroupKeys.size === 0;
+          verificationBusy = busy;
+          verificationDirectoryField.updateState({ disabled: busy, locked: false });
+          if (controller.chooseCatalogRoot === undefined) {
+            verificationDirectoryField.chooseButton.hidden = true;
+            verificationDirectoryField.chooseButton.disabled = true;
+          }
+          recomputeLargeVerificationActions = () => {
+            const connectionNow = controller.catalogConnection?.();
+            const rootPath = this.largeCatalogVerificationRoot;
+            const rootLeaf = rootPath.normalize("NFC").split("/").at(-1) ?? "";
+            const selectedGroupIsRoot = (controller.hybridCatalog?.()?.active?.groups ?? [])
+              .some((group) => (
+                group.groupKey !== "txt-root-items"
+                && selectedGroupKeys.has(group.groupKey)
+                && group.label.normalize("NFC") === rootLeaf
+              ));
+            const connectionReady = connectionCanVerify(connectionNow)
+              && connectionNow?.messageCode === undefined;
+            parentRootError.hidden = !selectedGroupIsRoot;
+            startVerification.disabled = verificationActionPending
+              || verificationBusy
+              || !connectionReady
+              || selectedGroupKeys.size === 0
+              || selectedGroupIsRoot
+              || !verificationDirectoryField.valid();
+            resumeVerification.disabled = verificationActionPending
+              || verificationBusy
+              || !connectionReady
+              || controller.hybridCatalog?.()?.batch?.resumeAvailable !== true
+              || !verificationDirectoryField.valid();
+          };
+          recomputeLargeVerificationActions();
           resumeVerification.hidden = current?.batch?.resumeAvailable !== true;
-          resumeVerification.disabled = busy || current?.batch?.resumeAvailable !== true;
           cancelVerification.hidden = current?.status !== "scanning";
           cancelVerification.disabled = current?.status !== "scanning";
         };
@@ -1083,8 +1158,9 @@ export function createSettingsSectionsSurface(
           txtActions,
           selectionTitle,
           groupChoices,
-          rootLabel,
+          verificationDirectoryField.root,
           rootHint,
+          parentRootError,
           verificationActions,
         );
         largeCatalogSection.content.append(hybridSection);
@@ -1214,6 +1290,7 @@ export function createSettingsSectionsSurface(
       this.renderGeneration += 1;
       this.renderAbortController?.abort();
       this.renderAbortController = null;
+      this.disposeCloudDirectoryFields();
       this.clearSessionInputValues();
       this.clearCatalogAuthorizationExpiryTimer();
       this.unsubscribeCatalogConnection?.();
@@ -1236,6 +1313,11 @@ export function createSettingsSectionsSurface(
       if (this.catalogAuthorizationExpiryTimer === null) return;
       window.clearTimeout(this.catalogAuthorizationExpiryTimer);
       this.catalogAuthorizationExpiryTimer = null;
+    }
+
+    private disposeCloudDirectoryFields(): void {
+      for (const field of this.cloudDirectoryFields) field.dispose();
+      this.cloudDirectoryFields.clear();
     }
 
     private clearSessionInputValues(): void {

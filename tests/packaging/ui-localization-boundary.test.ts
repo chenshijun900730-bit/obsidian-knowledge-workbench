@@ -17,6 +17,7 @@ const SURFACE_NAMESPACES = {
   "src/ui/catalog-txt-import-confirmation-modal.ts": ["catalog.confirm."],
   "src/ui/catalog-large-scan-confirmation-modal.ts": ["verification.confirm."],
   "src/ui/cloud-directory-picker.ts": ["directoryPicker."],
+  "src/ui/cloud-directory-field.ts": ["directoryField."],
   "src/ui/catalog-progress-presenter.ts": ["progress.", "settings.status."],
   "src/ui/start-page.ts": ["start.", "today.", "map.", "catalog."],
   "src/ui/workbench-view.ts": ["progress.", "status.", "host.", "acceptance.", "ai."],
