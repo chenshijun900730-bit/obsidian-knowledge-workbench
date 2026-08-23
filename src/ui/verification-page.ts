@@ -10,6 +10,10 @@ import {
 } from "./catalog-message-presenter";
 import { presentCatalogStopReason } from "./catalog-stop-reason-presenter";
 import { connectionCanVerify } from "./verification-connection-semantics";
+import { normalizeCatalogScanRoot } from "../catalog/catalog-path";
+import {
+  createCloudDirectoryField,
+} from "./cloud-directory-field";
 
 export { connectionCanVerify } from "./verification-connection-semantics";
 
@@ -31,6 +35,10 @@ export interface VerificationPageModel {
   readonly connection?: CloudCatalogConnectionViewModel;
   readonly hybrid?: HybridCatalogViewModel;
   readonly actions: VerificationPageActions;
+}
+
+export interface VerificationPageSurface {
+  dispose(): void;
 }
 
 const stateKey = (hybrid: HybridCatalogViewModel | undefined): WorkbenchMessageKey => {
@@ -101,9 +109,15 @@ const renderMessage = (
   return article;
 };
 
-export function renderVerificationPage(root: HTMLElement, model: VerificationPageModel): void {
+export function renderVerificationPage(
+  root: HTMLElement,
+  model: VerificationPageModel,
+): VerificationPageSurface {
   const { i18n, actions } = model;
   const doc = root.ownerDocument;
+  let disposed = false;
+  let actionGeneration = 0;
+  let actionPending = false;
   root.replaceChildren();
   root.className = "knowledge-workbench__verification-page";
 
@@ -131,16 +145,19 @@ export function renderVerificationPage(root: HTMLElement, model: VerificationPag
   const currentConnectionFault = initialMessage?.source === "connection"
     || initialMessage?.source === "capability";
   const batch = model.hybrid?.batch;
-  const rootLeaf = model.rootPath.normalize("NFC").split("/").at(-1) ?? "";
-  const selectedCategoryIsRoot = active?.groups.some((group) => (
-    group.groupKey !== "txt-root-items"
-    && selected.has(group.groupKey)
-    && group.label.normalize("NFC") === rootLeaf
-  )) ?? false;
+  let rootPathDraft = model.rootPath;
+  const selectedCategoryIsRoot = (): boolean => {
+    const rootLeaf = rootPathDraft.normalize("NFC").split("/").at(-1) ?? "";
+    return active?.groups.some((group) => (
+      group.groupKey !== "txt-root-items"
+      && selected.has(group.groupKey)
+      && group.label.normalize("NFC") === rootLeaf
+    )) ?? false;
+  };
   if (initialMessage === undefined && active !== undefined) {
     if (selected.size === 0) {
       messageHost.append(renderMessage(root, "verification-group-required", i18n));
-    } else if (selectedCategoryIsRoot) {
+    } else if (selectedCategoryIsRoot()) {
       messageHost.append(renderMessage(root, "invalid-large-catalog-root", i18n));
     }
   }
@@ -169,42 +186,54 @@ export function renderVerificationPage(root: HTMLElement, model: VerificationPag
 
   const scopeEditor = doc.createElement("section");
   scopeEditor.className = "knowledge-workbench__verification-scope";
-  const rootLabel = doc.createElement("label");
-  rootLabel.textContent = i18n.t("verification.root.label");
-  const rootInput = doc.createElement("input");
-  rootInput.type = "text";
-  rootInput.autocomplete = "off";
-  rootInput.value = model.rootPath;
-  rootInput.disabled = busy || model.rootLocked;
-  rootInput.dataset.verificationRoot = "true";
-  rootInput.dataset.focusKey = "verification-root";
-  rootInput.addEventListener("input", () => {
-    if (!rootInput.disabled) actions.onRootChange(rootInput.value);
+  let recomputeActions = (): void => undefined;
+  const runAction = (action: () => Promise<void>): void => {
+    if (disposed || actionPending) return;
+    const generation = ++actionGeneration;
+    actionPending = true;
+    recomputeActions();
+    void (async () => {
+      try {
+        await action();
+      } catch {
+        // The controller owns fixed user-facing failures.
+      } finally {
+        if (!disposed && generation === actionGeneration) {
+          actionPending = false;
+          recomputeActions();
+        }
+      }
+    })();
+  };
+  const directoryField = createCloudDirectoryField(doc, i18n, {
+    path: rootPathDraft,
+    disabled: busy,
+    locked: model.rootLocked,
+  }, {
+    onChoose: actions.onBrowseRoot ?? (async () => null),
+    onManualChange: (value) => {
+      rootPathDraft = value;
+      actions.onRootChange(value);
+      recomputeActions();
+    },
+    onValidate: normalizeCatalogScanRoot,
   });
-  rootLabel.append(rootInput);
+  directoryField.manualInput.dataset.verificationRoot = "true";
+  directoryField.manualInput.dataset.focusKey = "verification-root";
+  directoryField.chooseButton.dataset.action = "browse-verification-root";
+  directoryField.chooseButton.dataset.focusKey = "verification-root-choose";
+  if (actions.onBrowseRoot === undefined) {
+    directoryField.chooseButton.hidden = true;
+    directoryField.chooseButton.disabled = true;
+  }
   const rootHint = doc.createElement("p");
   rootHint.textContent = i18n.t("verification.root.hint");
-  scopeEditor.append(rootLabel, rootHint);
+  scopeEditor.append(directoryField.root, rootHint);
   if (model.rootLocked) {
     const lockedHint = doc.createElement("p");
     lockedHint.className = "knowledge-workbench__verification-root-locked";
     lockedHint.textContent = i18n.t("verification.root.locked");
     scopeEditor.append(lockedHint);
-  }
-  if (actions.onBrowseRoot !== undefined) {
-    const browse = doc.createElement("button");
-    browse.type = "button";
-    browse.dataset.action = "browse-verification-root";
-    browse.textContent = i18n.t("verification.browse");
-    browse.disabled = busy || model.rootLocked;
-    browse.addEventListener("click", () => {
-      void actions.onBrowseRoot?.().then((value) => {
-        if (value === null || value === undefined) return;
-        rootInput.value = value;
-        actions.onRootChange(value);
-      }).catch(() => undefined);
-    });
-    scopeEditor.append(browse);
   }
 
   const groupTitle = doc.createElement("h3");
@@ -294,24 +323,45 @@ export function renderVerificationPage(root: HTMLElement, model: VerificationPag
     start.type = "button";
     start.dataset.action = "start-verification";
     start.textContent = i18n.t("verification.action.start");
-    start.disabled = !authorized
-      || !capabilityAvailable
-      || currentConnectionFault
-      || active === undefined
-      || selected.size === 0
-      || selectedCategoryIsRoot
-      || model.rootPath.length === 0;
-    start.addEventListener("click", () => { void actions.onStart().catch(() => undefined); });
+    const canStart = (): boolean => authorized
+      && capabilityAvailable
+      && !currentConnectionFault
+      && active !== undefined
+      && selected.size > 0
+      && !selectedCategoryIsRoot()
+      && directoryField.valid();
+    start.addEventListener("click", () => {
+      if (!canStart()) return;
+      runAction(actions.onStart);
+    });
     actionRow.append(start);
+    let resume: HTMLButtonElement | null = null;
     if (batch?.resumeAvailable === true && authorized && capabilityAvailable) {
-      const resume = doc.createElement("button");
+      resume = doc.createElement("button");
       resume.type = "button";
       resume.dataset.action = "resume-verification";
       resume.textContent = i18n.t("verification.action.resume");
-      resume.disabled = currentConnectionFault || model.rootPath.length === 0;
-      resume.addEventListener("click", () => { void actions.onResume().catch(() => undefined); });
+      resume.addEventListener("click", () => {
+        if (currentConnectionFault || !directoryField.valid()) return;
+        runAction(actions.onResume);
+      });
       actionRow.append(resume);
     }
+    recomputeActions = () => {
+      start.disabled = actionPending || !canStart();
+      if (resume !== null) {
+        resume.disabled = actionPending || currentConnectionFault || !directoryField.valid();
+      }
+    };
+    recomputeActions();
   }
   root.append(actionRow);
+  return {
+    dispose(): void {
+      disposed = true;
+      actionGeneration += 1;
+      actionPending = false;
+      directoryField.dispose();
+    },
+  };
 }

@@ -16,6 +16,8 @@ const SURFACE_NAMESPACES = {
   "src/ui/catalog-scan-confirmation-modal.ts": ["catalog.confirm."],
   "src/ui/catalog-txt-import-confirmation-modal.ts": ["catalog.confirm."],
   "src/ui/catalog-large-scan-confirmation-modal.ts": ["verification.confirm."],
+  "src/ui/cloud-directory-picker.ts": ["directoryPicker."],
+  "src/ui/cloud-directory-field.ts": ["directoryField."],
   "src/ui/catalog-progress-presenter.ts": ["progress.", "settings.status."],
   "src/ui/start-page.ts": ["start.", "today.", "map.", "catalog."],
   "src/ui/workbench-view.ts": ["progress.", "status.", "host.", "acceptance.", "ai."],
@@ -31,7 +33,8 @@ type SurfaceFile = keyof typeof SURFACE_NAMESPACES;
 const DISPLAY_PROPERTIES = new Set(["textContent", "placeholder", "title"]);
 const REQUIRED_NAMESPACES = [
   "today.", "map.", "suggestions.", "history.", "quickCapture.", "changePreview.",
-  "ai.", "catalog.confirm.", "verification.confirm.", "progress.", "acceptance.", "host.",
+  "ai.", "catalog.confirm.", "verification.confirm.", "directoryPicker.", "progress.",
+  "acceptance.", "host.",
 ] as const;
 const PUNCTUATION_ONLY = /^[\p{P}\p{S}\s]*$/u;
 const TECHNICAL_PATH = /^\/(?:[\p{L}\p{N}._-]+(?:\/[\p{L}\p{N}._-]+)*)?$/u;
@@ -83,7 +86,10 @@ const objectLiteralFor = (initializer: ts.Expression | undefined): ts.ObjectLite
   return ts.isObjectLiteralExpression(value) ? value : undefined;
 };
 
-const dictionaryShape = (source: string): DictionaryShape => {
+const dictionaryShape = (
+  source: string,
+  requiredNamespaces: readonly string[] = [],
+): DictionaryShape => {
   const ast = ts.createSourceFile("workbench-i18n.ts", source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
   const objects = new Map<string, ts.ObjectLiteralExpression>();
   const findings: string[] = [];
@@ -128,7 +134,7 @@ const dictionaryShape = (source: string): DictionaryShape => {
       findings.push(`placeholder-mismatch:${key}`);
     }
   }
-  for (const namespace of REQUIRED_NAMESPACES) {
+  for (const namespace of requiredNamespaces) {
     if (![...en.keys()].some((key) => key.startsWith(namespace))) {
       findings.push(`missing-namespace:en:${namespace}`);
     }
@@ -139,8 +145,34 @@ const dictionaryShape = (source: string): DictionaryShape => {
   return { keys: new Set(en.keys()), findings };
 };
 
-const I18N_SOURCE = readFileSync(resolve(ROOT, "src/i18n/workbench-i18n.ts"), "utf8");
-const DICTIONARY = dictionaryShape(I18N_SOURCE);
+const combinedDictionaryShape = (
+  shapes: readonly DictionaryShape[],
+): DictionaryShape => {
+  const keys = new Set<string>();
+  const findings = shapes.flatMap((shape) => shape.findings);
+  for (const shape of shapes) {
+    for (const key of shape.keys) {
+      if (keys.has(key)) findings.push(`duplicate-key:${key}`);
+      keys.add(key);
+    }
+  }
+  for (const namespace of REQUIRED_NAMESPACES) {
+    if (![...keys].some((key) => key.startsWith(namespace))) {
+      findings.push(`missing-namespace:${namespace}`);
+    }
+  }
+  return { keys, findings };
+};
+
+const BASE_I18N_SOURCE = readFileSync(resolve(ROOT, "src/i18n/workbench-i18n.ts"), "utf8");
+const DIRECTORY_PICKER_I18N_SOURCE = readFileSync(
+  resolve(ROOT, "src/i18n/workbench-directory-picker-i18n.ts"),
+  "utf8",
+);
+const DICTIONARY = combinedDictionaryShape([
+  dictionaryShape(BASE_I18N_SOURCE),
+  dictionaryShape(DIRECTORY_PICKER_I18N_SOURCE),
+]);
 
 const findingsForSource = (
   file: SurfaceFile,
@@ -568,7 +600,13 @@ const findingsForSource = (
     }
   };
 
-  const WORKBENCH_I18N_DECLARATION = resolve(ROOT, "src/i18n/workbench-i18n.ts");
+  const I18N_DECLARATIONS = new Map([
+    [resolve(ROOT, "src/i18n/workbench-i18n.ts"), "WorkbenchI18n"],
+    [
+      resolve(ROOT, "src/i18n/workbench-directory-picker-i18n.ts"),
+      "DirectoryPickerI18n",
+    ],
+  ] as const);
   const TYPESCRIPT_LIB_DIRECTORY = resolve(ROOT, "node_modules/typescript/lib");
   const OBSIDIAN_DECLARATION = resolve(ROOT, "node_modules/obsidian/obsidian.d.ts");
   const resolvedDeclaration = (call: ts.CallExpression | ts.NewExpression): ts.SignatureDeclaration | undefined => (
@@ -658,12 +696,13 @@ const findingsForSource = (
   const isWorkbenchI18nCall = (call: ts.CallExpression): boolean => {
     if (!ts.isPropertyAccessExpression(call.expression)) return false;
     const declaration = resolvedDeclaration(call);
+    const path = declarationPath(declaration);
     return declaration !== undefined
-      && declarationPath(declaration) === WORKBENCH_I18N_DECLARATION
+      && path !== undefined
       && (ts.isMethodSignature(declaration) || ts.isMethodDeclaration(declaration))
       && declarationName(declaration.name) === call.expression.name.text
       && ts.isInterfaceDeclaration(declaration.parent)
-      && declaration.parent.name.text === "WorkbenchI18n";
+      && I18N_DECLARATIONS.get(path) === declaration.parent.name.text;
   };
 
   const enclosingCallArgument = (node: ts.Node): { readonly call: ts.CallExpression; readonly index: number } | undefined => {
@@ -750,7 +789,7 @@ const findingsForSource = (
   const TECHNICAL_CODE = /^[a-z][a-z0-9]*(?:[-_.][a-z0-9]+)*$/u;
   const TECHNICAL_FRAGMENT = /^[a-z][a-z0-9_.-]*$/u;
   const TECHNICAL_CSS_CLASS = /^knowledge-workbench(?:(?:__|--)[a-z0-9-]+)+(?:\s+knowledge-workbench(?:(?:__|--)[a-z0-9-]+)+)*$/u;
-  const TECHNICAL_FILENAME_FRAGMENT = /^(?:knowledge-workbench-history-|\.json)$/u;
+  const TECHNICAL_FILENAME_FRAGMENT = /^(?:knowledge-workbench-history-|knowledge-workbench-directory-|\.json)$/u;
   const isStandardLibraryCall = (call: ts.CallExpression): boolean => (
     isTypescriptLibDeclaration(resolvedDeclaration(call))
   );
@@ -801,11 +840,22 @@ const findingsForSource = (
       && (key.text === "settings.surface.credentialStorage"
         || key.text === "settings.surface.persistentCredentialId");
   };
+  const DIRECTORY_PICKER_INTERPOLATIONS = new Set([
+    "directories", "matches", "path", "query", "requests", "root", "seconds",
+  ]);
+  const isDirectoryPickerInterpolation = (context: ts.Node, sink: string): boolean => (
+    file === "src/ui/cloud-directory-picker.ts"
+    && sink.endsWith(":i18n-value")
+    && ts.isPropertyAssignment(context)
+    && DIRECTORY_PICKER_INTERPOLATIONS.has(declarationName(context.name) ?? "")
+  );
   const isTechnicalLiteral = (node: ts.Node, text: string): boolean => {
     if (isNormalOnlyBrandDeclaration(node, text)) return true;
     if (PUNCTUATION_ONLY.test(text) || TECHNICAL_PATH.test(text) || TECHNICAL_FIELD_PREFIX.test(text)) return true;
     if (TECHNICAL_FILENAME_FRAGMENT.test(text)) return true;
     if (text === "en" || text === "zh-CN" || text === "en-US") return true;
+    if (file === "src/ui/cloud-directory-picker.ts"
+      && (text === "ArrowDown" || text === "ArrowUp" || text === "Enter")) return true;
     const parent = node.parent;
     if ((ts.isImportDeclaration(parent) || ts.isExportDeclaration(parent)) && parent.moduleSpecifier === node) return true;
     if (ts.isExternalModuleReference(parent) && parent.expression === node) return true;
@@ -989,6 +1039,7 @@ const findingsForSource = (
       record(node, sink, "raw-error-detail");
       return;
     }
+    if (isDirectoryPickerInterpolation(node, sink)) return;
     if (ts.isStringLiteralLike(expression)) {
       if (isNormalOnlyBrandInterpolation(expression, node, sink)) return;
       if (!PUNCTUATION_ONLY.test(expression.text) && !TECHNICAL_PATH.test(expression.text)) {

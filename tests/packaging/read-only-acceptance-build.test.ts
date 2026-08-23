@@ -125,6 +125,7 @@ describe("read-only acceptance artifact builder", () => {
     const normalEvidenceBefore = await Promise.all(
       ["main.js", "manifest.json", "styles.css"].map((file) => fileEvidence(join(repoRoot, file))),
     );
+    const normalManifest = JSON.parse(normalBefore[1]!) as Readonly<{ version: string }>;
 
     await builder.buildAcceptanceArtifact({ repoRoot });
 
@@ -135,14 +136,8 @@ describe("read-only acceptance artifact builder", () => {
       "manifest.json",
       "styles.css",
     ]);
-    expect(JSON.parse(await readFile(join(target, "acceptance-build.json"), "utf8"))).toEqual({
-      schemaVersion: 1,
-      pluginVersion: "0.1.0",
-      buildMode: "read-only-acceptance",
-      artifactBinding: "knowledge-workbench@0.1.0:read-only-acceptance",
-      contentWrites: "blocked",
-      network: "blocked",
-    });
+    expect(JSON.parse(await readFile(join(target, "acceptance-build.json"), "utf8")))
+      .toEqual(builder.acceptanceMetadata(normalManifest.version));
     expect(await Promise.all(
       ["main.js", "manifest.json", "styles.css"].map((file) => readFile(join(repoRoot, file), "utf8")),
     )).toEqual(normalBefore);
@@ -167,6 +162,18 @@ describe("read-only acceptance artifact builder", () => {
       "LocalHybridCatalogAdapter",
       "BaiduCatalogSourceAdapter",
       "SecretStorage",
+      "secretStorage",
+      "requestUrl",
+      "directoryPicker.",
+      "CloudDirectoryDiscoveryService",
+      "CloudDirectoryLocatorService",
+      "Locate same-name folders in Baidu Netdisk",
+      "Fixed limit: {directories} folders, {requests} list requests, and {seconds} seconds.",
+      "\u5728\u7f51\u76d8\u4e2d\u5b9a\u4f4d\u540c\u540d\u76ee\u5f55",
+      "\u56fa\u5b9a\u4e0a\u9650\uff1a{directories} \u4e2a\u76ee\u5f55\u3001{requests} \u6b21\u5217\u8868\u8bf7\u6c42\u3001{seconds} \u79d2\u3002",
+      "https://openapi.baidu.com/oauth/2.0/authorize",
+      "https://openapi.baidu.com/oauth/2.0/token",
+      "/rest/2.0/xpan/file",
     ]) {
       expect(bundle, forbidden).not.toContain(forbidden);
     }
@@ -566,7 +573,7 @@ describe("read-only acceptance artifact builder", () => {
     expect(await readdir(join(repoRoot, "dist"))).toEqual(["read-only-acceptance"]);
   });
 
-  it("upgrades a self-consistent 0.1.0 artifact to the current 0.2.0 build", async () => {
+  it("upgrades a self-consistent prior artifact to the requested 0.2.0 build", async () => {
     const repoRoot = await fixture();
     await builder.buildAcceptanceArtifact({ repoRoot });
     await updateNormalIdentity(repoRoot, { version: "0.2.0" });
@@ -585,6 +592,9 @@ describe("read-only acceptance artifact builder", () => {
     const repoRoot = await fixture();
     await builder.buildAcceptanceArtifact({ repoRoot });
     const oldEvidence = await artifactEvidence(repoRoot);
+    const oldManifest = JSON.parse(
+      await readFile(join(targetOf(repoRoot), "manifest.json"), "utf8"),
+    ) as Readonly<{ version: string }>;
     await updateNormalIdentity(repoRoot, { version: "0.2.0" });
 
     await expect(builder.buildAcceptanceArtifact({
@@ -598,7 +608,7 @@ describe("read-only acceptance artifact builder", () => {
     const restoredManifest = JSON.parse(
       await readFile(join(targetOf(repoRoot), "manifest.json"), "utf8"),
     ) as Record<string, unknown>;
-    expect(restoredManifest.version).toBe("0.1.0");
+    expect(restoredManifest.version).toBe(oldManifest.version);
   });
 
   it("replaces a coherent old artifact when other normal manifest fields change", async () => {

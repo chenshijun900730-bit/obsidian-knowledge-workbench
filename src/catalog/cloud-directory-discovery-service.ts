@@ -1,7 +1,8 @@
-import { normalizeCatalogScanRoot, normalizeCloudAbsolutePath } from "./catalog-path";
+import { normalizeCatalogScanRoot } from "./catalog-path";
 import type { BaiduCatalogSourcePort } from "./catalog-ports";
+import { validateBaiduListEntry } from "./cloud-directory-page-validator";
 import { rankCloudDirectories, type RankedCloudDirectory } from "./cloud-directory-search";
-import { CatalogError, type BaiduListEntry } from "./catalog-types";
+import { CatalogError } from "./catalog-types";
 
 export const CLOUD_DIRECTORY_DISCOVERY_BUDGET = /* @__PURE__ */ Object.freeze({
   maxDirectoryCount: 500,
@@ -27,6 +28,7 @@ export interface CloudDirectoryDiscoverySummary {
 
 export interface CloudDirectoryDiscoveryRuntime {
   searchCached(query: string): readonly RankedCloudDirectory[];
+  snapshotCached(): readonly CachedCloudDirectory[];
   discoverMore(
     rootPath: string,
     signal?: AbortSignal,
@@ -44,7 +46,7 @@ interface PendingPage {
   readonly start: number;
 }
 
-interface CachedDirectory {
+export interface CachedCloudDirectory {
   readonly fsId: string;
   readonly path: string;
   readonly filename: string;
@@ -88,53 +90,6 @@ const elapsedAt = (state: DiscoveryState, at: number): number => {
   return at - state.startedAt;
 };
 
-const directParent = (path: string): string => path.slice(0, path.lastIndexOf("/")) || "/";
-
-const validateEntry = (
-  entry: unknown,
-  currentPath: string,
-  rootPath: string,
-): BaiduListEntry => {
-  if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
-    throw invalidResponse();
-  }
-  const candidate = entry as Record<string, unknown>;
-  if (
-    typeof candidate.path !== "string"
-    || typeof candidate.filename !== "string"
-    || typeof candidate.fsId !== "string"
-    || typeof candidate.sizeBytes !== "number"
-    || typeof candidate.serverModifiedAt !== "number"
-    || typeof candidate.isDirectory !== "boolean"
-  ) throw invalidResponse();
-  const { fsId, isDirectory, serverModifiedAt, sizeBytes } = candidate as Readonly<{
-    fsId: string;
-    isDirectory: boolean;
-    serverModifiedAt: number;
-    sizeBytes: number;
-  }>;
-  let path: string;
-  try {
-    path = normalizeCloudAbsolutePath(candidate.path);
-  } catch {
-    throw invalidResponse();
-  }
-  const filename = candidate.filename.normalize("NFC");
-  if (
-    path !== candidate.path
-    || !path.startsWith(`${rootPath}/`)
-    || directParent(path) !== currentPath
-    || path.slice(path.lastIndexOf("/") + 1) !== filename
-    || !/^(?:0|[1-9]\d*)$/u.test(fsId)
-    || !Number.isSafeInteger(sizeBytes)
-    || sizeBytes < 0
-    || !Number.isSafeInteger(serverModifiedAt)
-    || serverModifiedAt < 0
-    || (isDirectory && sizeBytes !== 0)
-  ) throw invalidResponse();
-  return { fsId, path, filename, sizeBytes, serverModifiedAt, isDirectory };
-};
-
 const statusFor = (
   stopReason: CloudDirectoryDiscoveryStopReason,
 ): CloudDirectoryDiscoverySummary["status"] => {
@@ -146,7 +101,7 @@ const statusFor = (
 export class CloudDirectoryDiscoveryService implements CloudDirectoryDiscoveryRuntime {
   readonly #source: BaiduCatalogSourcePort;
   readonly #now: () => number;
-  readonly #cachedByPath = new Map<string, CachedDirectory>();
+  readonly #cachedByPath = new Map<string, CachedCloudDirectory>();
   readonly #cachedPathByFsId = new Map<string, string>();
   #disposed = false;
 
@@ -164,6 +119,13 @@ export class CloudDirectoryDiscoveryService implements CloudDirectoryDiscoveryRu
       [...this.#cachedByPath.values()].map(({ path, filename }) => ({ path, filename })),
       query,
     );
+  }
+
+  snapshotCached(): readonly CachedCloudDirectory[] {
+    if (this.#disposed) return [];
+    return [...this.#cachedByPath.values()]
+      .sort((left, right) => fixedCompare(left.path, right.path))
+      .map((directory) => ({ ...directory }));
   }
 
   async discoverMore(
@@ -214,9 +176,13 @@ export class CloudDirectoryDiscoveryService implements CloudDirectoryDiscoveryRu
 
       const seenFsIds = new Set(state.seenFsIds);
       const seenPaths = new Set(state.seenPaths);
-      const directories: CachedDirectory[] = [];
+      const directories: CachedCloudDirectory[] = [];
       const validated = entries.map((entry) => {
-        const value = validateEntry(entry, current.path, state.rootPath);
+        const value = validateBaiduListEntry({
+          entry,
+          currentPath: current.path,
+          traversalRoot: state.rootPath,
+        });
         if (seenFsIds.has(value.fsId) || seenPaths.has(value.path)) throw invalidResponse();
         const cachedAtPath = this.#cachedByPath.get(value.path);
         const cachedPathForFsId = this.#cachedPathByFsId.get(value.fsId);

@@ -22,6 +22,7 @@ import {
   NORMAL_RUNTIME_POLICY,
   READ_ONLY_ACCEPTANCE_POLICY,
 } from "../../src/runtime/safety-policy";
+import { EMPTY_RECENT_CLOUD_DIRECTORIES } from "../../src/storage/recent-cloud-directories";
 import {
   controllerFixture,
   manualProjectionScheduler,
@@ -156,6 +157,7 @@ describe("workbench", () => {
         aiEndpoint: "",
         aiModel: "",
         secretId: "",
+        recentCloudDirectories: EMPTY_RECENT_CLOUD_DIRECTORIES,
       }),
       folderRuleProposals: () => [],
       previewSampleChange: () => undefined,
@@ -202,6 +204,159 @@ describe("workbench", () => {
     expect(root.querySelector(".knowledge-workbench__verification-page")).not.toBeNull();
     expect(root.textContent).toContain("云端核验能力不可用");
     expect(root.querySelector('[aria-label="Organization suggestions"]')).toBeNull();
+  });
+
+  it("fills an empty verification draft without starting, resuming, or locating again", async () => {
+    const root = createTestDiv();
+    const groupKey = `group:${"d".repeat(64)}`;
+    const onSetVerificationRoot = vi.fn();
+    const onStartSelectedVerification = vi.fn(async () => undefined);
+    const onResumeSelectedVerification = vi.fn(async () => undefined);
+    const onBrowseVerificationRoot = vi.fn(async () => "/Synthetic/Science");
+    const model = {
+      ...populatedWorkbenchModel(),
+      activeTab: "verification" as const,
+      verificationRoot: "",
+      selectedVerificationGroupKeys: [groupKey],
+      catalogConnection: { status: "authorized" as const },
+      hybridCatalog: {
+        status: "ready" as const,
+        active: {
+          importedAt: 1,
+          pdfCount: 1,
+          unverifiedCount: 1,
+          verifiedCount: 0,
+          differenceCount: 0,
+          cloudMissingCount: 0,
+          groupCount: 1,
+          verifiedGroupCount: 0,
+          groups: [{
+            groupKey,
+            label: "Literature",
+            pdfCount: 1,
+            mode: "recursive" as const,
+            verificationStatus: "unverified" as const,
+          }],
+        },
+      },
+    };
+    renderWorkbench(root, model, noOpWorkbenchActions({
+      onSetVerificationRoot,
+      onStartSelectedVerification,
+      onResumeSelectedVerification,
+      onBrowseVerificationRoot,
+    }));
+
+    const choose = root.querySelector<HTMLButtonElement>(
+      '[data-action="browse-verification-root"]',
+    )!;
+    expect(choose.textContent).toBe("选择目录");
+    choose.click();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(onBrowseVerificationRoot).toHaveBeenCalledOnce();
+    expect(onSetVerificationRoot).toHaveBeenCalledWith("/Synthetic/Science");
+    expect(onStartSelectedVerification).not.toHaveBeenCalled();
+    expect(onResumeSelectedVerification).not.toHaveBeenCalled();
+    expect(root.querySelector('[data-cloud-directory-current="true"]')?.textContent)
+      .toContain("/Synthetic/Science");
+
+    renderWorkbench(root, { ...model, locale: "en", verificationRoot: "/Synthetic/Science" },
+      noOpWorkbenchActions());
+    expect(root.querySelector('[data-cloud-directory-current="true"]')?.textContent)
+      .toContain("/Synthetic/Science");
+    expect(root.querySelector<HTMLInputElement>(`[data-group-key="${groupKey}"]`)?.checked)
+      .toBe(true);
+  });
+
+  it("disposes the prior verification field on rerender so a late choice cannot change the draft", async () => {
+    const root = createTestDiv();
+    let resolveChoice!: (value: string | null) => void;
+    const onSetVerificationRoot = vi.fn();
+    const model = {
+      ...populatedWorkbenchModel(),
+      activeTab: "verification" as const,
+      verificationRoot: "/Synthetic/Existing",
+      catalogConnection: { status: "authorized" as const },
+      hybridCatalog: { status: "ready" as const },
+    };
+    const actions = noOpWorkbenchActions({
+      onSetVerificationRoot,
+      onBrowseVerificationRoot: async () => new Promise((resolve) => { resolveChoice = resolve; }),
+    });
+    renderWorkbench(root, model, actions);
+    root.querySelector<HTMLButtonElement>('[data-action="browse-verification-root"]')?.click();
+
+    renderWorkbench(root, { ...model, locale: "en" }, actions);
+    resolveChoice("/Synthetic/Late");
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(onSetVerificationRoot).not.toHaveBeenCalled();
+    expect(root.querySelector<HTMLInputElement>('[data-verification-root="true"]')?.value)
+      .toBe("/Synthetic/Existing");
+    expect(root.textContent).not.toContain("/Synthetic/Late");
+  });
+
+  it("preserves manual-root focus and caret across a verification rerender", () => {
+    const root = createTestDiv();
+    document.body.append(root);
+    const model = {
+      ...populatedWorkbenchModel(),
+      activeTab: "verification" as const,
+      verificationRoot: "/Synthetic/Existing",
+      catalogConnection: { status: "authorized" as const },
+      hybridCatalog: { status: "ready" as const },
+    };
+    const actions = noOpWorkbenchActions();
+    renderWorkbench(root, model, actions);
+    const input = root.querySelector<HTMLInputElement>('[data-verification-root="true"]')!;
+    input.focus();
+    input.setSelectionRange(4, 12, "forward");
+
+    renderWorkbench(root, { ...model, locale: "en" }, actions);
+
+    const replacement = root.querySelector<HTMLInputElement>('[data-verification-root="true"]')!;
+    expect(document.activeElement).toBe(replacement);
+    expect(replacement.selectionStart).toBe(4);
+    expect(replacement.selectionEnd).toBe(12);
+    expect(replacement.selectionDirection).toBe("forward");
+    root.remove();
+  });
+
+  it("restores focus to the replacement choose button after selection rerenders the host", async () => {
+    const root = createTestDiv();
+    document.body.append(root);
+    let currentModel = {
+      ...populatedWorkbenchModel(),
+      activeTab: "verification" as const,
+      verificationRoot: "",
+      catalogConnection: { status: "authorized" as const },
+      hybridCatalog: { status: "ready" as const },
+    };
+    let actions = noOpWorkbenchActions();
+    actions = noOpWorkbenchActions({
+      onBrowseVerificationRoot: async () => "/Synthetic/Chosen",
+      onSetVerificationRoot: (value) => {
+        currentModel = { ...currentModel, verificationRoot: value };
+        renderWorkbench(root, currentModel, actions);
+      },
+    });
+    renderWorkbench(root, currentModel, actions);
+    const choose = root.querySelector<HTMLButtonElement>(
+      '[data-action="browse-verification-root"]',
+    )!;
+    choose.focus();
+    choose.click();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(document.activeElement).toBe(root.querySelector(
+      '[data-action="browse-verification-root"]',
+    ));
+    expect(root.textContent).toContain("/Synthetic/Chosen");
+    root.remove();
   });
 
   it("keeps a controller-owned resume mismatch across runtime-driven full rerenders", async () => {
@@ -392,12 +547,15 @@ describe("workbench", () => {
     document.body.append(view.contentEl);
     await view.onOpen();
 
-    view.contentEl.querySelector<HTMLButtonElement>('[data-action="start-verification"]')?.click();
-    await vi.waitFor(() => expect(view.contentEl.textContent).toContain("修正父目录格式"));
-    view.contentEl.querySelector<HTMLButtonElement>('[data-action="resume-verification"]')?.click();
+    const start = view.contentEl.querySelector<HTMLButtonElement>('[data-action="start-verification"]');
+    const resume = view.contentEl.querySelector<HTMLButtonElement>('[data-action="resume-verification"]');
+    expect(start?.disabled).toBe(true);
+    expect(resume?.disabled).toBe(true);
+    expect(view.contentEl.textContent).toContain("请选择或输入合法的非根云端路径");
+    start?.click();
+    resume?.click();
     await Promise.resolve();
 
-    expect(view.contentEl.textContent).toContain("修正父目录格式后重试");
     expect(view.contentEl.textContent).not.toContain("malformed-relative-root");
     expect(confirmationCalls).toBe(0);
     expect(hybrid.startInputs).toEqual([]);
@@ -2136,6 +2294,7 @@ describe("workbench", () => {
         aiEndpoint: "",
         aiModel: "",
         secretId: "",
+        recentCloudDirectories: EMPTY_RECENT_CLOUD_DIRECTORIES,
       }),
       folderRuleProposals: () => [{
         prefix: "References",
@@ -2184,6 +2343,7 @@ describe("workbench", () => {
       aiEndpoint: "",
       aiModel: "",
       secretId: "",
+      recentCloudDirectories: EMPTY_RECENT_CLOUD_DIRECTORIES,
     };
     const values: boolean[] = [];
     const controller = {
@@ -2232,6 +2392,7 @@ describe("workbench", () => {
         aiEndpoint: "",
         aiModel: "",
         secretId: "",
+        recentCloudDirectories: EMPTY_RECENT_CLOUD_DIRECTORIES,
       }),
       folderRuleProposals: () => [{
         prefix: "References",
@@ -2283,6 +2444,7 @@ describe("workbench", () => {
         aiEndpoint: "",
         aiModel: "",
         secretId: "",
+        recentCloudDirectories: EMPTY_RECENT_CLOUD_DIRECTORIES,
       }),
       folderRuleProposals: () => [],
       previewSampleChange: () => undefined,
@@ -2331,6 +2493,7 @@ describe("workbench", () => {
         aiEndpoint: "",
         aiModel: "",
         secretId: "",
+        recentCloudDirectories: EMPTY_RECENT_CLOUD_DIRECTORIES,
       }),
       folderRuleProposals: () => [],
       previewSampleChange: () => undefined,

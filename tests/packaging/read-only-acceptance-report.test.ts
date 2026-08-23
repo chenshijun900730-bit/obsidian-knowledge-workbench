@@ -1,5 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 import {
   copyFile,
   mkdir,
@@ -11,7 +12,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   composeReadOnlyAcceptanceReport,
@@ -60,7 +61,10 @@ const installAcceptance = (options: Readonly<{ repoRoot: string }>): Promise<unk
 const temporaryPaths: string[] = [];
 const RUN_ID = "123e4567-e89b-42d3-a456-426614174000";
 const COMMIT = "a".repeat(40);
-const PLUGIN_VERSION = "0.1.0";
+const currentManifest = JSON.parse(readFileSync(resolve("manifest.json"), "utf8")) as {
+  readonly version: string;
+};
+const PLUGIN_VERSION = currentManifest.version;
 const ARTIFACT_BINDING = `knowledge-workbench@${PLUGIN_VERSION}:read-only-acceptance`;
 const RECORDED_AT = "2026-07-14T00:00:00.000Z";
 

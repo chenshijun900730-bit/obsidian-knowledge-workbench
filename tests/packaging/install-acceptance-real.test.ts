@@ -5,6 +5,11 @@ import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+const currentManifest = JSON.parse(readFileSync(resolve("manifest.json"), "utf8")) as {
+  readonly version: string;
+};
+const currentPluginVersion = currentManifest.version;
+
 interface HostProbeState {
   calls: number;
   mode: "stopped" | "running" | "unknown";
@@ -418,7 +423,7 @@ describe("real-vault normal installer public entry point", () => {
         vaultPath,
       });
 
-      expect(result.artifactBinding).toBe("knowledge-workbench@0.1.0:normal");
+      expect(result.artifactBinding).toBe(`knowledge-workbench@${currentPluginVersion}:normal`);
       expect(result.priorTarget).toBe("replaced");
       expect(await readdir(targetPath)).toEqual([
         "data.json",
@@ -434,7 +439,7 @@ describe("real-vault normal installer public entry point", () => {
         await readFile(join(repoRoot, "styles.css")),
       );
       expect((await readFile(join(targetPath, "main.js"), "utf8")))
-        .toContain("knowledge-workbench@0.1.0:normal");
+        .toContain(`knowledge-workbench@${currentPluginVersion}:normal`);
       expect(JSON.parse(await readFile(join(obsidianPath, "community-plugins.json"), "utf8")))
         .toEqual([]);
     } finally {
@@ -910,9 +915,9 @@ describe("real-vault read-only acceptance installer public entry point", () => {
       });
 
       expect(result).toMatchObject({
-        artifactBinding: "knowledge-workbench@0.1.0:read-only-acceptance",
+        artifactBinding: `knowledge-workbench@${currentPluginVersion}:read-only-acceptance`,
         backupRetained: false,
-        pluginVersion: "0.1.0",
+        pluginVersion: currentPluginVersion,
         priorTarget: "absent",
       });
       expect(await readdir(targetPath)).toEqual([

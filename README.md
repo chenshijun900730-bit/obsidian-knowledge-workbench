@@ -117,7 +117,11 @@ AI 默认关闭。启用后，每次请求都会先展示动作、endpoint origi
 
 Cloud Catalog 的目标是为百度网盘中的 PDF 建立本地可搜索目录，而不是下载 3.2 TB 原文件或把每份 PDF 转成 Markdown。PDF 原件继续留在网盘；派生目录保存在 `~/Library/Application Support/Knowledge Workbench/baidu-catalog/`，不进入 Vault，也不并入 Today、Knowledge Map 或整理写入流程。
 
-normal 构建只组合官方 OOB OAuth、Token 交换和 `GET /rest/2.0/xpan/file?method=list`。OAuth 成功不会自动枚举目录；首个真实请求只允许用户另行确认的非根小目录。当前自动化会拒绝 `/`，并禁止 acceptance 构建获得 OAuth、SecretStorage、百度列表或外部目录写入能力。
+normal 构建只组合官方 OOB OAuth、Token 交换和 `GET /rest/2.0/xpan/file?method=list`。OAuth 成功不会自动枚举目录；普通云端扫描和分类核验只接受用户另行确认的非根目录。acceptance 构建无法获得 OAuth、SecretStorage、百度列表或外部目录写入能力。
+
+云端扫描和分类核验都拒绝把 `/` 作为根目录。目录选择器打开、搜索、筛选和选中本地候选时不会调用百度接口；只有用户明确输入同名目录名称，并在第二步确认启动同名定位后，插件才会从 `/` 开始只读读取目录元数据。单次定位最多检查 500 个目录、发送 50 次列表请求或运行 120 秒，先到任一上限即停止。定位结果不会展示 PDF 条目，也不会下载 PDF 文件。
+
+normal 构建可在普通本地插件设置中保存最多 10 条经过精确选择的最近目录路径，用户可以独立清空；这些路径不是凭据，也不存入 SecretStorage。从本地 TXT 目录得到的名称只作为“未核验”搜索提示，不能在未经云端精确核验时当作已确认路径使用。
 
 设置页会把应用凭据和 OAuth Token 保存到 Obsidian SecretStorage；这能避免秘密直接写入插件 `data.json`，但不应被描述为已经证明由 macOS Keychain 保护。`Remove local credentials` 只删除本机保存的凭据，不等于服务器端撤权。真实操作前必须阅读[百度网盘云端目录小目录验收手册](docs/runbooks/baidu-cloud-catalog-small-folder.md)，接受存储属性，并再次明确批准一次真实 OOB 授权和一个不敏感小目录。阅读文档、自动化通过或此前接受 OAuth 范围均不构成该执行授权。
 

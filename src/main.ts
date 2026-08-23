@@ -1,5 +1,6 @@
 import {
   Modal,
+  Notice,
   PluginSettingTab,
   requestUrl,
   SecretComponent,
@@ -25,7 +26,7 @@ import { presentCatalogProgress } from "./ui/catalog-progress-presenter";
 import { createCatalogTxtImportConfirmationModalClass } from "./ui/catalog-txt-import-confirmation-modal";
 import { createCatalogLargeScanConfirmationModalClass } from "./ui/catalog-large-scan-confirmation-modal";
 import { createCloudDirectoryPickerModalClass } from "./ui/cloud-directory-picker";
-import { createWorkbenchI18n } from "./i18n/workbench-i18n";
+import { createDirectoryPickerI18n } from "./i18n/workbench-directory-picker-i18n";
 
 if (
   __KNOWLEDGE_WORKBENCH_BUILD_MODE__ !== "normal"
@@ -137,11 +138,11 @@ const runtime = Object.freeze({
       request: (input) => new ConcreteCatalogLargeScanConfirmationModal(app).request(input),
     };
   },
-  createCatalogDirectoryPicker: (app, discovery, getLocale) => ({
+  createCatalogDirectoryPicker: (app, getLocale) => ({
     request: (input) => new ConcreteCloudDirectoryPickerModal(
       app,
-      discovery,
-      () => createWorkbenchI18n(getLocale()),
+      () => createDirectoryPickerI18n(getLocale()),
+      (message) => { new Notice(message); },
     ).request(input),
   }),
   createAi: (app, getLocale) => {

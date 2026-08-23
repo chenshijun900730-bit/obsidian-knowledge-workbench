@@ -507,6 +507,11 @@ const acceptanceVault = await import("../../scripts/synthetic-acceptance-vault.m
 const vaultCore = await import("../../scripts/synthetic-vault-install-core.mjs") as unknown as VaultCoreModule;
 
 const projectRoot = fileURLToPath(new URL("../..", import.meta.url));
+const currentManifest = JSON.parse(await readFile(join(projectRoot, "manifest.json"), "utf8")) as {
+  readonly version: string;
+};
+const currentPluginVersion = currentManifest.version;
+const currentAcceptanceBinding = `knowledge-workbench@${currentPluginVersion}:read-only-acceptance`;
 const HEAVY_TIMEOUT_MS = 600_000;
 const HOOKS = Object.freeze([
   "afterArtifactLock",
@@ -887,8 +892,8 @@ describe("transactional synthetic acceptance installation", () => {
     expect(Reflect.ownKeys(result).sort()).toEqual(["artifactBinding", "pluginVersion", "runId"]);
     expect(result).toEqual({
       runId: state.runId,
-      pluginVersion: "0.1.0",
-      artifactBinding: "knowledge-workbench@0.1.0:read-only-acceptance",
+      pluginVersion: currentPluginVersion,
+      artifactBinding: currentAcceptanceBinding,
     });
     expect(contexts.get("afterReceiptPublish")?.runId).toBe(result.runId);
     expect((await readdir(repo.targetPath)).sort()).toEqual([
@@ -2312,7 +2317,7 @@ describe("acceptance installer final canonical and mutation-class safety matrix"
       await expectInstallFailure(repo, "afterBuild", async () => {
         const metadata = JSON.parse(await readFile(metadataPath, "utf8")) as Record<string, unknown>;
         if (mode === "wrong-value") metadata.network = "allowed";
-        else metadata.artifactBinding = "knowledge-workbench@0.1.0:normal";
+        else metadata.artifactBinding = `knowledge-workbench@${currentPluginVersion}:normal`;
         changedBytes = Buffer.from(`${JSON.stringify(metadata, null, 2)}\n`, "utf8");
         await writeFile(metadataPath, changedBytes);
       }, "artifact-invalid");

@@ -12,6 +12,10 @@ import type {
   PluginSettings,
   ScanCheckpoint,
 } from "./plugin-data";
+import {
+  EMPTY_RECENT_CLOUD_DIRECTORIES,
+  decodeRecentCloudDirectories,
+} from "./recent-cloud-directories";
 
 const ACTIVE_JOURNAL_STATUSES = new Set(["planned", "executing", "rolling-back", "recovery-required"]);
 const MAX_JOURNALS = 100;
@@ -51,6 +55,7 @@ const defaultSettings = (): PluginSettings => ({
   aiEndpoint: "",
   aiModel: "",
   secretId: "",
+  recentCloudDirectories: EMPTY_RECENT_CLOUD_DIRECTORIES,
 });
 
 const defaultOperational = (): OperationalState => ({
@@ -114,6 +119,7 @@ const decodeSettings = (value: unknown): PluginSettings => {
     aiEndpoint,
     aiModel,
     secretId,
+    recentCloudDirectories: decodeRecentCloudDirectories(value.recentCloudDirectories),
   };
 };
 
@@ -390,6 +396,13 @@ export class PluginDataStore {
   saveSettings(settings: PluginSettings): Promise<void> {
     const snapshot = decodeSettings(settings);
     return this.update((data) => ({ ...data, settings: snapshot }));
+  }
+
+  updateSettings(change: (settings: PluginSettings) => PluginSettings): Promise<void> {
+    return this.update((data) => ({
+      ...data,
+      settings: decodeSettings(change(clone(data.settings))),
+    }));
   }
 
   saveCheckpoint(staging: ScanCheckpoint): Promise<void> {

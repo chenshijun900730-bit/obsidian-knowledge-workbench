@@ -1,5 +1,6 @@
 import type { DocumentRecord } from "../core/types";
 import type { WorkbenchLocale } from "../i18n/workbench-i18n";
+import type { RecentCloudDirectoriesV1 } from "./recent-cloud-directories";
 
 export interface FolderRule {
   readonly prefix: string;
@@ -25,6 +26,7 @@ export interface PluginSettings {
   readonly aiEndpoint: string;
   readonly aiModel: string;
   readonly secretId: string;
+  readonly recentCloudDirectories: RecentCloudDirectoriesV1;
 }
 
 export interface ActiveIndex {

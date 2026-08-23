@@ -1,4 +1,12 @@
 import { describe, expect, it } from "vitest";
+import {
+  CloudCatalogRuntimeService,
+  type CloudCatalogConnectionRuntime,
+} from "../../../src/catalog/cloud-catalog-runtime";
+import type { CloudDirectoryDiscoveryRuntime } from "../../../src/catalog/cloud-directory-discovery-service";
+import type { CloudDirectoryLocatorRuntime } from "../../../src/catalog/cloud-directory-locator";
+import type { HybridCatalogRuntime } from "../../../src/catalog/hybrid-catalog-runtime";
+import type { CatalogSnapshotPort } from "../../../src/catalog/catalog-ports";
 import { assertRuntimeCompositionCoherence } from "../../../src/runtime/runtime-composition";
 import {
   NORMAL_RUNTIME_POLICY,
@@ -22,5 +30,37 @@ describe("runtime composition", () => {
       READ_ONLY_ACCEPTANCE_POLICY,
       { mode: "normal" },
     )).toThrow("Runtime policy and artifact mode do not match");
+  });
+
+  it("exposes and disposes directory consumers before their shared providers exactly once", () => {
+    const order: string[] = [];
+    const connection = {
+      subscribe: () => () => undefined,
+      dispose: () => { order.push("connection"); },
+    } as unknown as CloudCatalogConnectionRuntime;
+    const hybrid = {
+      dispose: () => { order.push("hybrid"); },
+    } as unknown as HybridCatalogRuntime;
+    const discovery = {
+      dispose: () => { order.push("discovery"); },
+    } as unknown as CloudDirectoryDiscoveryRuntime;
+    const locator = {
+      dispose: () => { order.push("locator"); },
+    } as unknown as CloudDirectoryLocatorRuntime;
+    const runtime = new CloudCatalogRuntimeService(
+      {} as CatalogSnapshotPort,
+      { copyText: async () => undefined, openBaidu: async () => undefined },
+      connection,
+      hybrid,
+      undefined,
+      discovery,
+      locator,
+    );
+
+    expect(runtime.directoryLocator).toBe(locator);
+    runtime.dispose();
+    runtime.dispose();
+
+    expect(order).toEqual(["locator", "discovery", "hybrid", "connection"]);
   });
 });

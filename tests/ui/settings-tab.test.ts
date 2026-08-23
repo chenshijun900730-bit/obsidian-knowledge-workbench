@@ -13,6 +13,7 @@ import {
   type PluginSettingTabConstructor,
 } from "../../src/ui/settings-tab";
 import { presentCatalogProgress } from "../../src/ui/catalog-progress-presenter";
+import { EMPTY_RECENT_CLOUD_DIRECTORIES } from "../../src/storage/recent-cloud-directories";
 
 class SettingsSurface {
   readonly containerEl = document.createElementNS("http://www.w3.org/1999/xhtml", "div") as HTMLDivElement;
@@ -45,6 +46,7 @@ const makeTab = (options: Readonly<{ fail?: Error }> = {}) => {
       writeEnabled: false, writePreviewAcknowledged: false, locale: "zh-CN" as const, openAtStartup: false,
       folderRules: [], excludedPrefixes: [], aiEnabled: true,
       aiEndpoint: "https://example.test/v1", aiModel: "model", secretId: "",
+      recentCloudDirectories: EMPTY_RECENT_CLOUD_DIRECTORIES,
     }),
     folderRuleProposals: () => [],
     previewSampleChange: () => undefined,
@@ -91,6 +93,7 @@ describe("AI settings", () => {
         aiEndpoint: "",
         aiModel: "",
         secretId: "",
+        recentCloudDirectories: EMPTY_RECENT_CLOUD_DIRECTORIES,
       }),
       folderRuleProposals: () => [],
       previewSampleChange: () => undefined,
@@ -155,6 +158,7 @@ describe("AI settings", () => {
         writeEnabled: true, writePreviewAcknowledged: true, locale: "zh-CN" as const, openAtStartup: false,
         folderRules: [], excludedPrefixes: [], aiEnabled: true,
         aiEndpoint: "https://example.test/v1", aiModel: "model", secretId: "secret-id",
+        recentCloudDirectories: EMPTY_RECENT_CLOUD_DIRECTORIES,
       }),
       folderRuleProposals: () => [],
       previewSampleChange: calls.sample,
@@ -268,6 +272,7 @@ describe("hybrid catalog settings", () => {
     writeEnabled: false, writePreviewAcknowledged: false, locale: "zh-CN" as const, openAtStartup: false,
     folderRules: [], excludedPrefixes: [], aiEnabled: false,
     aiEndpoint: "", aiModel: "", secretId: "",
+    recentCloudDirectories: EMPTY_RECENT_CLOUD_DIRECTORIES,
   };
   const group = (index: number) => ({
     groupKey: `group:${String(index).repeat(64)}`,
@@ -400,6 +405,7 @@ describe("hybrid catalog settings", () => {
       '[data-catalog-large-scan-root="true"]',
     )!;
     cloudRoot.value = "/Synthetic";
+    cloudRoot.dispatchEvent(new Event("input", { bubbles: true }));
     tab.containerEl.querySelector<HTMLButtonElement>(
       '[data-action="catalog-start-large-verification"]',
     )!.click();
@@ -536,13 +542,17 @@ describe("hybrid catalog settings", () => {
       '[data-catalog-large-scan-root="true"]',
     )!;
     root.value = "/Category 1";
+    root.dispatchEvent(new Event("input", { bubbles: true }));
+    expect(tab.containerEl.querySelector<HTMLButtonElement>(
+      '[data-action="catalog-start-large-verification"]',
+    )?.disabled).toBe(true);
     tab.containerEl.querySelector<HTMLButtonElement>(
       '[data-action="catalog-start-large-verification"]',
     )!.click();
     await Promise.resolve();
 
     expect(scans).toEqual([]);
-    expect(tab.containerEl.querySelector('[role="status"]')?.textContent)
+    expect(tab.containerEl.querySelector('[data-catalog-parent-root-error="true"]')?.textContent)
       .toBe("核验根目录必须是所选分类的 API 父目录");
     expect(root.value).toBe("/Category 1");
   });
@@ -619,6 +629,7 @@ describe("hybrid catalog settings", () => {
       '[data-catalog-large-scan-root="true"]',
     )!;
     root.value = "/Synthetic";
+    root.dispatchEvent(new Event("input", { bubbles: true }));
     tab.containerEl.querySelector<HTMLButtonElement>(
       '[data-action="catalog-resume-large-verification"]',
     )!.click();
@@ -703,6 +714,7 @@ describe("cloud catalog settings", () => {
       writeEnabled: false, writePreviewAcknowledged: false, locale: "zh-CN" as const, openAtStartup: false,
       folderRules: [], excludedPrefixes: [], aiEnabled: false,
       aiEndpoint: "", aiModel: "", secretId: "",
+      recentCloudDirectories: EMPTY_RECENT_CLOUD_DIRECTORIES,
     };
     const calls = {
       connect: [] as Array<Readonly<{ appKey: string; secretKey: string }>>,
@@ -807,6 +819,7 @@ describe("cloud catalog settings", () => {
       writeEnabled: false, writePreviewAcknowledged: false, locale: "zh-CN" as const, openAtStartup: false,
       folderRules: [], excludedPrefixes: [], aiEnabled: false,
       aiEndpoint: "", aiModel: "", secretId: "",
+      recentCloudDirectories: EMPTY_RECENT_CLOUD_DIRECTORIES,
     };
     let connection: CloudCatalogConnectionViewModel = { status: "authorized" };
     let notify = (): void => undefined;
@@ -919,6 +932,7 @@ describe("cloud catalog settings", () => {
         writeEnabled: false, writePreviewAcknowledged: false, locale: "zh-CN" as const, openAtStartup: false,
         folderRules: [], excludedPrefixes: [], aiEnabled: false,
         aiEndpoint: "", aiModel: "", secretId: "",
+        recentCloudDirectories: EMPTY_RECENT_CLOUD_DIRECTORIES,
       };
       const cancelAuthorization = vi.fn();
       let connection: Readonly<{

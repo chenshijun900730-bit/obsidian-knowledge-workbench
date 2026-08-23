@@ -156,6 +156,27 @@ const harness = async (source: ScriptedSource, now: () => number = () => 100) =>
 };
 
 describe("LargeCatalogVerificationService", () => {
+  it("rejects the cloud root before preparing or running a verification batch", async () => {
+    const source = new ScriptedSource([]);
+    const { adapter, service } = await harness(source);
+
+    await expect(service.prepare({
+      batchId: "batch-root-rejected",
+      sourceImportSha256: HASH_A,
+      cloudRoot: "/",
+      groups: [selection()],
+    })).rejects.toEqual(new HybridCatalogError("hybrid-batch-invalid"));
+    await expect(service.start({
+      batchId: "batch-root-rejected",
+      sourceImportSha256: HASH_A,
+      cloudRoot: "/",
+      groups: [selection()],
+    })).rejects.toEqual(new HybridCatalogError("hybrid-batch-invalid"));
+
+    expect(source.requests).toEqual([]);
+    expect(await adapter.loadBatch("batch-root-rejected")).toBeNull();
+  });
+
   it("prepares and loads state without networking, then scans only on an explicit segment", async () => {
     const source = new ScriptedSource([
       {

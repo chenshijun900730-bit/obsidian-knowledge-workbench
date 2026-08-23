@@ -26,6 +26,10 @@ import { effectiveSettings, type RuntimeSafetyPolicy } from "../runtime/safety-p
 import { catalogPageContains, type CloudCatalogRuntime } from "../catalog/cloud-catalog-runtime";
 import type { CloudCatalogConnectionViewModel } from "../catalog/cloud-catalog-runtime";
 import { normalizeCatalogScanRoot } from "../catalog/catalog-path";
+import {
+  buildLocalCloudDirectoryCandidates,
+  type CloudDirectoryCandidateRuntime,
+} from "../catalog/cloud-directory-candidates";
 import { CatalogError } from "../catalog/catalog-types";
 import type { CatalogScanConfirmationPresenter } from "./catalog-scan-confirmation-modal";
 import {
@@ -45,6 +49,10 @@ import {
   verificationConnectionSemanticKey,
   type VerificationConnectionSemanticKey,
 } from "./verification-connection-semantics";
+import {
+  EMPTY_RECENT_CLOUD_DIRECTORIES,
+  rememberRecentCloudDirectory,
+} from "../storage/recent-cloud-directories";
 
 export interface AiSettingsInput {
   readonly enabled: boolean;
@@ -240,8 +248,33 @@ export class WorkbenchController {
   private projectionTimerToken = 0;
   private quietProjectionTimer: ProjectionTimer | null = null;
   private maxProjectionTimer: ProjectionTimer | null = null;
+  private readonly cloudDirectoryCandidates: CloudDirectoryCandidateRuntime;
 
   constructor(private readonly dependencies: WorkbenchDependencies) {
+    this.cloudDirectoryCandidates = Object.freeze({
+      snapshot: () => buildLocalCloudDirectoryCandidates({
+        recent: dependencies.store.settings().recentCloudDirectories,
+        cached: dependencies.catalog.directoryDiscovery?.snapshotCached() ?? [],
+        groups: dependencies.catalog.hybrid?.snapshot().active?.groups ?? [],
+      }),
+      remember: async (path: string) => {
+        const usedAt = dependencies.clock.now();
+        await dependencies.store.updateSettings((settings) => ({
+          ...settings,
+          recentCloudDirectories: rememberRecentCloudDirectory(
+            settings.recentCloudDirectories,
+            path,
+            usedAt,
+          ),
+        }));
+      },
+      clearRecent: async () => {
+        await dependencies.store.updateSettings((settings) => ({
+          ...settings,
+          recentCloudDirectories: EMPTY_RECENT_CLOUD_DIRECTORIES,
+        }));
+      },
+    });
     this.projectionScheduler = dependencies.projectionScheduler ?? defaultProjectionScheduler;
     this.verificationConnectionKey = verificationConnectionSemanticKey(
       dependencies.catalog.connection?.snapshot(),
@@ -581,6 +614,8 @@ export class WorkbenchController {
     if (this.disposed) return;
     const connection = this.dependencies.catalog.connection;
     if (connection === undefined) throw new Error("catalog-unavailable");
+    this.dependencies.catalog.directoryLocator?.cancel();
+    this.dependencies.catalog.directoryDiscovery?.clear();
     await connection.saveApplicationCredentials(credentials);
     if (this.disposed) return;
     await connection.beginAuthorization();
@@ -602,6 +637,8 @@ export class WorkbenchController {
     if (this.disposed) return;
     const connection = this.dependencies.catalog.connection;
     if (connection === undefined) throw new Error("catalog-unavailable");
+    this.dependencies.catalog.directoryLocator?.cancel();
+    this.dependencies.catalog.directoryDiscovery?.clear();
     await connection.revoke();
   }
 
@@ -611,11 +648,19 @@ export class WorkbenchController {
 
   async chooseCatalogRoot(initialRoot: string): Promise<string | null> {
     if (this.disposed) return null;
-    const normalized = this.validateCatalogScanRoot(initialRoot);
-    const discovery = this.dependencies.catalog.directoryDiscovery;
+    const trimmed = initialRoot.trim();
+    const initialPath = trimmed.length === 0
+      ? null
+      : this.validateCatalogScanRoot(trimmed);
     const picker = this.dependencies.catalogDirectoryPicker;
-    if (discovery === undefined || picker === undefined) throw new Error("catalog-unavailable");
-    return picker.request({ initialRoot: normalized });
+    if (picker === undefined) throw new Error("catalog-unavailable");
+    return picker.request({
+      initialPath,
+      candidates: this.cloudDirectoryCandidates,
+      ...(this.dependencies.catalog.directoryLocator === undefined
+        ? {}
+        : { locator: this.dependencies.catalog.directoryLocator }),
+    });
   }
 
   async requestCatalogScan(rootPath: string, onConfirmed?: () => void): Promise<void> {

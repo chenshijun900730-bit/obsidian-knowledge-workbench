@@ -14,7 +14,6 @@ import type { CatalogScanConfirmationPresenter } from "../ui/catalog-scan-confir
 import type { CatalogTxtImportConfirmationPresenter } from "../ui/catalog-txt-import-confirmation-modal";
 import type { CatalogLargeScanConfirmationPresenter } from "../ui/catalog-large-scan-confirmation-modal";
 import type { SettingsSectionsSurface } from "../ui/settings-sections";
-import type { CloudDirectoryDiscoveryRuntime } from "../catalog/cloud-directory-discovery-service";
 import type {
   WorkbenchLocaleProvider,
 } from "../i18n/workbench-i18n";
@@ -73,7 +72,6 @@ export interface RuntimeComposition {
   ) => CatalogLargeScanConfirmationPresenter;
   readonly createCatalogDirectoryPicker?: (
     app: App,
-    discovery: CloudDirectoryDiscoveryRuntime,
     getLocale: WorkbenchLocaleProvider,
   ) => CloudDirectoryPickerPresenter;
 }

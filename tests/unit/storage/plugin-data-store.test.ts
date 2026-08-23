@@ -6,6 +6,7 @@ import {
   NORMAL_RUNTIME_POLICY,
   READ_ONLY_ACCEPTANCE_POLICY,
 } from "../../../src/runtime/safety-policy";
+import { EMPTY_RECENT_CLOUD_DIRECTORIES } from "../../../src/storage/recent-cloud-directories";
 import type { PluginSettings } from "../../../src/storage/plugin-data";
 import { PluginDataStore } from "../../../src/storage/plugin-data-store";
 import { OperationJournal } from "../../../src/transactions/operation-journal";
@@ -77,6 +78,170 @@ describe("PluginDataStore", () => {
     await store.load();
     expect(store.settings().locale).toBe("zh-CN");
     expect(store.settings().openAtStartup).toBe(true);
+    expect(store.settings().recentCloudDirectories).toEqual(EMPTY_RECENT_CLOUD_DIRECTORIES);
+  });
+
+  it.each([
+    ["wrong schema", { schemaVersion: 2, items: [] }],
+    [
+      "more than ten entries",
+      {
+        schemaVersion: 1,
+        items: Array.from({ length: 11 }, (_, index) => ({
+          path: `/Synthetic/${index}`,
+          filename: String(index),
+          lastUsedAt: "2026-08-23T00:00:00.000Z",
+        })),
+      },
+    ],
+    [
+      "a root path",
+      {
+        schemaVersion: 1,
+        items: [{ path: "/", filename: "", lastUsedAt: "2026-08-23T00:00:00.000Z" }],
+      },
+    ],
+    [
+      "a mismatched filename",
+      {
+        schemaVersion: 1,
+        items: [{ path: "/Synthetic/Alpha", filename: "Beta", lastUsedAt: "2026-08-23T00:00:00.000Z" }],
+      },
+    ],
+    [
+      "a non-canonical timestamp",
+      {
+        schemaVersion: 1,
+        items: [{ path: "/Synthetic/Alpha", filename: "Alpha", lastUsedAt: "2026-08-23T00:00:00Z" }],
+      },
+    ],
+  ])("drops the entire recent field containing %s without clearing unrelated settings", async (_, recentCloudDirectories) => {
+    const store = new PluginDataStore(new MemoryPluginDataPort({
+      schemaVersion: 1,
+      settings: {
+        locale: "en",
+        openAtStartup: true,
+        recentCloudDirectories,
+      },
+      activeIndex: null,
+      staging: null,
+      operational: { pins: {}, dismissals: {}, lastOpened: {}, journals: [] },
+    }));
+
+    await store.load();
+
+    expect(store.settings()).toMatchObject({ locale: "en", openAtStartup: true });
+    expect(store.settings().recentCloudDirectories).toEqual(EMPTY_RECENT_CLOUD_DIRECTORIES);
+  });
+
+  it("round-trips valid recent directories without serializing identities or credentials", async () => {
+    const port = new MemoryPluginDataPort({
+      schemaVersion: 1,
+      settings: {
+        locale: "en",
+        openAtStartup: true,
+        appKey: "synthetic-app-key",
+        secretKey: "synthetic-secret-key",
+        accessToken: "synthetic-access-token",
+        refreshToken: "synthetic-refresh-token",
+        authorizationCode: "synthetic-authorization-code",
+        recentCloudDirectories: {
+          schemaVersion: 1,
+          items: [{
+            path: "/Synthetic/Alpha",
+            filename: "Alpha",
+            lastUsedAt: "2026-08-23T00:00:00.000Z",
+            fsId: "synthetic-fs-id",
+          }],
+        },
+      },
+      activeIndex: null,
+      staging: null,
+      operational: { pins: {}, dismissals: {}, lastOpened: {}, journals: [] },
+    });
+    const store = new PluginDataStore(port);
+
+    await store.load();
+    await store.saveSettings(store.settings());
+    await store.reload();
+
+    expect(store.settings().recentCloudDirectories).toEqual({
+      schemaVersion: 1,
+      items: [{
+        path: "/Synthetic/Alpha",
+        filename: "Alpha",
+        lastUsedAt: "2026-08-23T00:00:00.000Z",
+      }],
+    });
+    expect(JSON.stringify(await port.load())).not.toMatch(
+      /appKey|secretKey|accessToken|refreshToken|authorizationCode|fsId|synthetic-(?:app|secret|access|refresh|authorization|fs)/u,
+    );
+  });
+
+  it("preserves an independently valid recent field while resetting an unknown outer schema", async () => {
+    const store = new PluginDataStore(new MemoryPluginDataPort({
+      schemaVersion: 999,
+      settings: {
+        writeEnabled: true,
+        writePreviewAcknowledged: true,
+        locale: "en",
+        openAtStartup: true,
+        recentCloudDirectories: {
+          schemaVersion: 1,
+          items: [{
+            path: "/Synthetic/Alpha",
+            filename: "Alpha",
+            lastUsedAt: "2026-08-23T00:00:00.000Z",
+          }],
+        },
+      },
+      activeIndex: { unsafe: true },
+    }));
+
+    await store.load();
+
+    expect(store.settings()).toMatchObject({
+      locale: "en",
+      openAtStartup: true,
+      writeEnabled: false,
+      recentCloudDirectories: {
+        schemaVersion: 1,
+        items: [{
+          path: "/Synthetic/Alpha",
+          filename: "Alpha",
+          lastUsedAt: "2026-08-23T00:00:00.000Z",
+        }],
+      },
+    });
+    expect(store.activeIndex()).toBeNull();
+  });
+
+  it("applies concurrent settings changes against queue-current state", async () => {
+    const store = new PluginDataStore(new MemoryPluginDataPort());
+    await store.load();
+
+    await Promise.all([
+      store.updateSettings((settings) => ({ ...settings, openAtStartup: true })),
+      store.updateSettings((settings) => ({
+        ...settings,
+        recentCloudDirectories: {
+          schemaVersion: 1,
+          items: [{
+            path: "/Synthetic/Alpha",
+            filename: "Alpha",
+            lastUsedAt: "2026-08-23T00:00:00.000Z",
+          }],
+        },
+      })),
+    ]);
+
+    expect(store.settings()).toMatchObject({
+      openAtStartup: true,
+      recentCloudDirectories: {
+        schemaVersion: 1,
+        items: [{ path: "/Synthetic/Alpha" }],
+      },
+    });
   });
 
   it("durably disables historical write and AI settings in acceptance mode", async () => {
