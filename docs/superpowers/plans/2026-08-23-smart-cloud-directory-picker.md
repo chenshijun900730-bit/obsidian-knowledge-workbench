@@ -505,7 +505,7 @@ npx vitest run tests/unit/runtime/runtime-composition.test.ts tests/integration/
 
 Expected: PASS. Acceptance source and runtime still have no picker or locator.
 
-- [ ] **Step 6: Commit runtime wiring**
+- [x] **Step 6: Commit runtime wiring**
 
 ```bash
 git add src/catalog/cloud-catalog-runtime.ts src/runtime/normal-cloud-catalog-composition.ts src/runtime/runtime-composition.ts src/ui/workbench-controller.ts src/plugin/knowledge-workbench-plugin.ts src/main.ts tests/unit/runtime/runtime-composition.test.ts tests/integration/catalog-offline-composition.test.ts tests/integration/read-only-acceptance-automated-safety.test.ts tests/ui/workbench-controller.test.ts tests/packaging/composition-roots.test.ts
@@ -522,11 +522,11 @@ git commit -m "feat(目录): 接入智能选择器运行时"
 - Modify: `styles.css`
 - Modify: `src/main.ts`
 
-- [ ] **Step 1: Replace old modal tests with the approved contract**
+- [x] **Step 1: Replace old modal tests with the approved contract**
 
 Create fake candidate and locator runtimes with separate counters. Test blank opening/autofocus; zero-call local operations; merged source/path/status rendering; TXT/conflict nonselection even under synthetic clicks; same-name full paths; `aria-pressed` filters; listbox keyboard/`aria-selected`; two-step locator confirmation showing `/`, 500, 50, and 120 seconds; one confirmed call and signal; fixed partial/canceled/error messages; nonblocking recent-save notice; Escape/close/dispose cleanup; late-result guards; and 320-pixel long-path layout.
 
-- [ ] **Step 2: Run modal and locale tests**
+- [x] **Step 2: Run modal and locale tests**
 
 ```bash
 npx vitest run tests/ui/cloud-directory-picker.test.ts tests/unit/i18n/workbench-i18n.test.ts
@@ -534,7 +534,7 @@ npx vitest run tests/ui/cloud-directory-picker.test.ts tests/unit/i18n/workbench
 
 Expected: FAIL against the old root-scoped modal.
 
-- [ ] **Step 3: Implement local search, filtering, and exact-only selection**
+- [x] **Step 3: Implement local search, filtering, and exact-only selection**
 
 Keep state explicit:
 
@@ -556,19 +556,19 @@ Every local render reads `candidates.snapshot()`, appends detached located candi
 
 On use, re-run `normalizeCatalogScanRoot`, await `candidates.remember(path)`, catch to emit one fixed localized notice, then resolve the path. Never call locator, scan, verification, resume, OAuth, or connection here.
 
-- [ ] **Step 4: Implement two-step lookup and lifecycle guards**
+- [x] **Step 4: Implement two-step lookup and lifecycle guards**
 
 The first action reveals query, `/`, and budget. Only final confirmation calls `locateByName(query, signal)`. Capture request generation and signal; before every merge, status, notice, or selection mutation, require open state, matching generation, and non-aborted signal. Append returned exact/conflict candidates only after resolution. Paused summaries keep committed matches and state the limit.
 
 On close, Escape, cancel, dispose, or new generation: abort, clear input values and located results, remove DOM, detach signal listeners, resolve once, and restore opener focus with `preventScroll`.
 
-- [ ] **Step 5: Add complete bilingual strings and styles**
+- [x] **Step 5: Add complete bilingual strings and styles**
 
 Add keys for filters/sources, selection/path state, TXT hint, conflict, clear recent, persistence warning, lookup action/confirmation/budget/progress/limits/unavailable/error, and ARIA labels. Extend parity tests to require identical interpolation names.
 
 Use Obsidian tokens for two-line results, source chips, selected outline, conflict explanation, responsive actions, and `overflow-wrap: anywhere`. Preserve standalone `:focus-visible` coverage.
 
-- [ ] **Step 6: Rerun modal, locale, and localization packaging tests**
+- [x] **Step 6: Rerun modal, locale, and localization packaging tests**
 
 ```bash
 npx vitest run tests/ui/cloud-directory-picker.test.ts tests/unit/i18n/workbench-i18n.test.ts tests/packaging/ui-localization-boundary.test.ts

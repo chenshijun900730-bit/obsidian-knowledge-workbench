@@ -1,5 +1,6 @@
 import {
   Modal,
+  Notice,
   PluginSettingTab,
   requestUrl,
   SecretComponent,
@@ -141,6 +142,7 @@ const runtime = Object.freeze({
     request: (input) => new ConcreteCloudDirectoryPickerModal(
       app,
       () => createWorkbenchI18n(getLocale()),
+      (message) => { new Notice(message); },
     ).request(input),
   }),
   createAi: (app, getLocale) => {

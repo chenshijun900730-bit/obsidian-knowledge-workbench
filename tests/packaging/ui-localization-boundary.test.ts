@@ -16,6 +16,7 @@ const SURFACE_NAMESPACES = {
   "src/ui/catalog-scan-confirmation-modal.ts": ["catalog.confirm."],
   "src/ui/catalog-txt-import-confirmation-modal.ts": ["catalog.confirm."],
   "src/ui/catalog-large-scan-confirmation-modal.ts": ["verification.confirm."],
+  "src/ui/cloud-directory-picker.ts": ["directoryPicker."],
   "src/ui/catalog-progress-presenter.ts": ["progress.", "settings.status."],
   "src/ui/start-page.ts": ["start.", "today.", "map.", "catalog."],
   "src/ui/workbench-view.ts": ["progress.", "status.", "host.", "acceptance.", "ai."],
@@ -750,7 +751,7 @@ const findingsForSource = (
   const TECHNICAL_CODE = /^[a-z][a-z0-9]*(?:[-_.][a-z0-9]+)*$/u;
   const TECHNICAL_FRAGMENT = /^[a-z][a-z0-9_.-]*$/u;
   const TECHNICAL_CSS_CLASS = /^knowledge-workbench(?:(?:__|--)[a-z0-9-]+)+(?:\s+knowledge-workbench(?:(?:__|--)[a-z0-9-]+)+)*$/u;
-  const TECHNICAL_FILENAME_FRAGMENT = /^(?:knowledge-workbench-history-|\.json)$/u;
+  const TECHNICAL_FILENAME_FRAGMENT = /^(?:knowledge-workbench-history-|knowledge-workbench-directory-|\.json)$/u;
   const isStandardLibraryCall = (call: ts.CallExpression): boolean => (
     isTypescriptLibDeclaration(resolvedDeclaration(call))
   );
@@ -801,11 +802,22 @@ const findingsForSource = (
       && (key.text === "settings.surface.credentialStorage"
         || key.text === "settings.surface.persistentCredentialId");
   };
+  const DIRECTORY_PICKER_INTERPOLATIONS = new Set([
+    "directories", "matches", "path", "query", "requests", "root", "seconds",
+  ]);
+  const isDirectoryPickerInterpolation = (context: ts.Node, sink: string): boolean => (
+    file === "src/ui/cloud-directory-picker.ts"
+    && sink.endsWith(":i18n-value")
+    && ts.isPropertyAssignment(context)
+    && DIRECTORY_PICKER_INTERPOLATIONS.has(declarationName(context.name) ?? "")
+  );
   const isTechnicalLiteral = (node: ts.Node, text: string): boolean => {
     if (isNormalOnlyBrandDeclaration(node, text)) return true;
     if (PUNCTUATION_ONLY.test(text) || TECHNICAL_PATH.test(text) || TECHNICAL_FIELD_PREFIX.test(text)) return true;
     if (TECHNICAL_FILENAME_FRAGMENT.test(text)) return true;
     if (text === "en" || text === "zh-CN" || text === "en-US") return true;
+    if (file === "src/ui/cloud-directory-picker.ts"
+      && (text === "ArrowDown" || text === "ArrowUp" || text === "Enter")) return true;
     const parent = node.parent;
     if ((ts.isImportDeclaration(parent) || ts.isExportDeclaration(parent)) && parent.moduleSpecifier === node) return true;
     if (ts.isExternalModuleReference(parent) && parent.expression === node) return true;
@@ -989,6 +1001,7 @@ const findingsForSource = (
       record(node, sink, "raw-error-detail");
       return;
     }
+    if (isDirectoryPickerInterpolation(node, sink)) return;
     if (ts.isStringLiteralLike(expression)) {
       if (isNormalOnlyBrandInterpolation(expression, node, sink)) return;
       if (!PUNCTUATION_ONLY.test(expression.text) && !TECHNICAL_PATH.test(expression.text)) {
