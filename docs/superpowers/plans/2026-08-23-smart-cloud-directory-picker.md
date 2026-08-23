@@ -663,7 +663,7 @@ npx vitest run tests/ui/cloud-directory-field.test.ts tests/ui/settings-sections
 
 Expected: PASS. Picker selection increments no scan, verification, resume, OAuth, or locator counter.
 
-- [ ] **Step 7: Commit the unified host UI**
+- [x] **Step 7: Commit the unified host UI**
 
 ```bash
 git add src/ui/cloud-directory-field.ts src/ui/settings-sections.ts src/ui/verification-page.ts src/ui/workbench-view.ts src/i18n/workbench-i18n.ts styles.css tests/ui/cloud-directory-field.test.ts tests/ui/settings-sections.test.ts tests/ui/verification-page.test.ts tests/ui/workbench-view.test.ts tests/ui/workbench-controller.test.ts tests/ui/read-only-acceptance-surfaces.test.ts
@@ -683,11 +683,11 @@ git commit -m "feat(目录): 统一云端目录选择界面"
 - Modify: `package-lock.json`
 - Modify: `versions.json`
 
-- [ ] **Step 1: Add final packaging and isolation assertions**
+- [x] **Step 1: Add final packaging and isolation assertions**
 
 Prove normal imports one locator; acceptance source/bundle contains no picker, locator, locator budget/action labels, OAuth URL, SecretStorage, `requestUrl`, source adapter, or list endpoint; disabled/offline expose no locator; scan/large verification still reject `/`; only the explicit synthetic locator test lists root; and both language dictionaries remain complete.
 
-- [ ] **Step 2: Run packaging tests**
+- [x] **Step 2: Run packaging tests**
 
 ```bash
 npx vitest run tests/packaging/composition-roots.test.ts tests/packaging/read-only-acceptance-build.test.ts tests/packaging/ui-localization-boundary.test.ts tests/integration/catalog-offline-composition.test.ts
@@ -695,13 +695,13 @@ npx vitest run tests/packaging/composition-roots.test.ts tests/packaging/read-on
 
 Expected: PASS. If a bundle assertion fails, fix the build graph; never weaken the assertion or add string-replacement hacks.
 
-- [ ] **Step 3: Update docs and release metadata**
+- [x] **Step 3: Update docs and release metadata**
 
 README must state: scans and category verification reject `/`; only explicit same-name lookup reads root metadata; lookup is read-only and capped at 500 directories, 50 requests, or 120 seconds; PDFs are not shown/downloaded; up to 10 exact recent paths live in ordinary local settings and can be cleared; TXT names are unverified hints.
 
 Bump `package.json`, `package-lock.json`, and `manifest.json` to `0.1.1`. Add `"0.1.1": "1.12.7"` to `versions.json` while retaining `0.1.0`.
 
-- [ ] **Step 4: Run focused tests, lint, and both builds**
+- [x] **Step 4: Run focused tests, lint, and both builds**
 
 ```bash
 npx vitest run tests/unit/storage/recent-cloud-directories.test.ts tests/unit/catalog/cloud-directory-candidates.test.ts tests/unit/catalog/cloud-directory-page-validator.test.ts tests/unit/catalog/cloud-directory-locator.test.ts tests/ui/cloud-directory-picker.test.ts tests/ui/cloud-directory-field.test.ts tests/ui/settings-sections.test.ts tests/ui/verification-page.test.ts tests/ui/workbench-controller.test.ts tests/integration/catalog-offline-composition.test.ts tests/packaging/composition-roots.test.ts tests/packaging/read-only-acceptance-build.test.ts tests/packaging/ui-localization-boundary.test.ts
@@ -712,7 +712,7 @@ npm run build:acceptance
 
 Expected: all PASS with no Baidu contact.
 
-- [ ] **Step 5: Run complete serial and performance gates**
+- [x] **Step 5: Run complete serial and performance gates**
 
 ```bash
 npx vitest run --no-file-parallelism --maxWorkers=1
@@ -722,7 +722,7 @@ npm run test:performance
 
 Expected: all existing measured thresholds PASS. Record only executed results.
 
-- [ ] **Step 6: Install only into the repository synthetic Vault**
+- [x] **Step 6: Install only into the repository synthetic Vault**
 
 ```bash
 npm run install:dev
@@ -741,7 +741,7 @@ Manual synthetic checks:
 7. Switch languages and preserve path draft and selected groups.
 8. Verify keyboard focus, Escape restoration, and long-path wrapping.
 
-- [ ] **Step 7: Inspect final diff and commit release closure**
+- [x] **Step 7: Inspect final diff and commit release closure**
 
 ```bash
 git diff --check
@@ -758,16 +758,16 @@ git commit -m "docs(目录): 收口智能选择器发布说明"
 
 ## Final acceptance checklist
 
-- [ ] Empty path opens the picker.
-- [ ] Local open/search/filter/select paths make zero Baidu requests.
-- [ ] Recent paths persist as a bounded ordinary setting and clear independently.
-- [ ] TXT group names remain visibly unverified and nonselectable.
-- [ ] Same-name directories show parent paths; same-path identity conflicts are disabled.
-- [ ] Root traversal occurs only after two explicit actions and respects 500/50/120 limits.
-- [ ] `/` never becomes a candidate, recent path, scan root, or verification root.
-- [ ] Selection does not start scan, verification, resume, OAuth, or cloud writes.
-- [ ] Cancel, revoke, dispose, and late results cannot mutate stale UI or persistence.
-- [ ] Chinese/English, keyboard, focus, ARIA, narrow layout, and long paths pass.
-- [ ] Acceptance/offline/disabled compositions contain no locator capability.
-- [ ] Full serial, lint, normal build, acceptance build, and both performance gates pass.
-- [ ] Synthetic install succeeds; no real OAuth, Baidu listing, PDF download, or real Vault write occurs.
+- [x] Empty path opens the picker.
+- [x] Local open/search/filter/select paths make zero Baidu requests.
+- [x] Recent paths persist as a bounded ordinary setting and clear independently.
+- [x] TXT group names remain visibly unverified and nonselectable.
+- [x] Same-name directories show parent paths; same-path identity conflicts are disabled.
+- [x] Root traversal occurs only after two explicit actions and respects 500/50/120 limits.
+- [x] `/` never becomes a candidate, recent path, scan root, or verification root.
+- [x] Selection does not start scan, verification, resume, OAuth, or cloud writes.
+- [x] Cancel, revoke, dispose, and late results cannot mutate stale UI or persistence.
+- [x] Chinese/English, keyboard, focus, ARIA, narrow layout, and long paths pass.
+- [x] Acceptance/offline/disabled compositions contain no locator capability.
+- [x] Full serial, lint, normal build, acceptance build, and both performance gates pass.
+- [x] Synthetic install succeeds; no real OAuth, Baidu listing, PDF download, or real Vault write occurs.

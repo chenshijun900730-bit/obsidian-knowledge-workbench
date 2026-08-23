@@ -12,7 +12,8 @@ import {
   type CloudDirectoryLocatorSummary,
   type CloudDirectoryLocatorStopReason,
 } from "../../src/catalog/cloud-directory-locator";
-import { createWorkbenchI18n, type WorkbenchLocale } from "../../src/i18n/workbench-i18n";
+import { createDirectoryPickerI18n } from "../../src/i18n/workbench-directory-picker-i18n";
+import type { WorkbenchLocale } from "../../src/i18n/workbench-i18n";
 import {
   createCloudDirectoryPickerModalClass,
   type CloudDirectoryPickerModalConstructor,
@@ -133,7 +134,7 @@ const pickerFixture = (
   );
   const picker = new Picker(
     {} as App,
-    () => createWorkbenchI18n(locale),
+    () => createDirectoryPickerI18n(locale),
     (message) => { notices.push(message); },
   );
   const result = picker.request({

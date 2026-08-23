@@ -26,6 +26,11 @@ vi.mock("node:fs/promises", async (importOriginal) => {
 });
 
 const projectRoot = fileURLToPath(new URL("../..", import.meta.url));
+const currentManifest = JSON.parse(await readFile(join(projectRoot, "manifest.json"), "utf8")) as {
+  readonly version: string;
+};
+const currentPluginVersion = currentManifest.version;
+const currentAcceptanceBinding = `knowledge-workbench@${currentPluginVersion}:read-only-acceptance`;
 const HEAVY_TIMEOUT_MS = 600_000;
 const roots: string[] = [];
 
@@ -163,8 +168,8 @@ describe("acceptance artifact continuous lease", () => {
         expect(Object.isFrozen(file.evidence)).toBe(true);
       }
       expect(contract.validateAcceptanceArtifactSnapshot(source)).toEqual({
-        pluginVersion: "0.1.0",
-        artifactBinding: "knowledge-workbench@0.1.0:read-only-acceptance",
+        pluginVersion: currentPluginVersion,
+        artifactBinding: currentAcceptanceBinding,
       });
       expect(contract.computeAcceptanceArtifactSetDigest(source)).toBe(independentArtifactSetDigest(source));
 
@@ -364,8 +369,8 @@ describe("acceptance artifact continuous lease", () => {
       expect(bundle.bytes).not.toBe(mutated);
       expect(bundle.bytes).toEqual(expected);
       expect(contract.validateAcceptanceArtifactSnapshot(source)).toEqual({
-        pluginVersion: "0.1.0",
-        artifactBinding: "knowledge-workbench@0.1.0:read-only-acceptance",
+        pluginVersion: currentPluginVersion,
+        artifactBinding: currentAcceptanceBinding,
       });
       return undefined;
     });

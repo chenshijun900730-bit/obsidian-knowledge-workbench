@@ -4,6 +4,7 @@ import {
   isWorkbenchLocale,
   WORKBENCH_LOCALES,
 } from "../../../src/i18n/workbench-i18n";
+import { createDirectoryPickerI18n } from "../../../src/i18n/workbench-directory-picker-i18n";
 
 describe("workbench i18n", () => {
   it("supports exactly Simplified Chinese and English", () => {
@@ -30,8 +31,8 @@ describe("workbench i18n", () => {
   });
 
   it("provides symmetric directory-picker sources, ARIA, conflicts, and lookup budgets", () => {
-    const zh = createWorkbenchI18n("zh-CN");
-    const en = createWorkbenchI18n("en");
+    const zh = createDirectoryPickerI18n("zh-CN");
+    const en = createDirectoryPickerI18n("en");
 
     expect(zh.t("directoryPicker.filters.recent")).toBe("最近使用");
     expect(en.t("directoryPicker.filters.recent")).toBe("Recent");

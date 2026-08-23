@@ -33,7 +33,8 @@ type SurfaceFile = keyof typeof SURFACE_NAMESPACES;
 const DISPLAY_PROPERTIES = new Set(["textContent", "placeholder", "title"]);
 const REQUIRED_NAMESPACES = [
   "today.", "map.", "suggestions.", "history.", "quickCapture.", "changePreview.",
-  "ai.", "catalog.confirm.", "verification.confirm.", "progress.", "acceptance.", "host.",
+  "ai.", "catalog.confirm.", "verification.confirm.", "directoryPicker.", "progress.",
+  "acceptance.", "host.",
 ] as const;
 const PUNCTUATION_ONLY = /^[\p{P}\p{S}\s]*$/u;
 const TECHNICAL_PATH = /^\/(?:[\p{L}\p{N}._-]+(?:\/[\p{L}\p{N}._-]+)*)?$/u;
@@ -85,7 +86,10 @@ const objectLiteralFor = (initializer: ts.Expression | undefined): ts.ObjectLite
   return ts.isObjectLiteralExpression(value) ? value : undefined;
 };
 
-const dictionaryShape = (source: string): DictionaryShape => {
+const dictionaryShape = (
+  source: string,
+  requiredNamespaces: readonly string[] = [],
+): DictionaryShape => {
   const ast = ts.createSourceFile("workbench-i18n.ts", source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
   const objects = new Map<string, ts.ObjectLiteralExpression>();
   const findings: string[] = [];
@@ -130,7 +134,7 @@ const dictionaryShape = (source: string): DictionaryShape => {
       findings.push(`placeholder-mismatch:${key}`);
     }
   }
-  for (const namespace of REQUIRED_NAMESPACES) {
+  for (const namespace of requiredNamespaces) {
     if (![...en.keys()].some((key) => key.startsWith(namespace))) {
       findings.push(`missing-namespace:en:${namespace}`);
     }
@@ -141,8 +145,34 @@ const dictionaryShape = (source: string): DictionaryShape => {
   return { keys: new Set(en.keys()), findings };
 };
 
-const I18N_SOURCE = readFileSync(resolve(ROOT, "src/i18n/workbench-i18n.ts"), "utf8");
-const DICTIONARY = dictionaryShape(I18N_SOURCE);
+const combinedDictionaryShape = (
+  shapes: readonly DictionaryShape[],
+): DictionaryShape => {
+  const keys = new Set<string>();
+  const findings = shapes.flatMap((shape) => shape.findings);
+  for (const shape of shapes) {
+    for (const key of shape.keys) {
+      if (keys.has(key)) findings.push(`duplicate-key:${key}`);
+      keys.add(key);
+    }
+  }
+  for (const namespace of REQUIRED_NAMESPACES) {
+    if (![...keys].some((key) => key.startsWith(namespace))) {
+      findings.push(`missing-namespace:${namespace}`);
+    }
+  }
+  return { keys, findings };
+};
+
+const BASE_I18N_SOURCE = readFileSync(resolve(ROOT, "src/i18n/workbench-i18n.ts"), "utf8");
+const DIRECTORY_PICKER_I18N_SOURCE = readFileSync(
+  resolve(ROOT, "src/i18n/workbench-directory-picker-i18n.ts"),
+  "utf8",
+);
+const DICTIONARY = combinedDictionaryShape([
+  dictionaryShape(BASE_I18N_SOURCE),
+  dictionaryShape(DIRECTORY_PICKER_I18N_SOURCE),
+]);
 
 const findingsForSource = (
   file: SurfaceFile,
@@ -570,7 +600,13 @@ const findingsForSource = (
     }
   };
 
-  const WORKBENCH_I18N_DECLARATION = resolve(ROOT, "src/i18n/workbench-i18n.ts");
+  const I18N_DECLARATIONS = new Map([
+    [resolve(ROOT, "src/i18n/workbench-i18n.ts"), "WorkbenchI18n"],
+    [
+      resolve(ROOT, "src/i18n/workbench-directory-picker-i18n.ts"),
+      "DirectoryPickerI18n",
+    ],
+  ] as const);
   const TYPESCRIPT_LIB_DIRECTORY = resolve(ROOT, "node_modules/typescript/lib");
   const OBSIDIAN_DECLARATION = resolve(ROOT, "node_modules/obsidian/obsidian.d.ts");
   const resolvedDeclaration = (call: ts.CallExpression | ts.NewExpression): ts.SignatureDeclaration | undefined => (
@@ -660,12 +696,13 @@ const findingsForSource = (
   const isWorkbenchI18nCall = (call: ts.CallExpression): boolean => {
     if (!ts.isPropertyAccessExpression(call.expression)) return false;
     const declaration = resolvedDeclaration(call);
+    const path = declarationPath(declaration);
     return declaration !== undefined
-      && declarationPath(declaration) === WORKBENCH_I18N_DECLARATION
+      && path !== undefined
       && (ts.isMethodSignature(declaration) || ts.isMethodDeclaration(declaration))
       && declarationName(declaration.name) === call.expression.name.text
       && ts.isInterfaceDeclaration(declaration.parent)
-      && declaration.parent.name.text === "WorkbenchI18n";
+      && I18N_DECLARATIONS.get(path) === declaration.parent.name.text;
   };
 
   const enclosingCallArgument = (node: ts.Node): { readonly call: ts.CallExpression; readonly index: number } | undefined => {

@@ -58,6 +58,20 @@ const externalImports = (
   .filter((value) => value.external)
   .map((value) => value.path);
 
+const FORBIDDEN_ACCEPTANCE_DIRECTORY_TEXT = [
+  "directoryPicker.",
+  "CloudDirectoryDiscoveryService",
+  "CloudDirectoryLocatorService",
+  "BaiduCatalogSourceAdapter",
+  "Locate same-name folders in Baidu Netdisk",
+  "Fixed limit: {directories} folders, {requests} list requests, and {seconds} seconds.",
+  "\u5728\u7f51\u76d8\u4e2d\u5b9a\u4f4d\u540c\u540d\u76ee\u5f55",
+  "\u56fa\u5b9a\u4e0a\u9650\uff1a{directories} \u4e2a\u76ee\u5f55\u3001{requests} \u6b21\u5217\u8868\u8bf7\u6c42\u3001{seconds} \u79d2\u3002",
+  "https://openapi.baidu.com/oauth/2.0/authorize",
+  "https://openapi.baidu.com/oauth/2.0/token",
+  "/rest/2.0/xpan/file",
+] as const;
+
 describe("composition-root dependency graphs", () => {
   it("wires one loaded-store locale provider through every user-facing factory", async () => {
     const [contractSource, pluginSource, normalSource, acceptanceSource] = await Promise.all([
@@ -82,7 +96,9 @@ describe("composition-root dependency graphs", () => {
     ]) expect(pluginSource, factory).toMatch(new RegExp(`${factory}[^\\n]*getLocale|${factory}[\\s\\S]{0,160}getLocale`, "u"));
     expect(normalSource).toContain("getLocale");
     expect(acceptanceSource).toContain("getLocale");
-    expect(acceptanceSource).not.toMatch(/requestUrl|secretStorage|createCatalogDirectoryPicker/u);
+    expect(acceptanceSource).not.toMatch(
+      /requestUrl|secretStorage|SecretStorage|createCatalogDirectoryPicker|directoryPicker|CloudDirectoryLocator|BaiduCatalogSourceAdapter|openapi\.baidu\.com|\/rest\/2\.0\/xpan\/file/u,
+    );
   });
 
   it("keeps the read-only acceptance bundle free of normal-only capabilities", async () => {
@@ -109,6 +125,7 @@ describe("composition-root dependency graphs", () => {
       "src/catalog/cloud-directory-discovery-service.ts",
       "src/catalog/cloud-directory-locator.ts",
       "src/ui/cloud-directory-picker.ts",
+      "src/i18n/workbench-directory-picker-i18n.ts",
     ];
 
     for (const forbidden of forbiddenInputs) {
@@ -130,8 +147,9 @@ describe("composition-root dependency graphs", () => {
     for (const forbidden of contract.FORBIDDEN_ACCEPTANCE_BUNDLE_TEXT) {
       expect(output, forbidden).not.toContain(forbidden);
     }
-    expect(output).not.toContain("CloudDirectoryDiscoveryService");
-    expect(output).not.toContain("CloudDirectoryLocatorService");
+    for (const forbidden of FORBIDDEN_ACCEPTANCE_DIRECTORY_TEXT) {
+      expect(output, forbidden).not.toContain(forbidden);
+    }
     expect(output).not.toMatch(/method=download|\/filemanager|["']dlink["']/u);
   });
 
@@ -186,11 +204,11 @@ describe("composition-root dependency graphs", () => {
     expect(catalogCompositionSource).toContain('"Application Support"');
     expect(catalogCompositionSource).not.toMatch(/vaultBasePath|configDirectory/u);
     expect(catalogCompositionSource.match(/new BaiduCatalogSourceAdapter/gu)).toHaveLength(1);
-    expect(catalogCompositionSource).toMatch(
-      /new CloudDirectoryDiscoveryService\(baiduSource/u,
-    );
-    expect(catalogCompositionSource).toMatch(
-      /new CloudDirectoryLocatorService\(baiduSource/u,
-    );
+    expect(catalogCompositionSource.match(
+      /new CloudDirectoryDiscoveryService\(baiduSource/gu,
+    )).toHaveLength(1);
+    expect(catalogCompositionSource.match(
+      /new CloudDirectoryLocatorService\(baiduSource/gu,
+    )).toHaveLength(1);
   });
 });

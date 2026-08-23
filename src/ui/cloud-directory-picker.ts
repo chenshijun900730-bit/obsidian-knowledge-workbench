@@ -13,7 +13,10 @@ import {
   type CloudDirectoryLocatorStopReason,
 } from "../catalog/cloud-directory-locator";
 import { normalizeCatalogScanRoot } from "../catalog/catalog-path";
-import type { WorkbenchI18n, WorkbenchMessageKey } from "../i18n/workbench-i18n";
+import type {
+  DirectoryPickerI18n,
+  DirectoryPickerMessageKey,
+} from "../i18n/workbench-directory-picker-i18n";
 
 export interface CloudDirectoryPickerRequest {
   readonly initialPath: string | null;
@@ -33,7 +36,7 @@ let pickerInstanceSequence = 0;
 type PickerPhase = "closed" | "local" | "confirm" | "running" | "settling";
 
 interface PickerUi {
-  readonly i18n: WorkbenchI18n;
+  readonly i18n: DirectoryPickerI18n;
   readonly query: HTMLInputElement;
   readonly filters: HTMLElement;
   readonly results: HTMLElement;
@@ -58,13 +61,13 @@ const SOURCE_KEYS = {
   "session-cache": "directoryPicker.filters.sessionCache",
   "txt-group": "directoryPicker.filters.txtGroup",
   "cloud-locator": "directoryPicker.filters.cloudLocator",
-} as const satisfies Record<CloudDirectoryCandidateSource, WorkbenchMessageKey>;
+} as const satisfies Record<CloudDirectoryCandidateSource, DirectoryPickerMessageKey>;
 
 const LOOKUP_REASON_KEYS = {
   "directory-limit": "directoryPicker.lookup.reason.directoryLimit",
   "list-request-limit": "directoryPicker.lookup.reason.listRequestLimit",
   "time-limit": "directoryPicker.lookup.reason.timeLimit",
-} as const satisfies Partial<Record<CloudDirectoryLocatorStopReason, WorkbenchMessageKey>>;
+} as const satisfies Partial<Record<CloudDirectoryLocatorStopReason, DirectoryPickerMessageKey>>;
 
 const ALL_SOURCES: readonly CloudDirectoryCandidateSource[] = [
   "recent",
@@ -145,7 +148,7 @@ const detachedLocatorCandidates = (
 ));
 
 const fixedStatus = (
-  i18n: WorkbenchI18n,
+  i18n: DirectoryPickerI18n,
   summary: CloudDirectoryLocatorSummary,
 ): string => {
   if (summary.status === "complete") {
@@ -201,7 +204,7 @@ export function createCloudDirectoryPickerModalClass(
 
     constructor(
       app: App,
-      private readonly getI18n: () => WorkbenchI18n,
+      private readonly getI18n: () => DirectoryPickerI18n,
       private readonly notify: CloudDirectoryPickerNotice = () => undefined,
     ) {
       super(app);
@@ -624,7 +627,7 @@ export function createCloudDirectoryPickerModalClass(
       filename: string,
       path: string,
       sources: readonly CloudDirectoryCandidateSource[],
-      i18n: WorkbenchI18n,
+      i18n: DirectoryPickerI18n,
     ): void {
       const name = target.ownerDocument.createElement("strong");
       name.className = "knowledge-workbench__directory-picker-name";

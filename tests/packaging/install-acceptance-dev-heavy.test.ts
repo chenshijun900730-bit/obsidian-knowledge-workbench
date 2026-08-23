@@ -190,6 +190,11 @@ const syntheticData = await import("../../scripts/synthetic-acceptance-data.mjs"
 const vaultCore = await import("../../scripts/synthetic-vault-install-core.mjs") as unknown as VaultCoreModule;
 
 const projectRoot = fileURLToPath(new URL("../..", import.meta.url));
+const currentManifest = JSON.parse(await readFile(join(projectRoot, "manifest.json"), "utf8")) as {
+  readonly version: string;
+};
+const currentPluginVersion = currentManifest.version;
+const currentAcceptanceBinding = `knowledge-workbench@${currentPluginVersion}:read-only-acceptance`;
 const HEAVY_TIMEOUT_MS = 600_000;
 const REAL_SYNTHETIC_NOTE_COUNT = 5_000;
 const REAL_SYNTHETIC_TOTAL_BYTES = 75 * 1024 * 1024;
@@ -477,8 +482,8 @@ describe("real-corpus transactional acceptance installation", () => {
     expect(Object.isFrozen(result)).toBe(true);
     expect(result).toEqual({
       runId: state.runId,
-      pluginVersion: "0.1.0",
-      artifactBinding: "knowledge-workbench@0.1.0:read-only-acceptance",
+      pluginVersion: currentPluginVersion,
+      artifactBinding: currentAcceptanceBinding,
     });
     expect((await readdir(repo.targetPath)).sort()).toEqual([
       "acceptance-build.json",
@@ -554,8 +559,8 @@ describe("real-corpus transactional acceptance installation", () => {
     }
 
     await expect(first).resolves.toMatchObject({
-      pluginVersion: "0.1.0",
-      artifactBinding: "knowledge-workbench@0.1.0:read-only-acceptance",
+      pluginVersion: currentPluginVersion,
+      artifactBinding: currentAcceptanceBinding,
     });
     await assertNoInstallerResidue(repo, { target: true, receipt: true });
   }, HEAVY_TIMEOUT_MS);

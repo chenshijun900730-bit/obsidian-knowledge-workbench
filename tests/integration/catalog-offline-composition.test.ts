@@ -156,6 +156,11 @@ describe("normal cloud catalog composition", () => {
     expect(requests).toHaveLength(1);
     expect(new URL(requests[0]!.url).pathname).toBe("/oauth/2.0/token");
 
+    await expect(runtime.connection?.startScan("/")).rejects.toMatchObject({
+      code: "invalid-scan-root",
+    });
+    expect(requests).toHaveLength(1);
+
     responses.push({ status: 200, text: JSON.stringify({ errno: 0, list: [] }) });
     await runtime.connection?.startScan("/synthetic-small-folder");
     expect(requests).toHaveLength(2);
@@ -187,6 +192,10 @@ describe("normal cloud catalog composition", () => {
     const locatorUrl = new URL(requests[3]!.url);
     expect(locatorUrl.searchParams.get("method")).toBe("list");
     expect(locatorUrl.searchParams.get("dir")).toBe("/");
+    expect(requests.filter((request) => {
+      const url = new URL(request.url);
+      return url.pathname === "/rest/2.0/xpan/file" && url.searchParams.get("dir") === "/";
+    })).toHaveLength(1);
 
     expect((await stat(catalogRoot)).isDirectory()).toBe(true);
     runtime.dispose();
