@@ -72,6 +72,7 @@ const fakeDirectoryDiscovery = (
       searchQueries.push(query);
       return structuredClone(results);
     },
+    snapshotCached: () => [],
     async discoverMore(rootPath, signal) {
       discoverCalls.push(rootPath);
       if (signal !== undefined) signals.push(signal);

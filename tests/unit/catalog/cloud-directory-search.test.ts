@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { rankCloudDirectories } from "../../../src/catalog/cloud-directory-search";
+import {
+  rankCloudDirectories,
+  scoreCloudDirectoryCandidate,
+} from "../../../src/catalog/cloud-directory-search";
 
 const directories = [
   { path: "/Synthetic/Topics/Modern literature", filename: "Modern literature" },
@@ -33,5 +36,12 @@ describe("cloud directory search", () => {
     const result = rankCloudDirectories(directories, "synthetic");
     expect(result.map((value) => value.path)).toEqual([...result.map((value) => value.path)].sort());
     expect(result).not.toBe(directories);
+  });
+
+  it("scores a name-only hint without inventing a searchable path", () => {
+    expect(scoreCloudDirectoryCandidate({ filename: "文学253册" }, "文学 253"))
+      .not.toBeNull();
+    expect(scoreCloudDirectoryCandidate({ filename: "文学253册" }, "group hidden"))
+      .toBeNull();
   });
 });

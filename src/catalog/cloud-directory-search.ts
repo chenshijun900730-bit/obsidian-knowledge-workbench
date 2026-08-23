@@ -1,6 +1,10 @@
-export interface CloudDirectoryCandidate {
-  readonly path: string;
+export interface CloudDirectorySearchCandidate {
   readonly filename: string;
+  readonly path?: string;
+}
+
+export interface CloudDirectoryCandidate extends CloudDirectorySearchCandidate {
+  readonly path: string;
 }
 
 export interface RankedCloudDirectory extends CloudDirectoryCandidate {
@@ -13,9 +17,12 @@ const normalize = (value: string): string => value
   .replace(/[\s._—\-/]+/gu, " ")
   .trim();
 
-const score = (candidate: CloudDirectoryCandidate, query: string): number | null => {
+export const scoreCloudDirectoryCandidate = (
+  candidate: CloudDirectorySearchCandidate,
+  query: string,
+): number | null => {
   const name = normalize(candidate.filename);
-  const path = normalize(candidate.path);
+  const path = normalize(candidate.path ?? "");
   const tokens = normalize(query).split(" ").filter((value) => value.length > 0);
   if (tokens.length === 0) return 0;
   if (!tokens.every((token) => name.includes(token) || path.includes(token))) return null;
@@ -31,6 +38,9 @@ export const rankCloudDirectories = (
   candidates: readonly CloudDirectoryCandidate[],
   query: string,
 ): readonly RankedCloudDirectory[] => candidates
-  .map((candidate) => ({ ...candidate, score: score(candidate, query) }))
+  .map((candidate) => ({
+    ...candidate,
+    score: scoreCloudDirectoryCandidate(candidate, query),
+  }))
   .filter((candidate): candidate is RankedCloudDirectory => candidate.score !== null)
   .sort((left, right) => left.score - right.score || left.path.localeCompare(right.path));

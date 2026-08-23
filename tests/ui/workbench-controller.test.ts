@@ -15,6 +15,7 @@ describe("WorkbenchController cloud catalog filters", () => {
     const pickerCalls: string[] = [];
     const discovery: CloudDirectoryDiscoveryRuntime = {
       searchCached(query) { searchQueries.push(query); return []; },
+      snapshotCached: () => [],
       async discoverMore(rootPath) {
         discoverCalls.push(rootPath);
         return {

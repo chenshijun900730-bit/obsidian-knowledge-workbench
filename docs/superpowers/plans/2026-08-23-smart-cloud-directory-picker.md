@@ -185,7 +185,7 @@ git commit -m "feat(目录): 保存有限最近云端路径"
 - Modify: `src/catalog/cloud-directory-search.ts`
 - Modify: `tests/unit/catalog/cloud-directory-search.test.ts`
 
-- [ ] **Step 1: Write failing candidate merge and cache-detachment tests**
+- [x] **Step 1: Write failing candidate merge and cache-detachment tests**
 
 Use the approved discriminated union:
 
@@ -216,7 +216,7 @@ export type CloudDirectoryCandidate =
 
 Tests must prove source priority, `txt-root-items` exclusion, TXT nonselection, no root/name concatenation, same-path source merging, same-name/different-path preservation, conflict precedence, selected-path priority, stable fuzzy ties, Chinese/numeric matching, no pinyin inference, detached outputs, and zero source calls.
 
-- [ ] **Step 2: Run focused tests and verify missing exports**
+- [x] **Step 2: Run focused tests and verify missing exports**
 
 ```bash
 npx vitest run tests/unit/catalog/cloud-directory-candidates.test.ts tests/unit/catalog/cloud-directory-search.test.ts tests/unit/catalog/cloud-directory-discovery-service.test.ts
@@ -224,7 +224,7 @@ npx vitest run tests/unit/catalog/cloud-directory-candidates.test.ts tests/unit/
 
 Expected: FAIL because the candidate module and `snapshotCached()` do not exist.
 
-- [ ] **Step 3: Implement candidate construction and ranking**
+- [x] **Step 3: Implement candidate construction and ranking**
 
 Export these interfaces:
 
@@ -274,7 +274,7 @@ snapshotCached(): readonly CachedCloudDirectory[];
 
 Return a sorted structured clone and preserve `searchCached()`. Never persist this cache.
 
-- [ ] **Step 4: Rerun candidate and discovery tests**
+- [x] **Step 4: Rerun candidate and discovery tests**
 
 ```bash
 npx vitest run tests/unit/catalog/cloud-directory-candidates.test.ts tests/unit/catalog/cloud-directory-search.test.ts tests/unit/catalog/cloud-directory-discovery-service.test.ts

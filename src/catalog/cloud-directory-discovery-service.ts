@@ -27,6 +27,7 @@ export interface CloudDirectoryDiscoverySummary {
 
 export interface CloudDirectoryDiscoveryRuntime {
   searchCached(query: string): readonly RankedCloudDirectory[];
+  snapshotCached(): readonly CachedCloudDirectory[];
   discoverMore(
     rootPath: string,
     signal?: AbortSignal,
@@ -44,7 +45,7 @@ interface PendingPage {
   readonly start: number;
 }
 
-interface CachedDirectory {
+export interface CachedCloudDirectory {
   readonly fsId: string;
   readonly path: string;
   readonly filename: string;
@@ -146,7 +147,7 @@ const statusFor = (
 export class CloudDirectoryDiscoveryService implements CloudDirectoryDiscoveryRuntime {
   readonly #source: BaiduCatalogSourcePort;
   readonly #now: () => number;
-  readonly #cachedByPath = new Map<string, CachedDirectory>();
+  readonly #cachedByPath = new Map<string, CachedCloudDirectory>();
   readonly #cachedPathByFsId = new Map<string, string>();
   #disposed = false;
 
@@ -164,6 +165,13 @@ export class CloudDirectoryDiscoveryService implements CloudDirectoryDiscoveryRu
       [...this.#cachedByPath.values()].map(({ path, filename }) => ({ path, filename })),
       query,
     );
+  }
+
+  snapshotCached(): readonly CachedCloudDirectory[] {
+    if (this.#disposed) return [];
+    return [...this.#cachedByPath.values()]
+      .sort((left, right) => fixedCompare(left.path, right.path))
+      .map((directory) => ({ ...directory }));
   }
 
   async discoverMore(
@@ -214,7 +222,7 @@ export class CloudDirectoryDiscoveryService implements CloudDirectoryDiscoveryRu
 
       const seenFsIds = new Set(state.seenFsIds);
       const seenPaths = new Set(state.seenPaths);
-      const directories: CachedDirectory[] = [];
+      const directories: CachedCloudDirectory[] = [];
       const validated = entries.map((entry) => {
         const value = validateEntry(entry, current.path, state.rootPath);
         if (seenFsIds.has(value.fsId) || seenPaths.has(value.path)) throw invalidResponse();

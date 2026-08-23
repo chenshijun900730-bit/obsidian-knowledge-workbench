@@ -96,6 +96,7 @@ describe("cloud directory discovery service", () => {
     }));
 
     expect(discovery.searchCached("literature")).toEqual([]);
+    expect(discovery.snapshotCached()).toEqual([]);
     expect(sourceCalls).toBe(0);
   });
 
@@ -175,6 +176,19 @@ describe("cloud directory discovery service", () => {
       "/Synthetic/B",
     ]);
     expect(discovery.searchCached("ignored")).toEqual([]);
+
+    const first = discovery.snapshotCached();
+    expect(first).toEqual([
+      { fsId: "1", path: "/Synthetic/A", filename: "A" },
+      { fsId: "4", path: "/Synthetic/A/Grandchild", filename: "Grandchild" },
+      { fsId: "2", path: "/Synthetic/B", filename: "B" },
+    ]);
+    (first[0] as { path: string }).path = "/Tampered";
+    expect(discovery.snapshotCached()).toEqual([
+      { fsId: "1", path: "/Synthetic/A", filename: "A" },
+      { fsId: "4", path: "/Synthetic/A/Grandchild", filename: "Grandchild" },
+      { fsId: "2", path: "/Synthetic/B", filename: "B" },
+    ]);
   });
 
   it("rejects non-normalized, non-direct, duplicate fsId, and duplicate path entries atomically", async () => {
@@ -296,6 +310,7 @@ describe("cloud directory discovery service", () => {
     let discoveryDisposeCalls = 0;
     const directoryDiscovery: CloudDirectoryDiscoveryRuntime = {
       searchCached: () => [],
+      snapshotCached: () => [],
       discoverMore: async (rootPath) => ({
         status: "complete",
         stopReason: "complete",
