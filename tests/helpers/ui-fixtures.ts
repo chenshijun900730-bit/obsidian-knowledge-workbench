@@ -14,6 +14,7 @@ import type { IndexService, ScanProgress } from "../../src/indexing/index-servic
 import type { FocusMapInput, FocusedMap, MapSearchResult, MapService } from "../../src/map/map-service";
 import type { PluginDataStore } from "../../src/storage/plugin-data-store";
 import type { OperationalState, PluginSettings } from "../../src/storage/plugin-data";
+import { EMPTY_RECENT_CLOUD_DIRECTORIES } from "../../src/storage/recent-cloud-directories";
 import { TodayService } from "../../src/today/today-service";
 import { SuggestionService, type RationaleEnhancer } from "../../src/suggestions/suggestion-service";
 import { ChangePlanService, type ConfirmedPlan, type PlanPreview } from "../../src/plans/change-plan-service";
@@ -274,6 +275,7 @@ const defaultSettings = (): PluginSettings => ({
   aiEndpoint: "",
   aiModel: "",
   secretId: "",
+  recentCloudDirectories: EMPTY_RECENT_CLOUD_DIRECTORIES,
 });
 
 const defaultOperational = (): OperationalState => ({ pins: {}, dismissals: {}, lastOpened: {}, journals: [] });

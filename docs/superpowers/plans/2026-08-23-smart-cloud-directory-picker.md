@@ -63,7 +63,7 @@
 - Modify: `tests/unit/storage/plugin-data-store.test.ts`
 - Modify: complete `PluginSettings` fixtures reported by `rg -l "secretId:" src tests`
 
-- [ ] **Step 1: Write the failing codec and persistence tests**
+- [x] **Step 1: Write the failing codec and persistence tests**
 
 Cover normalization, deduplication, MRU movement, deterministic ordering, the 10-item cap, invalid roots, and canonical UTC timestamps. The central test is:
 
@@ -115,7 +115,7 @@ describe("recent cloud directories", () => {
 
 In `plugin-data-store.test.ts`, load settings whose recent field has a wrong schema, more than 10 entries, a root path, a mismatched filename, or a non-canonical timestamp. Assert that the entire recent field becomes the empty v1 value while locale and `openAtStartup` survive. Also assert that valid data survives save/reload and serialized settings contain no AppKey, SecretKey, token, authorization code, or `fsId` field.
 
-- [ ] **Step 2: Run the focused tests and verify expected failures**
+- [x] **Step 2: Run the focused tests and verify expected failures**
 
 ```bash
 npx vitest run tests/unit/storage/recent-cloud-directories.test.ts tests/unit/storage/plugin-data-store.test.ts
@@ -123,7 +123,7 @@ npx vitest run tests/unit/storage/recent-cloud-directories.test.ts tests/unit/st
 
 Expected: FAIL because the module and `PluginSettings.recentCloudDirectories` do not exist.
 
-- [ ] **Step 3: Implement the complete recent-path value object**
+- [x] **Step 3: Implement the complete recent-path value object**
 
 Create this public surface:
 
@@ -159,7 +159,7 @@ The decoder must require schema `1`, an array no longer than 10, unique normaliz
 
 Add `readonly recentCloudDirectories: RecentCloudDirectoriesV1` to `PluginSettings`, default it to empty v1, and decode it from `value.recentCloudDirectories`. Keep `PLUGIN_DATA_SCHEMA_VERSION` unchanged because the field is backward-compatible.
 
-- [ ] **Step 4: Update typed fixtures and rerun storage tests**
+- [x] **Step 4: Update typed fixtures and rerun storage tests**
 
 ```bash
 rg -n "secretId:" src tests
@@ -168,7 +168,7 @@ npx vitest run tests/unit/storage/recent-cloud-directories.test.ts tests/unit/st
 
 Expected: PASS. Missing historical data becomes an empty list without clearing other settings.
 
-- [ ] **Step 5: Commit the storage boundary**
+- [x] **Step 5: Commit the storage boundary**
 
 ```bash
 git add src/storage/recent-cloud-directories.ts src/storage/plugin-data.ts src/storage/plugin-data-store.ts tests/unit/storage/recent-cloud-directories.test.ts tests/unit/storage/plugin-data-store.test.ts tests/unit/runtime/safety-policy.test.ts tests/ui/workbench-controller.test.ts tests/ui/settings-sections.test.ts tests/helpers/ui-fixtures.ts

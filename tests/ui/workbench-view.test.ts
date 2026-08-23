@@ -22,6 +22,7 @@ import {
   NORMAL_RUNTIME_POLICY,
   READ_ONLY_ACCEPTANCE_POLICY,
 } from "../../src/runtime/safety-policy";
+import { EMPTY_RECENT_CLOUD_DIRECTORIES } from "../../src/storage/recent-cloud-directories";
 import {
   controllerFixture,
   manualProjectionScheduler,
@@ -156,6 +157,7 @@ describe("workbench", () => {
         aiEndpoint: "",
         aiModel: "",
         secretId: "",
+        recentCloudDirectories: EMPTY_RECENT_CLOUD_DIRECTORIES,
       }),
       folderRuleProposals: () => [],
       previewSampleChange: () => undefined,
@@ -2136,6 +2138,7 @@ describe("workbench", () => {
         aiEndpoint: "",
         aiModel: "",
         secretId: "",
+        recentCloudDirectories: EMPTY_RECENT_CLOUD_DIRECTORIES,
       }),
       folderRuleProposals: () => [{
         prefix: "References",
@@ -2184,6 +2187,7 @@ describe("workbench", () => {
       aiEndpoint: "",
       aiModel: "",
       secretId: "",
+      recentCloudDirectories: EMPTY_RECENT_CLOUD_DIRECTORIES,
     };
     const values: boolean[] = [];
     const controller = {
@@ -2232,6 +2236,7 @@ describe("workbench", () => {
         aiEndpoint: "",
         aiModel: "",
         secretId: "",
+        recentCloudDirectories: EMPTY_RECENT_CLOUD_DIRECTORIES,
       }),
       folderRuleProposals: () => [{
         prefix: "References",
@@ -2283,6 +2288,7 @@ describe("workbench", () => {
         aiEndpoint: "",
         aiModel: "",
         secretId: "",
+        recentCloudDirectories: EMPTY_RECENT_CLOUD_DIRECTORIES,
       }),
       folderRuleProposals: () => [],
       previewSampleChange: () => undefined,
@@ -2331,6 +2337,7 @@ describe("workbench", () => {
         aiEndpoint: "",
         aiModel: "",
         secretId: "",
+        recentCloudDirectories: EMPTY_RECENT_CLOUD_DIRECTORIES,
       }),
       folderRuleProposals: () => [],
       previewSampleChange: () => undefined,

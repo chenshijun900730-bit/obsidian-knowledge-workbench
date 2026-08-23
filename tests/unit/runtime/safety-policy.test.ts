@@ -10,6 +10,7 @@ import {
   READ_ONLY_QUICK_CAPTURE_PORT,
   READ_ONLY_VAULT_WRITE_PORT,
 } from "../../../src/runtime/read-only-ports";
+import { EMPTY_RECENT_CLOUD_DIRECTORIES } from "../../../src/storage/recent-cloud-directories";
 
 describe("runtime safety policy", () => {
   it("exposes exact immutable normal and acceptance capabilities", () => {
@@ -52,6 +53,7 @@ describe("runtime safety policy", () => {
       aiEndpoint: "https://example.test/v1",
       aiModel: "fixture",
       secretId: "fixture-secret",
+      recentCloudDirectories: EMPTY_RECENT_CLOUD_DIRECTORIES,
     };
     expect(effectiveSettings(NORMAL_RUNTIME_POLICY, settings)).toEqual(settings);
     expect(effectiveSettings(READ_ONLY_ACCEPTANCE_POLICY, settings)).toEqual({

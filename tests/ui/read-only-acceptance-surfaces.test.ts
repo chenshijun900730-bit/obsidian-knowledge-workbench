@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { PlanPreview, ChangePlanService } from "../../src/plans/change-plan-service";
 import { READ_ONLY_ACCEPTANCE_POLICY } from "../../src/runtime/safety-policy";
 import type { PluginSettings } from "../../src/storage/plugin-data";
+import { EMPTY_RECENT_CLOUD_DIRECTORIES } from "../../src/storage/recent-cloud-directories";
 import {
   createChangePreviewModalClass,
   type ModalConstructor,
@@ -238,6 +239,7 @@ const acceptanceSettings = (): PluginSettings => Object.defineProperties({
   openAtStartup: true,
   folderRules: [],
   excludedPrefixes: ["Generated/Archive"],
+  recentCloudDirectories: EMPTY_RECENT_CLOUD_DIRECTORIES,
 }, {
   writeEnabled: { get: () => { throw new Error("must not inspect writeEnabled"); } },
   writePreviewAcknowledged: {

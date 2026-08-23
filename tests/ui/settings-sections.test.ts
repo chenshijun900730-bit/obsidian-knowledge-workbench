@@ -13,6 +13,7 @@ import type { FolderRule } from "../../src/storage/plugin-data";
 import { SMALL_ACCEPTANCE_CATALOG_SCAN_BUDGET } from "../../src/catalog/catalog-types";
 import { createWorkbenchI18n } from "../../src/i18n/workbench-i18n";
 import { presentCatalogProgress } from "../../src/ui/catalog-progress-presenter";
+import { EMPTY_RECENT_CLOUD_DIRECTORIES } from "../../src/storage/recent-cloud-directories";
 
 const createTestDiv = (): HTMLDivElement => document.createElementNS(
   "http://www.w3.org/1999/xhtml",
@@ -31,6 +32,7 @@ const settingsControllerFixture = (): SettingsController => ({
     aiEndpoint: "",
     aiModel: "",
     secretId: "",
+    recentCloudDirectories: EMPTY_RECENT_CLOUD_DIRECTORIES,
   }),
   folderRuleProposals: () => [],
   previewSampleChange: () => undefined,

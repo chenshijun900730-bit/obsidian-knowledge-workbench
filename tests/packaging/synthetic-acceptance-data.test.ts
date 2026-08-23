@@ -9,6 +9,7 @@ import {
 import { verifyPlanFingerprint } from "../../src/plans/change-plan-service";
 import { READ_ONLY_ACCEPTANCE_POLICY } from "../../src/runtime/safety-policy";
 import { PluginDataStore } from "../../src/storage/plugin-data-store";
+import { EMPTY_RECENT_CLOUD_DIRECTORIES } from "../../src/storage/recent-cloud-directories";
 import { OperationJournal } from "../../src/transactions/operation-journal";
 import { MemoryPluginDataPort } from "../fakes/memory-plugin-data-port";
 
@@ -97,6 +98,11 @@ const expectedSeed = {
     lastOpened: {},
     journals: [expectedJournal],
   },
+} as const;
+
+const expectedRuntimeSettings = {
+  ...expectedSeed.settings,
+  recentCloudDirectories: EMPTY_RECENT_CLOUD_DIRECTORIES,
 } as const;
 
 function requireRecord(value: unknown, label: string): JsonRecord {
@@ -251,7 +257,7 @@ describe("synthetic acceptance plugin-data runtime compatibility", () => {
     const journal = new OperationJournal(store);
     const entries = await journal.list();
 
-    expect(store.settings()).toEqual(expectedSeed.settings);
+    expect(store.settings()).toEqual(expectedRuntimeSettings);
     expect(entries).toHaveLength(1);
     expect(entries[0]).toEqual(expectedJournal);
     expect(entries[0]?.status).toBe("completed");
@@ -277,7 +283,7 @@ describe("synthetic acceptance plugin-data runtime compatibility", () => {
     await store.enforceRuntimePolicy(READ_ONLY_ACCEPTANCE_POLICY);
     await store.reload();
 
-    expect(store.settings()).toEqual({ ...expectedSeed.settings, writeEnabled: false, aiEnabled: false });
+    expect(store.settings()).toEqual({ ...expectedRuntimeSettings, writeEnabled: false, aiEnabled: false });
     const raw = requireRecord(await port.load(), "post-policy plugin data");
     const rawSettings = settingsOf(raw);
     expect(rawSettings.writeEnabled).toBe(false);

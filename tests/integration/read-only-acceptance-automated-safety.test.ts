@@ -23,6 +23,7 @@ import { READ_ONLY_ACCEPTANCE_POLICY } from "../../src/runtime/safety-policy";
 import { runStartupGate } from "../../src/runtime/startup-gate";
 import type { PluginData } from "../../src/storage/plugin-data";
 import { PluginDataStore } from "../../src/storage/plugin-data-store";
+import { EMPTY_RECENT_CLOUD_DIRECTORIES } from "../../src/storage/recent-cloud-directories";
 import { SuggestionService } from "../../src/suggestions/suggestion-service";
 import { TodayService } from "../../src/today/today-service";
 import { OperationJournal, type JournalEntry } from "../../src/transactions/operation-journal";
@@ -113,6 +114,7 @@ const historicalUnsafeData = (): PluginData => ({
     aiEndpoint: ACCEPTANCE_ENDPOINT,
     aiModel: ACCEPTANCE_MODEL,
     secretId: "",
+    recentCloudDirectories: EMPTY_RECENT_CLOUD_DIRECTORIES,
   },
   activeIndex: null,
   staging: null,
