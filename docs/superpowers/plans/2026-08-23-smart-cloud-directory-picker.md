@@ -282,7 +282,7 @@ npx vitest run tests/unit/catalog/cloud-directory-candidates.test.ts tests/unit/
 
 Expected: PASS, including zero source calls for build, rank, filter, and snapshot operations.
 
-- [ ] **Step 5: Commit local candidate aggregation**
+- [x] **Step 5: Commit local candidate aggregation**
 
 ```bash
 git add src/catalog/cloud-directory-candidates.ts src/catalog/cloud-directory-discovery-service.ts src/catalog/cloud-directory-search.ts tests/unit/catalog/cloud-directory-candidates.test.ts tests/unit/catalog/cloud-directory-discovery-service.test.ts tests/unit/catalog/cloud-directory-search.test.ts
@@ -299,7 +299,7 @@ git commit -m "feat(目录): 合并本地目录候选来源"
 - Modify: `src/catalog/cloud-directory-discovery-service.ts`
 - Modify: `tests/unit/catalog/cloud-directory-discovery-service.test.ts`
 
-- [ ] **Step 1: Write failing validator and locator tests**
+- [x] **Step 1: Write failing validator and locator tests**
 
 Freeze and assert the budget:
 
@@ -314,7 +314,7 @@ expect(Object.isFrozen(CLOUD_DIRECTORY_LOCATOR_BUDGET)).toBe(true);
 
 Using a synthetic source, cover blank-query refusal, BFS from `/`, no root result, local fuzzy matching, file exclusion, exact `beforeRequest()` counts including refresh replay, all three limits, page-atomic discard, cancellation before request and after response, every existing Baidu entry validation rule, path/fsId bijection, same-path/different-fsId conflict, retained committed matches on pause, and exact-once cancel/dispose.
 
-- [ ] **Step 2: Run locator tests and verify module failures**
+- [x] **Step 2: Run locator tests and verify module failures**
 
 ```bash
 npx vitest run tests/unit/catalog/cloud-directory-page-validator.test.ts tests/unit/catalog/cloud-directory-locator.test.ts tests/unit/catalog/cloud-directory-discovery-service.test.ts
@@ -322,7 +322,7 @@ npx vitest run tests/unit/catalog/cloud-directory-page-validator.test.ts tests/u
 
 Expected: FAIL because the validator and locator do not exist.
 
-- [ ] **Step 3: Extract validation without weakening scan-root policy**
+- [x] **Step 3: Extract validation without weakening scan-root policy**
 
 Create:
 
@@ -344,7 +344,7 @@ const inTraversal = traversalRoot === "/"
 
 Then require direct parent, NFC filename equal to tail, decimal `fsId`, safe non-negative timestamps/sizes, and zero directory size. Response failures become only `CatalogError("invalid-baidu-response")`. Keep `normalizeCatalogScanRoot` unchanged and keep discovery calling it before traversal.
 
-- [ ] **Step 4: Implement the locator state machine**
+- [x] **Step 4: Implement the locator state machine**
 
 Create these contracts:
 
@@ -382,7 +382,7 @@ export interface CloudDirectoryLocatorRuntime {
 
 Use one internal AbortController per run and bridge the caller signal. Stage decoded entries, identity maps, queue changes, counts, matches, and conflicts in copies; publish only after a complete page validates and fits. Complete every page of a parent before visiting children. For a later different `fsId` at the same path, remove the exact match and pending traversal for that path and emit one disabled conflict. One `fsId` under different paths is invalid. Do not retry or resume automatically, and never expose raw response data.
 
-- [ ] **Step 5: Run locator and scan regressions**
+- [x] **Step 5: Run locator and scan regressions**
 
 ```bash
 npx vitest run tests/unit/catalog/cloud-directory-page-validator.test.ts tests/unit/catalog/cloud-directory-locator.test.ts tests/unit/catalog/cloud-directory-discovery-service.test.ts tests/integration/catalog-small-folder-preflight.test.ts tests/integration/catalog-scan.test.ts

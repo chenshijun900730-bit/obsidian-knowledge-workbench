@@ -212,6 +212,21 @@ describe("cloud directory discovery service", () => {
     }
   });
 
+  it("contains structural getter failures from the shared page validator", async () => {
+    const malformed = Object.defineProperty({}, "path", {
+      get: () => { throw new Error("raw-getter-message"); },
+    }) as BaiduListEntry;
+    const discovery = new CloudDirectoryDiscoveryService(sourceFrom(async (input) => {
+      await input.beforeRequest();
+      return { entries: [malformed] };
+    }));
+
+    await expect(discovery.discoverMore("/Synthetic")).rejects.toEqual(
+      new CatalogError("invalid-baidu-response"),
+    );
+    expect(discovery.snapshotCached()).toEqual([]);
+  });
+
   it("rejects conflicting identities already held in the session cache", async () => {
     let rootEntry = directory("1", "/Synthetic/A");
     const discovery = new CloudDirectoryDiscoveryService(sourceFrom(async (input) => {
