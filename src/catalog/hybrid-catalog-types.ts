@@ -30,6 +30,8 @@ export const LARGE_CATALOG_RUN_BUDGET = /* @__PURE__ */ Object.freeze({
   maxDurationMs: 1_800_000,
 } as const satisfies LargeCatalogRunBudget);
 
+export const LARGE_CATALOG_AUTO_CHAIN_MAX_SEGMENTS = 12 as const;
+
 export const MAX_UNIFIED_CATALOG_PDF_COUNT = 70_000 as const;
 
 export type HybridCatalogErrorCode =

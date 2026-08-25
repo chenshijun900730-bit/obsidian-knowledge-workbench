@@ -14,6 +14,13 @@ import {
 } from "../../src/ui/settings-tab";
 import { presentCatalogProgress } from "../../src/ui/catalog-progress-presenter";
 import { EMPTY_RECENT_CLOUD_DIRECTORIES } from "../../src/storage/recent-cloud-directories";
+import { LARGE_CATALOG_AUTO_CHAIN_MAX_SEGMENTS } from "../../src/catalog/hybrid-catalog-types";
+
+const INACTIVE_AUTO_RESUME = {
+  autoResumeState: "inactive" as const,
+  autoSegmentIndex: 0,
+  autoSegmentLimit: LARGE_CATALOG_AUTO_CHAIN_MAX_SEGMENTS,
+};
 
 class SettingsSurface {
   readonly containerEl = document.createElementNS("http://www.w3.org/1999/xhtml", "div") as HTMLDivElement;
@@ -571,6 +578,7 @@ describe("hybrid catalog settings", () => {
         verifiedGroupCount: 0, coveredCandidatePdfCount: 0, groups: [group(1)],
       },
       batch: {
+        ...INACTIVE_AUTO_RESUME,
         batchId: "batch-settings-paused",
         status: "paused" as const,
         stopReason: "time-limit" as const,
@@ -663,6 +671,7 @@ describe("hybrid catalog settings", () => {
         verifiedGroupCount: 0, coveredCandidatePdfCount: 0, groups: [group(1)],
       },
       batch: {
+        ...INACTIVE_AUTO_RESUME,
         batchId: "batch-settings-partial",
         status: "partial",
         stopReason: "baidu-not-found",

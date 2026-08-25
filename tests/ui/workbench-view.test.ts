@@ -23,6 +23,13 @@ import {
   READ_ONLY_ACCEPTANCE_POLICY,
 } from "../../src/runtime/safety-policy";
 import { EMPTY_RECENT_CLOUD_DIRECTORIES } from "../../src/storage/recent-cloud-directories";
+import { LARGE_CATALOG_AUTO_CHAIN_MAX_SEGMENTS } from "../../src/catalog/hybrid-catalog-types";
+
+const INACTIVE_AUTO_RESUME = {
+  autoResumeState: "inactive" as const,
+  autoSegmentIndex: 0,
+  autoSegmentLimit: LARGE_CATALOG_AUTO_CHAIN_MAX_SEGMENTS,
+};
 import {
   controllerFixture,
   manualProjectionScheduler,
@@ -384,6 +391,7 @@ describe("workbench", () => {
       }],
     };
     const pausedBatch = {
+      ...INACTIVE_AUTO_RESUME,
       batchId: "batch-paused",
       status: "paused" as const,
       stopReason: "time-limit" as const,
@@ -523,6 +531,7 @@ describe("workbench", () => {
       status: "paused",
       active,
       batch: {
+        ...INACTIVE_AUTO_RESUME,
         batchId: "batch-malformed-root",
         status: "paused",
         stopReason: "time-limit",

@@ -8,6 +8,13 @@ import {
   type VerificationPageActions,
   type VerificationPageModel,
 } from "../../src/ui/verification-page";
+import { LARGE_CATALOG_AUTO_CHAIN_MAX_SEGMENTS } from "../../src/catalog/hybrid-catalog-types";
+
+const INACTIVE_AUTO_RESUME = {
+  autoResumeState: "inactive" as const,
+  autoSegmentIndex: 0,
+  autoSegmentLimit: LARGE_CATALOG_AUTO_CHAIN_MAX_SEGMENTS,
+};
 
 const GROUP_KEY = `group:${"b".repeat(64)}`;
 const testRoot = (): HTMLDivElement => document.createElementNS(
@@ -124,6 +131,7 @@ describe("verification page", () => {
         status: "paused",
         active,
         batch: {
+          ...INACTIVE_AUTO_RESUME,
           batchId: "batch-local-root-gate",
           status: "paused",
           stopReason: "time-limit",
@@ -179,6 +187,7 @@ describe("verification page", () => {
         status: "paused",
         active,
         batch: {
+          ...INACTIVE_AUTO_RESUME,
           batchId: "batch-pending-action-gate",
           status: "paused",
           stopReason: "time-limit",
@@ -232,6 +241,7 @@ describe("verification page", () => {
         status: "scanning",
         active,
         batch: {
+          ...INACTIVE_AUTO_RESUME,
           batchId: "batch-scanning",
           status: "paused",
           stopReason: "user-canceled",
@@ -279,6 +289,7 @@ describe("verification page", () => {
         status: "paused",
         active,
         batch: {
+          ...INACTIVE_AUTO_RESUME,
           batchId: `batch-lifecycle-${status}`,
           status: "paused",
           stopReason: "time-limit",
@@ -314,6 +325,7 @@ describe("verification page", () => {
         active,
         messageCode: "baidu-not-found",
         batch: {
+          ...INACTIVE_AUTO_RESUME,
           batchId: "batch-auth-priority",
           status: "paused",
           stopReason: "baidu-not-found",
@@ -363,6 +375,7 @@ describe("verification page", () => {
       active,
       messageCode: "baidu-not-found",
       batch: {
+        ...INACTIVE_AUTO_RESUME,
         batchId: "batch-stale-fault",
         status: "paused",
         stopReason: "baidu-not-found",
@@ -406,6 +419,7 @@ describe("verification page", () => {
         status: "paused",
         active,
         batch: {
+          ...INACTIVE_AUTO_RESUME,
           batchId: "batch-root-mismatch",
           status: "paused",
           stopReason: "time-limit",
@@ -471,6 +485,7 @@ describe("verification page", () => {
         status: "paused",
         active,
         batch: {
+          ...INACTIVE_AUTO_RESUME,
           batchId: "batch-root-locked",
           status: "paused",
           stopReason: "time-limit",
@@ -511,6 +526,7 @@ describe("verification page", () => {
       status: "paused",
       active,
       batch: {
+        ...INACTIVE_AUTO_RESUME,
         batchId: "batch-progress",
         status: "paused",
         stopReason: "list-request-limit",
@@ -547,6 +563,7 @@ describe("verification page", () => {
       active,
       messageCode: "baidu-not-found",
       batch: {
+        ...INACTIVE_AUTO_RESUME,
         batchId: "batch-not-found",
         status: "partial",
         stopReason: "baidu-not-found",
@@ -615,6 +632,7 @@ describe("verification page", () => {
       status: "paused",
       active,
       batch: {
+        ...INACTIVE_AUTO_RESUME,
         batchId: "batch-canceled",
         status: "paused",
         stopReason: "user-canceled",

@@ -14,6 +14,13 @@ import { SMALL_ACCEPTANCE_CATALOG_SCAN_BUDGET } from "../../src/catalog/catalog-
 import { createWorkbenchI18n } from "../../src/i18n/workbench-i18n";
 import { presentCatalogProgress } from "../../src/ui/catalog-progress-presenter";
 import { EMPTY_RECENT_CLOUD_DIRECTORIES } from "../../src/storage/recent-cloud-directories";
+import { LARGE_CATALOG_AUTO_CHAIN_MAX_SEGMENTS } from "../../src/catalog/hybrid-catalog-types";
+
+const INACTIVE_AUTO_RESUME = {
+  autoResumeState: "inactive" as const,
+  autoSegmentIndex: 0,
+  autoSegmentLimit: LARGE_CATALOG_AUTO_CHAIN_MAX_SEGMENTS,
+};
 
 const createTestDiv = (): HTMLDivElement => document.createElementNS(
   "http://www.w3.org/1999/xhtml",
@@ -378,6 +385,7 @@ describe("shared grouped settings surface", () => {
           }],
         },
         batch: {
+          ...INACTIVE_AUTO_RESUME,
           batchId: "batch-settings-pending-gate",
           status: "paused",
           stopReason: "time-limit",
@@ -686,6 +694,7 @@ describe("shared grouped settings surface", () => {
           }],
         },
         batch: {
+          ...INACTIVE_AUTO_RESUME,
           batchId: "batch-settings-sections",
           status: "paused",
           stopReason: "pdf-limit",

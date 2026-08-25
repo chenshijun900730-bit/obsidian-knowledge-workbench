@@ -11,6 +11,13 @@ import {
 } from "../fakes/fake-cloud-catalog-runtime";
 import { controllerFixture } from "../helpers/ui-fixtures";
 import type { WorkbenchLocale } from "../../src/i18n/workbench-i18n";
+import { LARGE_CATALOG_AUTO_CHAIN_MAX_SEGMENTS } from "../../src/catalog/hybrid-catalog-types";
+
+const INACTIVE_AUTO_RESUME = {
+  autoResumeState: "inactive" as const,
+  autoSegmentIndex: 0,
+  autoSegmentLimit: LARGE_CATALOG_AUTO_CHAIN_MAX_SEGMENTS,
+};
 
 class ModalSurface {
   readonly contentEl = document.createElementNS(
@@ -162,6 +169,7 @@ describe("large catalog scan confirmation", () => {
         }],
       },
       batch: {
+        ...INACTIVE_AUTO_RESUME,
         batchId: "batch-confirmation",
         status: "paused",
         stopReason: "list-request-limit",

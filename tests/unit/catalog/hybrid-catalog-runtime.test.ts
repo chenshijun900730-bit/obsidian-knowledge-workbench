@@ -5,6 +5,7 @@ import {
 } from "../../../src/catalog/hybrid-catalog-runtime";
 import {
   HybridCatalogError,
+  LARGE_CATALOG_AUTO_CHAIN_MAX_SEGMENTS,
   LARGE_CATALOG_RUN_BUDGET,
   type CandidateCatalogDescriptor,
   type CatalogTxtImportSummary,
@@ -16,8 +17,10 @@ import type {
   HybridCatalogActivationSnapshot,
 } from "../../../src/catalog/hybrid-catalog-ports";
 import type {
+  LargeCatalogVerificationSummary,
   LargeCatalogVerificationSegmentInput,
   LargeCatalogVerificationStartInput,
+  LargeVerificationProgressEvent,
 } from "../../../src/catalog/large-catalog-verification-service";
 
 const HASH_A = "a".repeat(64);
@@ -118,6 +121,61 @@ const pausedCheckpoint = (): LargeCatalogBatchCheckpointV3 => ({
   errorCodeCounts: {},
 });
 
+const verificationSummary = (
+  overrides: Partial<LargeCatalogVerificationSummary> = {},
+): LargeCatalogVerificationSummary => {
+  const base: LargeCatalogVerificationSummary = {
+    batchId: "batch-new",
+    status: "paused",
+    stopReason: "pdf-limit",
+    runOrdinal: 1,
+    selectedGroupCount: 1,
+    completedGroupCount: 0,
+    remainingGroupCount: 1,
+    currentGroupIndex: 0,
+    currentGroupKey: GROUP_A,
+    pdfCount: 9_000,
+    directoryCount: 4,
+    ignoredFileCount: 0,
+    listRequestCount: 10,
+    cumulativeListRequestCount: 10,
+    committedPdfCount: 9_000,
+    committedPageCount: 9,
+    completedDirectoryCount: 3,
+    pendingDirectoryCount: 1,
+    progressMarker: {
+      committedPdfCount: 9_000,
+      committedPageCount: 9,
+      completedDirectoryCount: 3,
+      completedGroupCount: 0,
+      currentGroupIndex: 0,
+      pendingStateSha256: "9".repeat(64),
+    },
+  };
+  const merged = { ...base, ...overrides };
+  return {
+    ...merged,
+    progressMarker: {
+      ...base.progressMarker,
+      committedPdfCount: merged.committedPdfCount,
+      committedPageCount: merged.committedPageCount,
+      completedDirectoryCount: merged.completedDirectoryCount,
+      completedGroupCount: merged.completedGroupCount,
+      currentGroupIndex: merged.currentGroupIndex,
+      ...(overrides.progressMarker ?? {}),
+    },
+  };
+};
+
+const verificationProgressEvent = (
+  value: LargeCatalogVerificationSummary,
+  phase: LargeVerificationProgressEvent["phase"],
+): LargeVerificationProgressEvent => ({
+  phase,
+  summary: value,
+  recoveredFromScanning: false,
+});
+
 const fixture = (options: Readonly<{
   previewSummaries?: readonly CatalogTxtImportSummary[];
   latest?: LargeCatalogBatchCheckpointV3 | null;
@@ -125,6 +183,8 @@ const fixture = (options: Readonly<{
   importPromise?: Promise<CandidateCatalogDescriptor>;
   projectPromise?: Promise<void>;
   projectError?: Error;
+  verificationResults?: readonly LargeCatalogVerificationSummary[];
+  verificationStarts?: readonly LargeCatalogVerificationSummary[];
 }> = {}) => {
   const candidates = [
     candidate("txt:root", "Root.pdf", "txt-root-items"),
@@ -218,63 +278,63 @@ const fixture = (options: Readonly<{
       return activeUnified;
     }),
   };
+  const defaultComplete = verificationSummary({
+    status: "complete",
+    stopReason: "complete",
+    runOrdinal: 2,
+    completedGroupCount: 1,
+    remainingGroupCount: 0,
+    currentGroupIndex: 1,
+    currentGroupKey: null,
+    pdfCount: 1,
+    directoryCount: 1,
+    listRequestCount: 1,
+    cumulativeListRequestCount: 4,
+    committedPdfCount: 1,
+    committedPageCount: 1,
+    completedDirectoryCount: 1,
+    pendingDirectoryCount: 0,
+  });
+  const verificationResults = [...(options.verificationResults ?? [defaultComplete])];
+  const verificationStarts = [...(options.verificationStarts ?? verificationResults.map((result) => (
+    verificationSummary({
+      ...result,
+      status: "scanning",
+      stopReason: null,
+      committedPdfCount: Math.max(0, result.committedPdfCount - 1),
+      committedPageCount: Math.max(0, result.committedPageCount - 1),
+      progressMarker: {
+        ...result.progressMarker,
+        committedPdfCount: Math.max(0, result.committedPdfCount - 1),
+        committedPageCount: Math.max(0, result.committedPageCount - 1),
+        pendingStateSha256: "8".repeat(64),
+      },
+    })
+  )))];
+  const nextVerificationStep = (): Readonly<{
+    start: LargeCatalogVerificationSummary;
+    result: LargeCatalogVerificationSummary;
+  }> => {
+    const start = verificationStarts.shift();
+    const result = verificationResults.shift();
+    if (start === undefined || result === undefined) {
+      throw new Error("verification-result-exhausted");
+    }
+    return { start, result };
+  };
   const verification = {
-    start: vi.fn(async (_input: LargeCatalogVerificationStartInput) => ({
-      batchId: "batch-new",
-      status: "paused" as const,
-      stopReason: "list-request-limit" as const,
-      runOrdinal: 1,
-      selectedGroupCount: 2,
-      completedGroupCount: 0,
-      remainingGroupCount: 2,
-      currentGroupIndex: 0,
-      currentGroupKey: "txt-root-items",
-      pdfCount: 10,
-      directoryCount: 2,
-      ignoredFileCount: 0,
-      listRequestCount: 300,
-      cumulativeListRequestCount: 300,
-      committedPdfCount: 10,
-      committedPageCount: 1,
-      completedDirectoryCount: 2,
-      pendingDirectoryCount: 1,
-      progressMarker: {
-        committedPdfCount: 10,
-        committedPageCount: 1,
-        completedDirectoryCount: 2,
-        completedGroupCount: 0,
-        currentGroupIndex: 0,
-        pendingStateSha256: "4".repeat(64),
-      },
-    })),
-    runSegment: vi.fn(async (_input: LargeCatalogVerificationSegmentInput) => ({
-      batchId: "batch-paused",
-      status: "complete" as const,
-      stopReason: "complete" as const,
-      runOrdinal: 2,
-      selectedGroupCount: 1,
-      completedGroupCount: 1,
-      remainingGroupCount: 0,
-      currentGroupIndex: 1,
-      currentGroupKey: null,
-      pdfCount: 1,
-      directoryCount: 1,
-      ignoredFileCount: 0,
-      listRequestCount: 1,
-      cumulativeListRequestCount: 4,
-      committedPdfCount: 1,
-      committedPageCount: 1,
-      completedDirectoryCount: 1,
-      pendingDirectoryCount: 0,
-      progressMarker: {
-        committedPdfCount: 1,
-        committedPageCount: 1,
-        completedDirectoryCount: 1,
-        completedGroupCount: 1,
-        currentGroupIndex: 1,
-        pendingStateSha256: "5".repeat(64),
-      },
-    })),
+    start: vi.fn(async (input: LargeCatalogVerificationStartInput) => {
+      const { start, result } = nextVerificationStep();
+      await input.onProgress?.(verificationProgressEvent(start, "segment-started"));
+      await input.onProgress?.(verificationProgressEvent(result, "segment-finalized"));
+      return result;
+    }),
+    runSegment: vi.fn(async (input: LargeCatalogVerificationSegmentInput) => {
+      const { start, result } = nextVerificationStep();
+      await input.onProgress?.(verificationProgressEvent(start, "segment-started"));
+      await input.onProgress?.(verificationProgressEvent(result, "segment-finalized"));
+      return result;
+    }),
   };
   const dependencies: HybridCatalogRuntimeDependencies = {
     source: {
@@ -445,7 +505,21 @@ describe("HybridCatalogRuntimeService", () => {
   });
 
   it("maps selected groups in declared order, enforces five, and exposes only aggregate pause state", async () => {
-    const value = fixture();
+    const value = fixture({ verificationResults: [verificationSummary({
+      status: "paused",
+      stopReason: "user-canceled",
+      selectedGroupCount: 2,
+      remainingGroupCount: 2,
+      currentGroupKey: "txt-root-items",
+      pdfCount: 10,
+      directoryCount: 2,
+      listRequestCount: 300,
+      cumulativeListRequestCount: 300,
+      committedPdfCount: 10,
+      committedPageCount: 1,
+      completedDirectoryCount: 2,
+      pendingDirectoryCount: 1,
+    })] });
     await value.runtime.initialize();
 
     await value.runtime.startLargeVerification({
@@ -491,8 +565,79 @@ describe("HybridCatalogRuntimeService", () => {
     expect(value.verification.start).toHaveBeenCalledTimes(1);
   });
 
+  it.each(["pdf-limit", "directory-limit", "list-request-limit", "time-limit"] as const)(
+    "automatically continues after %s without another confirmation",
+    async (stopReason) => {
+      const paused = verificationSummary({ status: "paused", stopReason, runOrdinal: 1 });
+      const complete = verificationSummary({
+        status: "complete",
+        stopReason: "complete",
+        runOrdinal: 2,
+        completedGroupCount: 1,
+        remainingGroupCount: 0,
+      });
+      const value = fixture({ verificationResults: [paused, complete] });
+      await value.runtime.initialize();
+
+      await value.runtime.startLargeVerification({
+        cloudRoot: "/Synthetic",
+        groupKeys: [GROUP_A],
+      });
+
+      expect(value.verification.start).toHaveBeenCalledOnce();
+      expect(value.verification.runSegment).toHaveBeenCalledOnce();
+      expect(value.runtime.snapshot()).toMatchObject({
+        status: "ready",
+        batch: {
+          status: "complete",
+          autoResumeState: "inactive",
+          autoSegmentIndex: 2,
+          autoSegmentLimit: LARGE_CATALOG_AUTO_CHAIN_MAX_SEGMENTS,
+        },
+      });
+    },
+  );
+
+  it.each([
+    "user-canceled",
+    "baidu-rate-limited",
+    "baidu-token-expired",
+    "baidu-access-unavailable",
+    "baidu-permission-denied",
+    "baidu-not-found",
+    "invalid-baidu-response",
+    "hybrid-snapshot-corrupt",
+    "hybrid-batch-invalid",
+    "hybrid-batch-unavailable",
+  ] as const)(
+    "stops the automatic chain on %s",
+    async (stopReason) => {
+      const status = stopReason === "user-canceled" ? "paused" as const : "partial" as const;
+      const value = fixture({
+        verificationResults: [verificationSummary({ status, stopReason })],
+      });
+      await value.runtime.initialize();
+
+      await value.runtime.startLargeVerification({ cloudRoot: "/Synthetic", groupKeys: [GROUP_A] });
+
+      expect(value.verification.runSegment).not.toHaveBeenCalled();
+    },
+  );
+
   it("resumes the latest persisted batch only after an explicit call and requires a fresh root", async () => {
-    const value = fixture({ latest: pausedCheckpoint() });
+    const value = fixture({
+      latest: pausedCheckpoint(),
+      verificationResults: [verificationSummary({
+        batchId: "batch-paused",
+        status: "complete",
+        stopReason: "complete",
+        runOrdinal: 2,
+        completedGroupCount: 1,
+        remainingGroupCount: 0,
+        currentGroupIndex: 1,
+        currentGroupKey: null,
+      })],
+    });
     await value.runtime.initialize();
     expect(value.verification.runSegment).not.toHaveBeenCalled();
 

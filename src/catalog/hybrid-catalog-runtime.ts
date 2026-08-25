@@ -5,6 +5,7 @@ import type {
   HybridCatalogStorePort,
 } from "./hybrid-catalog-ports";
 import {
+  LARGE_CATALOG_AUTO_CHAIN_MAX_SEGMENTS,
   LARGE_CATALOG_RUN_BUDGET,
   HybridCatalogError,
   type CatalogDifferenceKind,
@@ -20,6 +21,7 @@ import {
 import type {
   LargeCatalogVerificationService,
   LargeCatalogVerificationSummary,
+  LargeVerificationProgressEvent,
 } from "./large-catalog-verification-service";
 import { summarizeLargeCatalogVerification } from "./large-catalog-verification-progress";
 import type { UnifiedCatalogProjectionService } from "./unified-catalog-projection-service";
@@ -49,9 +51,16 @@ export interface HybridCatalogActiveSummary {
   readonly groups: readonly HybridCatalogGroupViewModel[];
 }
 
+export type LargeCatalogAutoResumeState =
+  | "inactive"
+  | "running"
+  | "starting-next-segment"
+  | "stopped-no-progress"
+  | "stopped-limit";
+
 export interface LargeCatalogBatchSummary {
   readonly batchId: string;
-  readonly status: "complete" | "paused" | "partial";
+  readonly status: "scanning" | "complete" | "paused" | "partial";
   readonly stopReason: LargeCatalogStopReason | null;
   readonly resumeAvailable: boolean;
   readonly runOrdinal: number;
@@ -69,6 +78,9 @@ export interface LargeCatalogBatchSummary {
   readonly committedPageCount: number;
   readonly completedDirectoryCount: number;
   readonly pendingDirectoryCount: number;
+  readonly autoResumeState: LargeCatalogAutoResumeState;
+  readonly autoSegmentIndex: number;
+  readonly autoSegmentLimit: number;
 }
 
 export type HybridCatalogViewMessageCode =
@@ -162,16 +174,40 @@ const RETRYABLE_PARTIAL_REASONS = new Set<LargeCatalogStopReason>([
   "baidu-access-unavailable",
 ]);
 
+const AUTO_CONTINUE_REASONS = new Set<LargeCatalogStopReason>([
+  "pdf-limit",
+  "directory-limit",
+  "list-request-limit",
+  "time-limit",
+]);
+
+interface AutoChainView {
+  readonly autoResumeState: LargeCatalogAutoResumeState;
+  readonly autoSegmentIndex: number;
+  readonly autoSegmentLimit: number;
+}
+
 const resumeAvailableFor = (
-  status: "complete" | "paused" | "partial",
+  status: "scanning" | "complete" | "paused" | "partial",
   stopReason: LargeCatalogStopReason | null,
 ): boolean => status === "paused"
   || (status === "partial" && stopReason !== null && RETRYABLE_PARTIAL_REASONS.has(stopReason));
 
+const canAutoContinue = (result: LargeCatalogVerificationSummary): boolean => (
+  result.status === "paused"
+  && result.stopReason !== null
+  && AUTO_CONTINUE_REASONS.has(result.stopReason)
+);
+
 const batchFromVerification = (
   summary: LargeCatalogVerificationSummary,
+  autoView: AutoChainView = {
+    autoResumeState: "inactive",
+    autoSegmentIndex: 0,
+    autoSegmentLimit: LARGE_CATALOG_AUTO_CHAIN_MAX_SEGMENTS,
+  },
 ): LargeCatalogBatchSummary => {
-  const status = summary.status === "scanning" ? "paused" : summary.status;
+  const status = summary.status;
   return {
     batchId: summary.batchId,
     status,
@@ -192,6 +228,9 @@ const batchFromVerification = (
     committedPageCount: summary.committedPageCount,
     completedDirectoryCount: summary.completedDirectoryCount,
     pendingDirectoryCount: summary.pendingDirectoryCount,
+    autoResumeState: autoView.autoResumeState,
+    autoSegmentIndex: autoView.autoSegmentIndex,
+    autoSegmentLimit: autoView.autoSegmentLimit,
   };
 };
 
@@ -199,6 +238,7 @@ const statusForBatch = (
   active: HybridCatalogActiveSummary | undefined,
   batch: LargeCatalogBatchSummary | undefined,
 ): HybridCatalogViewModel["status"] => {
+  if (batch?.status === "scanning") return "scanning";
   if (batch?.status === "paused") return "paused";
   if (batch?.status === "partial") return "partial";
   return active === undefined ? "empty" : "ready";
@@ -229,6 +269,7 @@ export class HybridCatalogRuntimeService implements HybridCatalogRuntime {
   private activeSourceSha256: string | null = null;
   private currentBatchId: string | null = null;
   private scanController: AbortController | null = null;
+  private scanGeneration = 0;
   private importController: AbortController | null = null;
   private busy = false;
   private disposed = false;
@@ -412,25 +453,35 @@ export class HybridCatalogRuntimeService implements HybridCatalogRuntime {
     }
     this.busy = true;
     const controller = new AbortController();
+    const generation = ++this.scanGeneration;
     this.scanController = controller;
     this.viewModel = { ...this.viewModel, status: "scanning", messageCode: undefined };
     this.emit();
     try {
-      const result = await this.dependencies.verification.start({
-        batchId,
-        sourceImportSha256,
+      await this.runVerificationChain({
         cloudRoot: input.cloudRoot,
-        groups,
-        signal: controller.signal,
+        controller,
+        generation,
+        first: (onProgress) => this.dependencies.verification.start({
+          batchId,
+          sourceImportSha256,
+          cloudRoot: input.cloudRoot,
+          groups,
+          signal: controller.signal,
+          onProgress,
+        }),
       });
-      if (this.disposed) return;
-      this.currentBatchId = result.batchId;
-      await this.publishVerificationResult(result);
     } catch (error) {
-      this.fail(error, "hybrid-batch-unavailable");
+      if (
+        !this.disposed
+        && this.scanController === controller
+        && this.scanGeneration === generation
+      ) this.fail(error, "hybrid-batch-unavailable");
     } finally {
-      if (this.scanController === controller) this.scanController = null;
-      this.busy = false;
+      if (this.scanController === controller && this.scanGeneration === generation) {
+        this.scanController = null;
+        this.busy = false;
+      }
     }
   }
 
@@ -443,22 +494,33 @@ export class HybridCatalogRuntimeService implements HybridCatalogRuntime {
     }
     this.busy = true;
     const controller = new AbortController();
+    const generation = ++this.scanGeneration;
     this.scanController = controller;
     this.viewModel = { ...this.viewModel, status: "scanning", messageCode: undefined };
     this.emit();
     try {
-      const result = await this.dependencies.verification.runSegment({
-        batchId,
+      await this.runVerificationChain({
         cloudRoot,
-        signal: controller.signal,
+        controller,
+        generation,
+        first: (onProgress) => this.dependencies.verification.runSegment({
+          batchId,
+          cloudRoot,
+          signal: controller.signal,
+          onProgress,
+        }),
       });
-      if (this.disposed) return;
-      await this.publishVerificationResult(result);
     } catch (error) {
-      this.fail(error, "hybrid-batch-unavailable");
+      if (
+        !this.disposed
+        && this.scanController === controller
+        && this.scanGeneration === generation
+      ) this.fail(error, "hybrid-batch-unavailable");
     } finally {
-      if (this.scanController === controller) this.scanController = null;
-      this.busy = false;
+      if (this.scanController === controller && this.scanGeneration === generation) {
+        this.scanController = null;
+        this.busy = false;
+      }
     }
   }
 
@@ -607,18 +669,78 @@ export class HybridCatalogRuntimeService implements HybridCatalogRuntime {
 
   private async publishVerificationResult(
     result: LargeCatalogVerificationSummary,
+    autoView: AutoChainView,
+    keepScanning: boolean,
   ): Promise<void> {
-    const batch = batchFromVerification(result);
     const active = await this.loadActive();
     if (this.disposed) return;
+    const batch = batchFromVerification(result, autoView);
     this.viewModel = {
-      status: result.status === "complete"
-        ? active === undefined ? "empty" : "ready"
-        : result.status === "partial" ? "partial" : "paused",
+      status: keepScanning
+        ? "scanning"
+        : result.status === "complete"
+          ? active === undefined ? "empty" : "ready"
+          : result.status === "partial" ? "partial" : "paused",
       ...(active === undefined ? {} : { active: cloneActive(active) }),
       batch,
     };
     this.emit();
+  }
+
+  private async runVerificationChain(input: Readonly<{
+    cloudRoot: string;
+    controller: AbortController;
+    generation: number;
+    first: (
+      onProgress: (event: LargeVerificationProgressEvent) => Promise<void>,
+    ) => Promise<LargeCatalogVerificationSummary>;
+  }>): Promise<void> {
+    let autoSegmentIndex = 1;
+    const isCurrent = (): boolean => !this.disposed
+      && this.scanController === input.controller
+      && !input.controller.signal.aborted
+      && this.scanGeneration === input.generation;
+    const autoView = (state: LargeCatalogAutoResumeState): AutoChainView => ({
+      autoResumeState: state,
+      autoSegmentIndex,
+      autoSegmentLimit: LARGE_CATALOG_AUTO_CHAIN_MAX_SEGMENTS,
+    });
+    const onProgress = async (event: LargeVerificationProgressEvent): Promise<void> => {
+      if (!isCurrent()) return;
+      const active = event.phase === "group-completed"
+        ? await this.loadActive()
+        : this.viewModel.active;
+      if (!isCurrent()) return;
+      this.currentBatchId = event.summary.batchId;
+      this.viewModel = {
+        status: "scanning",
+        ...(active === undefined ? {} : { active: cloneActive(active) }),
+        batch: batchFromVerification(event.summary, autoView("running")),
+      };
+      this.emit();
+    };
+
+    let result = await input.first(onProgress);
+    if (isCurrent()) this.currentBatchId = result.batchId;
+    while (isCurrent() && canAutoContinue(result)) {
+      await this.publishVerificationResult(
+        result,
+        autoView("starting-next-segment"),
+        true,
+      );
+      if (!isCurrent()) return;
+      autoSegmentIndex += 1;
+      result = await this.dependencies.verification.runSegment({
+        batchId: result.batchId,
+        cloudRoot: input.cloudRoot,
+        signal: input.controller.signal,
+        onProgress,
+      });
+      if (isCurrent()) this.currentBatchId = result.batchId;
+    }
+    if (isCurrent()) {
+      await this.publishVerificationResult(result, autoView("inactive"), false);
+    }
   }
 
   private assertIdle(): void {

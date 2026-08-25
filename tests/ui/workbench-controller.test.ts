@@ -5,13 +5,22 @@ import {
   FakeHybridCatalogRuntime,
 } from "../fakes/fake-cloud-catalog-runtime";
 import { controllerFixture } from "../helpers/ui-fixtures";
-import { HybridCatalogError } from "../../src/catalog/hybrid-catalog-types";
+import {
+  HybridCatalogError,
+  LARGE_CATALOG_AUTO_CHAIN_MAX_SEGMENTS,
+} from "../../src/catalog/hybrid-catalog-types";
 import type { CloudDirectoryDiscoveryRuntime } from "../../src/catalog/cloud-directory-discovery-service";
 import type { CloudDirectoryLocatorRuntime } from "../../src/catalog/cloud-directory-locator";
 import type {
   CloudDirectoryPickerPresenter,
   CloudDirectoryPickerRequest,
 } from "../../src/ui/cloud-directory-picker";
+
+const INACTIVE_AUTO_RESUME = {
+  autoResumeState: "inactive" as const,
+  autoSegmentIndex: 0,
+  autoSegmentLimit: LARGE_CATALOG_AUTO_CHAIN_MAX_SEGMENTS,
+};
 
 describe("WorkbenchController cloud catalog filters", () => {
   it("opens the picker with a blank initial path and still rejects invalid nonblank paths", async () => {
@@ -442,6 +451,7 @@ describe("WorkbenchController verification page state", () => {
         groups: [group],
       },
       batch: {
+        ...INACTIVE_AUTO_RESUME,
         batchId: "batch-fresh-resume",
         status: "paused",
         stopReason: "user-canceled",
@@ -503,6 +513,7 @@ describe("WorkbenchController verification page state", () => {
         groups: [group],
       },
       batch: {
+        ...INACTIVE_AUTO_RESUME,
         batchId: "batch-generic-error",
         status: "paused",
         stopReason: "time-limit",
@@ -566,6 +577,7 @@ describe("WorkbenchController verification page state", () => {
         groups: [group],
       },
       batch: {
+        ...INACTIVE_AUTO_RESUME,
         batchId: "batch-old-checkpoint",
         status: "paused",
         stopReason: "time-limit",
@@ -633,6 +645,7 @@ describe("WorkbenchController verification page state", () => {
         groups: [group],
       },
       batch: {
+        ...INACTIVE_AUTO_RESUME,
         batchId: "batch-unchanged-old",
         status: "paused",
         stopReason: "time-limit",
@@ -708,6 +721,7 @@ describe("WorkbenchController verification page state", () => {
 
   it("keeps the new root locked when projection refresh fails after a new paused batch", async () => {
     const previousBatch = {
+      ...INACTIVE_AUTO_RESUME,
       batchId: "batch-old",
       status: "paused" as const,
       stopReason: "time-limit" as const,
