@@ -9,6 +9,7 @@ import { CatalogError, type BaiduListEntry } from "../../../src/catalog/catalog-
 import {
   LargeCatalogVerificationService,
   type LargeCatalogVerificationSelection,
+  type LargeVerificationProgressEvent,
 } from "../../../src/catalog/large-catalog-verification-service";
 import { UnifiedCatalogProjectionService } from "../../../src/catalog/unified-catalog-projection-service";
 import type { CandidateImportWriter } from "../../../src/catalog/hybrid-catalog-ports";
@@ -207,6 +208,54 @@ describe("LargeCatalogVerificationService", () => {
     expect(source.requests).toEqual([{ path: "/Library/Synthetic", start: 0 }]);
   });
 
+  it("emits aggregate progress only after persisted boundaries", async () => {
+    const source = new ScriptedSource([
+      { path: "/Library/Synthetic", start: 0, entries: [file("/Library/Synthetic/A.pdf", "1")] },
+    ]);
+    const { adapter, service } = await harness(source);
+    const events: LargeVerificationProgressEvent[] = [];
+    const result = await service.start({
+      batchId: "batch-events",
+      sourceImportSha256: HASH_A,
+      cloudRoot: "/Library",
+      groups: [selection()],
+      onProgress: (event) => { events.push(event); },
+    });
+
+    expect(events.map((event) => event.phase)).toEqual([
+      "segment-started",
+      "request-permitted",
+      "page-committed",
+      "group-completed",
+      "segment-finalized",
+    ]);
+    expect(events.find((event) => event.phase === "request-permitted")?.summary)
+      .toMatchObject({ listRequestCount: 1, committedPdfCount: 0 });
+    expect(events.find((event) => event.phase === "page-committed")?.summary)
+      .toMatchObject({ pdfCount: 1, committedPdfCount: 1, committedPageCount: 1 });
+    expect(events.at(-1)?.summary).toEqual(result);
+    expect(JSON.stringify(events)).not.toContain("/Library");
+    expect(JSON.stringify(events)).not.toContain("A.pdf");
+    expect((await adapter.loadBatch("batch-events"))?.records).toHaveLength(1);
+  });
+
+  it("keeps persisted results when a progress listener throws", async () => {
+    const source = new ScriptedSource([
+      { path: "/Library/Synthetic", start: 0, entries: [file("/Library/Synthetic/A.pdf", "1")] },
+    ]);
+    const { adapter, service } = await harness(source);
+    const result = await service.start({
+      batchId: "batch-listener-failure",
+      sourceImportSha256: HASH_A,
+      cloudRoot: "/Library",
+      groups: [selection()],
+      onProgress: () => { throw new Error("synthetic-progress-listener-failure"); },
+    });
+
+    expect(result.status).toBe("complete");
+    expect((await adapter.loadBatch("batch-listener-failure"))?.records).toHaveLength(1);
+  });
+
   it("distinguishes a resume root hash mismatch from other invalid batch input", async () => {
     const source = new ScriptedSource([]);
     const { service } = await harness(source);
@@ -382,14 +431,24 @@ describe("LargeCatalogVerificationService", () => {
       entries,
     }]);
     const { adapter, service } = await harness(source);
+    const events: LargeVerificationProgressEvent[] = [];
     const result = await service.start({
       batchId: "batch-budget",
       sourceImportSha256: HASH_A,
       cloudRoot: "/Library",
       groups: [selection()],
+      onProgress: (event) => { events.push(event); },
     });
 
     expect(result).toMatchObject({ status: "paused", stopReason: "directory-limit" });
+    expect(events.at(-1)?.phase).toBe("segment-finalized");
+    expect(events.at(-1)?.summary).toMatchObject({
+      status: "paused",
+      stopReason: "directory-limit",
+      committedPdfCount: 0,
+      committedPageCount: 0,
+    });
+    expect(events.some((event) => event.phase === "page-committed")).toBe(false);
     expect((await adapter.loadBatch("batch-budget"))?.records).toEqual([]);
     expect(await adapter.loadActiveOverlays()).toEqual([]);
   });

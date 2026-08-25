@@ -17,9 +17,20 @@ import {
   type LargeCatalogErrorCode,
   type LargeCatalogGroupMode,
   type LargeCatalogPauseReason,
-  type LargeCatalogStopReason,
 } from "./hybrid-catalog-types";
+import {
+  summarizeLargeCatalogVerification,
+  type LargeCatalogVerificationSummary,
+  type LargeVerificationProgressEvent,
+} from "./large-catalog-verification-progress";
 import type { UnifiedCatalogProjectionService } from "./unified-catalog-projection-service";
+
+export type {
+  LargeCatalogVerificationSummary,
+  LargeVerificationProgressEvent,
+} from "./large-catalog-verification-progress";
+
+type ProgressListener = (event: LargeVerificationProgressEvent) => void | Promise<void>;
 
 export interface LargeCatalogVerificationSelection {
   readonly groupKey: string;
@@ -33,25 +44,14 @@ export interface LargeCatalogVerificationStartInput {
   readonly cloudRoot: string;
   readonly groups: readonly LargeCatalogVerificationSelection[];
   readonly signal?: AbortSignal;
+  readonly onProgress?: ProgressListener;
 }
 
 export interface LargeCatalogVerificationSegmentInput {
   readonly batchId: string;
   readonly cloudRoot: string;
   readonly signal?: AbortSignal;
-}
-
-export interface LargeCatalogVerificationSummary {
-  readonly batchId: string;
-  readonly status: "scanning" | "complete" | "paused" | "partial";
-  readonly stopReason: LargeCatalogStopReason | null;
-  readonly runOrdinal: number;
-  readonly remainingGroupCount: number;
-  readonly pdfCount: number;
-  readonly directoryCount: number;
-  readonly ignoredFileCount: number;
-  readonly listRequestCount: number;
-  readonly cumulativeListRequestCount: number;
+  readonly onProgress?: ProgressListener;
 }
 
 export interface LargeCatalogVerificationDependencies {
@@ -114,21 +114,6 @@ const assertUniquePageIdentities = (
     }
   }
 };
-
-const summaryFrom = (
-  checkpoint: LargeCatalogBatchCheckpointV3,
-): LargeCatalogVerificationSummary => ({
-  batchId: checkpoint.batchId,
-  status: checkpoint.status,
-  stopReason: checkpoint.stopReason,
-  runOrdinal: checkpoint.runOrdinal,
-  remainingGroupCount: checkpoint.groups.filter((group) => group.status !== "complete").length,
-  pdfCount: checkpoint.pdfCount,
-  directoryCount: checkpoint.directoryCount,
-  ignoredFileCount: checkpoint.ignoredFileCount,
-  listRequestCount: checkpoint.listRequestCount,
-  cumulativeListRequestCount: checkpoint.cumulativeListRequestCount,
-});
 
 const errorCode = (error: unknown): LargeCatalogErrorCode => {
   if (error instanceof CatalogError) {
@@ -243,13 +228,14 @@ export class LargeCatalogVerificationService {
       batchId: input.batchId,
       cloudRoot: input.cloudRoot,
       ...(input.signal === undefined ? {} : { signal: input.signal }),
+      ...(input.onProgress === undefined ? {} : { onProgress: input.onProgress }),
     });
   }
 
   async loadPaused(batchId: string): Promise<LargeCatalogVerificationSummary> {
     const loaded = await this.#store.loadBatch(batchId);
     if (loaded === null) throw new HybridCatalogError("hybrid-batch-unavailable");
-    return summaryFrom(loaded.checkpoint);
+    return summarizeLargeCatalogVerification(loaded.checkpoint, loaded.records.length);
   }
 
   async runSegment(
@@ -262,10 +248,14 @@ export class LargeCatalogVerificationService {
       const loaded = await this.#store.loadBatch(input.batchId);
       if (loaded === null) throw new HybridCatalogError("hybrid-batch-unavailable");
       let checkpoint = loaded.checkpoint;
+      const recoveredFromScanning = loaded.checkpoint.status === "scanning";
+      const committedPdfCount = loaded.records.length;
       if (checkpoint.cloudRootSha256 !== sha256(cloudRoot)) {
         throw new HybridCatalogError("hybrid-cloud-root-mismatch");
       }
-      if (checkpoint.status === "complete") return summaryFrom(checkpoint);
+      if (checkpoint.status === "complete") {
+        return summarizeLargeCatalogVerification(checkpoint, committedPdfCount);
+      }
       if (
         !loaded.identitiesComplete
         && checkpoint.groups.some((group) => group.committedPageKeys.length > 0)
@@ -287,7 +277,23 @@ export class LargeCatalogVerificationService {
       }
       const seenFsIds = new Set(loaded.identities.map((identity) => identity.fsId));
       const seenPaths = new Set(loaded.identities.map((identity) => identity.path));
-      return await this.#execute(checkpoint, cloudRoot, input.signal, seenFsIds, seenPaths);
+      await this.#notify(
+        input.onProgress,
+        "segment-started",
+        checkpoint,
+        committedPdfCount,
+        recoveredFromScanning,
+      );
+      return await this.#execute(
+        checkpoint,
+        cloudRoot,
+        input.signal,
+        seenFsIds,
+        seenPaths,
+        input.onProgress,
+        committedPdfCount,
+        recoveredFromScanning,
+      );
     } finally {
       this.#active = false;
     }
@@ -299,8 +305,12 @@ export class LargeCatalogVerificationService {
     signal: AbortSignal | undefined,
     seenFsIds: Set<string>,
     seenPaths: Set<string>,
+    listener: ProgressListener | undefined,
+    initialCommittedPdfCount: number,
+    recoveredFromScanning: boolean,
   ): Promise<LargeCatalogVerificationSummary> {
     let checkpoint = initial;
+    let committedPdfCount = initialCommittedPdfCount;
     while (true) {
       const group = checkpoint.groups[checkpoint.currentGroupIndex];
       if (group === undefined || group.status !== "scanning") {
@@ -311,7 +321,13 @@ export class LargeCatalogVerificationService {
         try {
           await this.#publishCompleteGroup(checkpoint, group, cloudRoot);
         } catch (error) {
-          return this.#finalizePartial(checkpoint, errorCode(error));
+          return this.#finalizePartial(
+            checkpoint,
+            errorCode(error),
+            listener,
+            committedPdfCount,
+            recoveredFromScanning,
+          );
         }
         if (checkpoint.currentGroupIndex === checkpoint.groups.length - 1) {
           const groups = checkpoint.groups.map((value, index) => (
@@ -325,7 +341,21 @@ export class LargeCatalogVerificationService {
             stopReason: "complete",
           };
           await this.#store.finalizeBatchRun({ checkpoint: terminal, endedAt: safeNow(this.#now) });
-          return summaryFrom(terminal);
+          await this.#notify(
+            listener,
+            "group-completed",
+            terminal,
+            committedPdfCount,
+            recoveredFromScanning,
+          );
+          await this.#notify(
+            listener,
+            "segment-finalized",
+            terminal,
+            committedPdfCount,
+            recoveredFromScanning,
+          );
+          return summarizeLargeCatalogVerification(terminal, committedPdfCount);
         }
         const nextIndex = checkpoint.currentGroupIndex + 1;
         const groups = checkpoint.groups.map((value, index) => {
@@ -335,6 +365,13 @@ export class LargeCatalogVerificationService {
         });
         checkpoint = { ...checkpoint, currentGroupIndex: nextIndex, groups };
         await this.#store.advanceBatchGroup(checkpoint);
+        await this.#notify(
+          listener,
+          "group-completed",
+          checkpoint,
+          committedPdfCount,
+          recoveredFromScanning,
+        );
         continue;
       }
 
@@ -355,17 +392,44 @@ export class LargeCatalogVerificationService {
             };
             await this.#store.saveBatchPermit(permitted);
             checkpoint = permitted;
+            await this.#notify(
+              listener,
+              "request-permitted",
+              checkpoint,
+              committedPdfCount,
+              recoveredFromScanning,
+            );
           },
         })).entries;
       } catch (error) {
         if (error instanceof LargeCatalogPause) {
-          return this.#finalizePaused(checkpoint, error.reason);
+          return this.#finalizePaused(
+            checkpoint,
+            error.reason,
+            listener,
+            committedPdfCount,
+            recoveredFromScanning,
+          );
         }
-        return this.#finalizePartial(checkpoint, errorCode(error));
+        return this.#finalizePartial(
+          checkpoint,
+          errorCode(error),
+          listener,
+          committedPdfCount,
+          recoveredFromScanning,
+        );
       }
 
       const pauseAfterRequest = this.#postRequestPause(checkpoint, signal);
-      if (pauseAfterRequest !== null) return this.#finalizePaused(checkpoint, pauseAfterRequest);
+      if (pauseAfterRequest !== null) {
+        return this.#finalizePaused(
+          checkpoint,
+          pauseAfterRequest,
+          listener,
+          committedPdfCount,
+          recoveredFromScanning,
+        );
+      }
       let converted: ConvertedPage;
       try {
         converted = this.#convertPage(
@@ -376,13 +440,31 @@ export class LargeCatalogVerificationService {
         );
         assertUniquePageIdentities(converted.identities, seenFsIds, seenPaths);
       } catch (error) {
-        return this.#finalizePartial(checkpoint, errorCode(error));
+        return this.#finalizePartial(
+          checkpoint,
+          errorCode(error),
+          listener,
+          committedPdfCount,
+          recoveredFromScanning,
+        );
       }
       if (checkpoint.pdfCount + converted.pdfCount > checkpoint.budget.maxPdfCount) {
-        return this.#finalizePaused(checkpoint, "pdf-limit");
+        return this.#finalizePaused(
+          checkpoint,
+          "pdf-limit",
+          listener,
+          committedPdfCount,
+          recoveredFromScanning,
+        );
       }
       if (checkpoint.directoryCount + converted.directoryCount > checkpoint.budget.maxDirectoryCount) {
-        return this.#finalizePaused(checkpoint, "directory-limit");
+        return this.#finalizePaused(
+          checkpoint,
+          "directory-limit",
+          listener,
+          committedPdfCount,
+          recoveredFromScanning,
+        );
       }
       const pageKey = sha256(`${group.groupKey}\u0000${current.relativePath}\u0000${current.start}`);
       const next = this.#nextPageCheckpoint(checkpoint, group, current, entries.length, converted, pageKey);
@@ -395,13 +477,27 @@ export class LargeCatalogVerificationService {
           nextCheckpoint: next,
         });
       } catch (error) {
-        return this.#finalizePartial(checkpoint, errorCode(error));
+        return this.#finalizePartial(
+          checkpoint,
+          errorCode(error),
+          listener,
+          committedPdfCount,
+          recoveredFromScanning,
+        );
       }
+      committedPdfCount += converted.records.length;
+      checkpoint = next;
+      await this.#notify(
+        listener,
+        "page-committed",
+        checkpoint,
+        committedPdfCount,
+        recoveredFromScanning,
+      );
       for (const identity of converted.identities) {
         seenFsIds.add(identity.fsId);
         seenPaths.add(identity.path);
       }
-      checkpoint = next;
     }
   }
 
@@ -592,9 +688,31 @@ export class LargeCatalogVerificationService {
     }
   }
 
+  async #notify(
+    listener: ProgressListener | undefined,
+    phase: LargeVerificationProgressEvent["phase"],
+    checkpoint: LargeCatalogBatchCheckpointV3,
+    committedPdfCount: number,
+    recoveredFromScanning: boolean,
+  ): Promise<void> {
+    if (listener === undefined) return;
+    try {
+      await listener({
+        phase,
+        summary: summarizeLargeCatalogVerification(checkpoint, committedPdfCount),
+        recoveredFromScanning,
+      });
+    } catch {
+      // Progress presentation must not invalidate already-persisted catalog data.
+    }
+  }
+
   async #finalizePaused(
     checkpoint: LargeCatalogBatchCheckpointV3,
     reason: LargeCatalogPauseReason,
+    listener: ProgressListener | undefined,
+    committedPdfCount: number,
+    recoveredFromScanning: boolean,
   ): Promise<LargeCatalogVerificationSummary> {
     const terminal: LargeCatalogBatchCheckpointV3 = {
       ...checkpoint,
@@ -602,12 +720,22 @@ export class LargeCatalogVerificationService {
       stopReason: reason,
     };
     await this.#store.finalizeBatchRun({ checkpoint: terminal, endedAt: safeNow(this.#now) });
-    return summaryFrom(terminal);
+    await this.#notify(
+      listener,
+      "segment-finalized",
+      terminal,
+      committedPdfCount,
+      recoveredFromScanning,
+    );
+    return summarizeLargeCatalogVerification(terminal, committedPdfCount);
   }
 
   async #finalizePartial(
     checkpoint: LargeCatalogBatchCheckpointV3,
     code: LargeCatalogErrorCode,
+    listener: ProgressListener | undefined,
+    committedPdfCount: number,
+    recoveredFromScanning: boolean,
   ): Promise<LargeCatalogVerificationSummary> {
     const terminal: LargeCatalogBatchCheckpointV3 = {
       ...checkpoint,
@@ -619,7 +747,14 @@ export class LargeCatalogVerificationService {
       },
     };
     await this.#store.finalizeBatchRun({ checkpoint: terminal, endedAt: safeNow(this.#now) });
-    return summaryFrom(terminal);
+    await this.#notify(
+      listener,
+      "segment-finalized",
+      terminal,
+      committedPdfCount,
+      recoveredFromScanning,
+    );
+    return summarizeLargeCatalogVerification(terminal, committedPdfCount);
   }
 
   #normalizedSessionRoot(value: string): string {
