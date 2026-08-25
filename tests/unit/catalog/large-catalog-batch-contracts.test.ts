@@ -10,6 +10,7 @@ import {
   encodeLargeCatalogBatchCheckpoint,
 } from "../../../src/catalog/hybrid-catalog-codec";
 import {
+  LARGE_CATALOG_AUTO_CHAIN_MAX_SEGMENTS,
   LARGE_CATALOG_RUN_BUDGET,
   HybridCatalogError,
   type LargeCatalogBatchCheckpointV3,
@@ -109,6 +110,13 @@ const seedCandidates = async (adapter: LocalHybridCatalogAdapter): Promise<void>
 };
 
 describe("large catalog schema-v3 batch contracts", () => {
+  it("keeps the automatic-chain ceiling runtime-only", () => {
+    const paused = checkpoint({ status: "paused", stopReason: "pdf-limit" });
+
+    expect(Object.keys(paused)).not.toContain("autoSegmentLimit");
+    expect(LARGE_CATALOG_AUTO_CHAIN_MAX_SEGMENTS).toBe(12);
+  });
+
   it("strictly decodes only canonical v3 checkpoints with the fixed budget", () => {
     const value = checkpoint();
     expect(decodeLargeCatalogBatchCheckpoint(JSON.stringify(value))).toEqual(value);

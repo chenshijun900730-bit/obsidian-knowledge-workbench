@@ -170,10 +170,11 @@ const verificationSummary = (
 const verificationProgressEvent = (
   value: LargeCatalogVerificationSummary,
   phase: LargeVerificationProgressEvent["phase"],
+  recoveredFromScanning = false,
 ): LargeVerificationProgressEvent => ({
   phase,
   summary: value,
-  recoveredFromScanning: false,
+  recoveredFromScanning,
 });
 
 const fixture = (options: Readonly<{
@@ -185,6 +186,7 @@ const fixture = (options: Readonly<{
   projectError?: Error;
   verificationResults?: readonly LargeCatalogVerificationSummary[];
   verificationStarts?: readonly LargeCatalogVerificationSummary[];
+  verificationRecoveries?: readonly boolean[];
 }> = {}) => {
   const candidates = [
     candidate("txt:root", "Root.pdf", "txt-root-items"),
@@ -311,28 +313,46 @@ const fixture = (options: Readonly<{
       },
     })
   )))];
+  const verificationRecoveries = [...(options.verificationRecoveries ?? [])];
   const nextVerificationStep = (): Readonly<{
     start: LargeCatalogVerificationSummary;
     result: LargeCatalogVerificationSummary;
+    recoveredFromScanning: boolean;
   }> => {
     const start = verificationStarts.shift();
     const result = verificationResults.shift();
     if (start === undefined || result === undefined) {
       throw new Error("verification-result-exhausted");
     }
-    return { start, result };
+    return { start, result, recoveredFromScanning: verificationRecoveries.shift() ?? false };
   };
   const verification = {
     start: vi.fn(async (input: LargeCatalogVerificationStartInput) => {
-      const { start, result } = nextVerificationStep();
-      await input.onProgress?.(verificationProgressEvent(start, "segment-started"));
-      await input.onProgress?.(verificationProgressEvent(result, "segment-finalized"));
+      const { start, result, recoveredFromScanning } = nextVerificationStep();
+      await input.onProgress?.(verificationProgressEvent(
+        start,
+        "segment-started",
+        recoveredFromScanning,
+      ));
+      await input.onProgress?.(verificationProgressEvent(
+        result,
+        "segment-finalized",
+        recoveredFromScanning,
+      ));
       return result;
     }),
     runSegment: vi.fn(async (input: LargeCatalogVerificationSegmentInput) => {
-      const { start, result } = nextVerificationStep();
-      await input.onProgress?.(verificationProgressEvent(start, "segment-started"));
-      await input.onProgress?.(verificationProgressEvent(result, "segment-finalized"));
+      const { start, result, recoveredFromScanning } = nextVerificationStep();
+      await input.onProgress?.(verificationProgressEvent(
+        start,
+        "segment-started",
+        recoveredFromScanning,
+      ));
+      await input.onProgress?.(verificationProgressEvent(
+        result,
+        "segment-finalized",
+        recoveredFromScanning,
+      ));
       return result;
     }),
   };
@@ -597,6 +617,90 @@ describe("HybridCatalogRuntimeService", () => {
       });
     },
   );
+
+  it("does not start another segment when cancellation lands between segments", async () => {
+    const value = fixture({
+      verificationResults: [verificationSummary({ status: "paused", stopReason: "pdf-limit" })],
+    });
+    await value.runtime.initialize();
+    const unsubscribe = value.runtime.subscribe(() => {
+      if (value.runtime.snapshot().batch?.autoResumeState === "starting-next-segment") {
+        value.runtime.cancelLargeVerification();
+      }
+    });
+
+    await value.runtime.startLargeVerification({ cloudRoot: "/Synthetic", groupKeys: [GROUP_A] });
+    unsubscribe();
+
+    expect(value.verification.runSegment).not.toHaveBeenCalled();
+  });
+
+  it("stops on a budget boundary with no durable progress", async () => {
+    const same = verificationSummary({ status: "paused", stopReason: "directory-limit" });
+    const value = fixture({ verificationResults: [same], verificationStarts: [same] });
+    await value.runtime.initialize();
+
+    await value.runtime.startLargeVerification({ cloudRoot: "/Synthetic", groupKeys: [GROUP_A] });
+
+    expect(value.runtime.snapshot().batch?.autoResumeState).toBe("stopped-no-progress");
+    expect(value.verification.runSegment).not.toHaveBeenCalled();
+  });
+
+  it("allows one recovered-scanning normalization without advancing the segment index", async () => {
+    const same = verificationSummary({ status: "paused", stopReason: "directory-limit" });
+    const value = fixture({
+      verificationResults: [same, same],
+      verificationStarts: [same, same],
+      verificationRecoveries: [true, false],
+    });
+    await value.runtime.initialize();
+
+    await value.runtime.startLargeVerification({ cloudRoot: "/Synthetic", groupKeys: [GROUP_A] });
+
+    expect(value.verification.runSegment).toHaveBeenCalledOnce();
+    expect(value.runtime.snapshot().batch).toMatchObject({
+      autoResumeState: "stopped-no-progress",
+      autoSegmentIndex: 1,
+    });
+  });
+
+  it("stops after twelve automatic-chain segments", async () => {
+    const budgetResults = Array.from({ length: 12 }, (_, index) => verificationSummary({
+      status: "paused",
+      stopReason: "pdf-limit",
+      runOrdinal: index + 1,
+      committedPageCount: index + 1,
+      committedPdfCount: (index + 1) * 9_000,
+    }));
+    const complete = verificationSummary({
+      status: "complete",
+      stopReason: "complete",
+      runOrdinal: 13,
+      completedGroupCount: 1,
+      remainingGroupCount: 0,
+    });
+    const value = fixture({ verificationResults: [...budgetResults, complete] });
+    await value.runtime.initialize();
+
+    await value.runtime.startLargeVerification({ cloudRoot: "/Synthetic", groupKeys: [GROUP_A] });
+
+    expect(value.verification.start).toHaveBeenCalledOnce();
+    expect(value.verification.runSegment).toHaveBeenCalledTimes(11);
+    expect(value.runtime.snapshot().batch).toMatchObject({
+      autoResumeState: "stopped-limit",
+      autoSegmentIndex: 12,
+      autoSegmentLimit: LARGE_CATALOG_AUTO_CHAIN_MAX_SEGMENTS,
+    });
+
+    await value.runtime.resumeLargeVerification("/Synthetic");
+
+    expect(value.verification.runSegment).toHaveBeenCalledTimes(12);
+    expect(value.runtime.snapshot().batch).toMatchObject({
+      status: "complete",
+      autoResumeState: "inactive",
+      autoSegmentIndex: 1,
+    });
+  });
 
   it.each([
     "user-canceled",

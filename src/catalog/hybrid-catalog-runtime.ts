@@ -23,7 +23,11 @@ import type {
   LargeCatalogVerificationSummary,
   LargeVerificationProgressEvent,
 } from "./large-catalog-verification-service";
-import { summarizeLargeCatalogVerification } from "./large-catalog-verification-progress";
+import {
+  hasDurableVerificationProgress,
+  summarizeLargeCatalogVerification,
+  type LargeVerificationProgressMarker,
+} from "./large-catalog-verification-progress";
 import type { UnifiedCatalogProjectionService } from "./unified-catalog-projection-service";
 
 export interface CatalogTxtSourcePort {
@@ -536,6 +540,7 @@ export class HybridCatalogRuntimeService implements HybridCatalogRuntime {
     this.importController = null;
     this.scanController?.abort();
     this.scanController = null;
+    this.scanGeneration += 1;
     this.busy = false;
     this.activeSourceSha256 = null;
     this.currentBatchId = null;
@@ -671,9 +676,11 @@ export class HybridCatalogRuntimeService implements HybridCatalogRuntime {
     result: LargeCatalogVerificationSummary,
     autoView: AutoChainView,
     keepScanning: boolean,
+    isCurrent: () => boolean,
   ): Promise<void> {
+    if (!isCurrent()) return;
     const active = await this.loadActive();
-    if (this.disposed) return;
+    if (!isCurrent()) return;
     const batch = batchFromVerification(result, autoView);
     this.viewModel = {
       status: keepScanning
@@ -696,6 +703,8 @@ export class HybridCatalogRuntimeService implements HybridCatalogRuntime {
     ) => Promise<LargeCatalogVerificationSummary>;
   }>): Promise<void> {
     let autoSegmentIndex = 1;
+    let segmentStartMarker: LargeVerificationProgressMarker | null = null;
+    let recoveredFromScanning = false;
     const isCurrent = (): boolean => !this.disposed
       && this.scanController === input.controller
       && !input.controller.signal.aborted
@@ -707,6 +716,10 @@ export class HybridCatalogRuntimeService implements HybridCatalogRuntime {
     });
     const onProgress = async (event: LargeVerificationProgressEvent): Promise<void> => {
       if (!isCurrent()) return;
+      if (event.phase === "segment-started") {
+        segmentStartMarker = event.summary.progressMarker;
+        recoveredFromScanning = event.recoveredFromScanning;
+      }
       const active = event.phase === "group-completed"
         ? await this.loadActive()
         : this.viewModel.active;
@@ -723,13 +736,36 @@ export class HybridCatalogRuntimeService implements HybridCatalogRuntime {
     let result = await input.first(onProgress);
     if (isCurrent()) this.currentBatchId = result.batchId;
     while (isCurrent() && canAutoContinue(result)) {
+      const progressed = segmentStartMarker !== null
+        && hasDurableVerificationProgress(segmentStartMarker, result.progressMarker);
+      if (!progressed && !recoveredFromScanning) {
+        await this.publishVerificationResult(
+          result,
+          autoView("stopped-no-progress"),
+          false,
+          isCurrent,
+        );
+        return;
+      }
+      segmentStartMarker = null;
+      recoveredFromScanning = false;
+      if (autoSegmentIndex >= LARGE_CATALOG_AUTO_CHAIN_MAX_SEGMENTS) {
+        await this.publishVerificationResult(
+          result,
+          autoView("stopped-limit"),
+          false,
+          isCurrent,
+        );
+        return;
+      }
       await this.publishVerificationResult(
         result,
         autoView("starting-next-segment"),
         true,
+        isCurrent,
       );
       if (!isCurrent()) return;
-      autoSegmentIndex += 1;
+      if (progressed) autoSegmentIndex += 1;
       result = await this.dependencies.verification.runSegment({
         batchId: result.batchId,
         cloudRoot: input.cloudRoot,
@@ -739,7 +775,7 @@ export class HybridCatalogRuntimeService implements HybridCatalogRuntime {
       if (isCurrent()) this.currentBatchId = result.batchId;
     }
     if (isCurrent()) {
-      await this.publishVerificationResult(result, autoView("inactive"), false);
+      await this.publishVerificationResult(result, autoView("inactive"), false, isCurrent);
     }
   }
 
