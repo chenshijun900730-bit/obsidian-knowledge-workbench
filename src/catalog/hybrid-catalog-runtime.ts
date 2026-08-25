@@ -11,7 +11,6 @@ import {
   type CatalogTxtImportSummary,
   type CatalogVerificationStatus,
   type HybridCatalogErrorCode,
-  type LargeCatalogBatchCheckpointV3,
   type LargeCatalogErrorCode,
   type LargeCatalogGroupMode,
   type LargeCatalogStopReason,
@@ -22,6 +21,7 @@ import type {
   LargeCatalogVerificationService,
   LargeCatalogVerificationSummary,
 } from "./large-catalog-verification-service";
+import { summarizeLargeCatalogVerification } from "./large-catalog-verification-progress";
 import type { UnifiedCatalogProjectionService } from "./unified-catalog-projection-service";
 
 export interface CatalogTxtSourcePort {
@@ -45,6 +45,7 @@ export interface HybridCatalogActiveSummary {
   readonly cloudMissingCount: number;
   readonly groupCount: number;
   readonly verifiedGroupCount: number;
+  readonly coveredCandidatePdfCount: number;
   readonly groups: readonly HybridCatalogGroupViewModel[];
 }
 
@@ -60,6 +61,14 @@ export interface LargeCatalogBatchSummary {
   readonly ignoredFileCount: number;
   readonly listRequestCount: number;
   readonly cumulativeListRequestCount: number;
+  readonly selectedGroupCount: number;
+  readonly completedGroupCount: number;
+  readonly currentGroupIndex: number;
+  readonly currentGroupKey: string | null;
+  readonly committedPdfCount: number;
+  readonly committedPageCount: number;
+  readonly completedDirectoryCount: number;
+  readonly pendingDirectoryCount: number;
 }
 
 export type HybridCatalogViewMessageCode =
@@ -147,26 +156,17 @@ const safeError = (
   ? new HybridCatalogError(error.code)
   : new HybridCatalogError(fallback);
 
-const resumeAvailableFor = (status: "complete" | "paused" | "partial"): boolean => status === "paused";
+const RETRYABLE_PARTIAL_REASONS = new Set<LargeCatalogStopReason>([
+  "baidu-rate-limited",
+  "baidu-token-expired",
+  "baidu-access-unavailable",
+]);
 
-const batchFromCheckpoint = (
-  checkpoint: LargeCatalogBatchCheckpointV3,
-): LargeCatalogBatchSummary => {
-  const status = checkpoint.status === "scanning" ? "paused" : checkpoint.status;
-  return {
-    batchId: checkpoint.batchId,
-    status,
-    stopReason: checkpoint.stopReason,
-    resumeAvailable: resumeAvailableFor(status),
-    runOrdinal: checkpoint.runOrdinal,
-    remainingGroupCount: checkpoint.groups.filter((group) => group.status !== "complete").length,
-    pdfCount: checkpoint.pdfCount,
-    directoryCount: checkpoint.directoryCount,
-    ignoredFileCount: checkpoint.ignoredFileCount,
-    listRequestCount: checkpoint.listRequestCount,
-    cumulativeListRequestCount: checkpoint.cumulativeListRequestCount,
-  };
-};
+const resumeAvailableFor = (
+  status: "complete" | "paused" | "partial",
+  stopReason: LargeCatalogStopReason | null,
+): boolean => status === "paused"
+  || (status === "partial" && stopReason !== null && RETRYABLE_PARTIAL_REASONS.has(stopReason));
 
 const batchFromVerification = (
   summary: LargeCatalogVerificationSummary,
@@ -176,7 +176,7 @@ const batchFromVerification = (
     batchId: summary.batchId,
     status,
     stopReason: summary.stopReason,
-    resumeAvailable: resumeAvailableFor(status),
+    resumeAvailable: resumeAvailableFor(status, summary.stopReason),
     runOrdinal: summary.runOrdinal,
     remainingGroupCount: summary.remainingGroupCount,
     pdfCount: summary.pdfCount,
@@ -184,6 +184,14 @@ const batchFromVerification = (
     ignoredFileCount: summary.ignoredFileCount,
     listRequestCount: summary.listRequestCount,
     cumulativeListRequestCount: summary.cumulativeListRequestCount,
+    selectedGroupCount: summary.selectedGroupCount,
+    completedGroupCount: summary.completedGroupCount,
+    currentGroupIndex: summary.currentGroupIndex,
+    currentGroupKey: summary.currentGroupKey,
+    committedPdfCount: summary.committedPdfCount,
+    committedPageCount: summary.committedPageCount,
+    completedDirectoryCount: summary.completedDirectoryCount,
+    pendingDirectoryCount: summary.pendingDirectoryCount,
   };
 };
 
@@ -243,7 +251,10 @@ export class HybridCatalogRuntimeService implements HybridCatalogRuntime {
         && latest.checkpoint.sourceImportSha256 === this.activeSourceSha256
       ) {
         this.currentBatchId = latest.checkpoint.batchId;
-        batch = batchFromCheckpoint(latest.checkpoint);
+        batch = batchFromVerification(summarizeLargeCatalogVerification(
+          latest.checkpoint,
+          latest.records.length,
+        ));
       }
       this.viewModel = {
         status: statusForBatch(active, batch),
@@ -529,6 +540,12 @@ export class HybridCatalogRuntimeService implements HybridCatalogRuntime {
     const verifiedGroups = new Set(activeOverlays.map((overlay) => (
       overlay.descriptor.topLevelGroupId
     )));
+    const coveredCandidatePdfCount = [...candidatesByGroup.entries()].reduce(
+      (total, [groupKey, candidateRecords]) => (
+        verifiedGroups.has(groupKey) ? total + candidateRecords.length : total
+      ),
+      0,
+    );
     const groups = [...candidatesByGroup.entries()].map(([groupKey, values]) => {
       const first = values[0];
       if (first === undefined) throw new HybridCatalogError("hybrid-snapshot-corrupt");
@@ -570,6 +587,7 @@ export class HybridCatalogRuntimeService implements HybridCatalogRuntime {
       )).length,
       groupCount: groups.length,
       verifiedGroupCount: verifiedGroups.size,
+      coveredCandidatePdfCount,
       groups,
     };
   }
@@ -591,9 +609,7 @@ export class HybridCatalogRuntimeService implements HybridCatalogRuntime {
     result: LargeCatalogVerificationSummary,
   ): Promise<void> {
     const batch = batchFromVerification(result);
-    const active = result.status === "complete"
-      ? await this.loadActive()
-      : this.viewModel.active;
+    const active = await this.loadActive();
     if (this.disposed) return;
     this.viewModel = {
       status: result.status === "complete"

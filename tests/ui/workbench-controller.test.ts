@@ -95,6 +95,7 @@ describe("WorkbenchController cloud catalog filters", () => {
         cloudMissingCount: 0,
         groupCount: 1,
         verifiedGroupCount: 0,
+        coveredCandidatePdfCount: 0,
         groups: [{
           groupKey: "group:science",
           label: "Science",
@@ -382,6 +383,7 @@ describe("WorkbenchController verification page state", () => {
         cloudMissingCount: 0,
         groupCount: 1,
         verifiedGroupCount: 0,
+        coveredCandidatePdfCount: 0,
         groups: [group],
       },
     });
@@ -415,6 +417,7 @@ describe("WorkbenchController verification page state", () => {
         cloudMissingCount: 0,
         groupCount: 0,
         verifiedGroupCount: 0,
+        coveredCandidatePdfCount: 0,
         groups: [],
       },
     });
@@ -435,6 +438,7 @@ describe("WorkbenchController verification page state", () => {
         cloudMissingCount: 0,
         groupCount: 1,
         verifiedGroupCount: 0,
+        coveredCandidatePdfCount: 0,
         groups: [group],
       },
       batch: {
@@ -449,6 +453,14 @@ describe("WorkbenchController verification page state", () => {
         ignoredFileCount: 0,
         listRequestCount: 0,
         cumulativeListRequestCount: 0,
+        selectedGroupCount: 1,
+        completedGroupCount: 0,
+        currentGroupIndex: 0,
+        currentGroupKey: null,
+        committedPdfCount: 0,
+        committedPageCount: 0,
+        completedDirectoryCount: 0,
+        pendingDirectoryCount: 0,
       },
     });
     const confirmations: unknown[] = [];
@@ -487,6 +499,7 @@ describe("WorkbenchController verification page state", () => {
         cloudMissingCount: 0,
         groupCount: 1,
         verifiedGroupCount: 0,
+        coveredCandidatePdfCount: 0,
         groups: [group],
       },
       batch: {
@@ -501,6 +514,14 @@ describe("WorkbenchController verification page state", () => {
         ignoredFileCount: 0,
         listRequestCount: 1,
         cumulativeListRequestCount: 1,
+        selectedGroupCount: 1,
+        completedGroupCount: 0,
+        currentGroupIndex: 0,
+        currentGroupKey: null,
+        committedPdfCount: 0,
+        committedPageCount: 0,
+        completedDirectoryCount: 0,
+        pendingDirectoryCount: 0,
       },
     });
     hybrid.beforeResume = () => { throw new HybridCatalogError("hybrid-cloud-root-mismatch"); };
@@ -541,6 +562,7 @@ describe("WorkbenchController verification page state", () => {
         cloudMissingCount: 0,
         groupCount: 1,
         verifiedGroupCount: 0,
+        coveredCandidatePdfCount: 0,
         groups: [group],
       },
       batch: {
@@ -555,6 +577,14 @@ describe("WorkbenchController verification page state", () => {
         ignoredFileCount: 0,
         listRequestCount: 1,
         cumulativeListRequestCount: 1,
+        selectedGroupCount: 1,
+        completedGroupCount: 0,
+        currentGroupIndex: 0,
+        currentGroupKey: null,
+        committedPdfCount: 0,
+        committedPageCount: 0,
+        completedDirectoryCount: 0,
+        pendingDirectoryCount: 0,
       },
     });
     const fixture = controllerFixture({
@@ -599,6 +629,7 @@ describe("WorkbenchController verification page state", () => {
         cloudMissingCount: 0,
         groupCount: 1,
         verifiedGroupCount: 0,
+        coveredCandidatePdfCount: 0,
         groups: [group],
       },
       batch: {
@@ -613,6 +644,14 @@ describe("WorkbenchController verification page state", () => {
         ignoredFileCount: 0,
         listRequestCount: 1,
         cumulativeListRequestCount: 1,
+        selectedGroupCount: 1,
+        completedGroupCount: 0,
+        currentGroupIndex: 0,
+        currentGroupKey: null,
+        committedPdfCount: 0,
+        committedPageCount: 0,
+        completedDirectoryCount: 0,
+        pendingDirectoryCount: 0,
       },
     });
     hybrid.beforeStart = () => { throw new Error("baidu-access-unavailable"); };
@@ -647,6 +686,7 @@ describe("WorkbenchController verification page state", () => {
         cloudMissingCount: 0,
         groupCount: 1,
         verifiedGroupCount: 0,
+        coveredCandidatePdfCount: 0,
         groups: [group],
       },
     });
@@ -679,6 +719,14 @@ describe("WorkbenchController verification page state", () => {
       ignoredFileCount: 0,
       listRequestCount: 1,
       cumulativeListRequestCount: 1,
+      selectedGroupCount: 1,
+      completedGroupCount: 0,
+      currentGroupIndex: 0,
+      currentGroupKey: null,
+      committedPdfCount: 0,
+      committedPageCount: 0,
+      completedDirectoryCount: 0,
+      pendingDirectoryCount: 0,
     };
     const hybrid = new FakeHybridCatalogRuntime({
       status: "paused",
@@ -691,6 +739,7 @@ describe("WorkbenchController verification page state", () => {
         cloudMissingCount: 0,
         groupCount: 1,
         verifiedGroupCount: 0,
+        coveredCandidatePdfCount: 0,
         groups: [group],
       },
       batch: previousBatch,
@@ -735,6 +784,7 @@ describe("WorkbenchController verification page state", () => {
         cloudMissingCount: 0,
         groupCount: 1,
         verifiedGroupCount: 0,
+        coveredCandidatePdfCount: 0,
         groups: [group],
       },
     });

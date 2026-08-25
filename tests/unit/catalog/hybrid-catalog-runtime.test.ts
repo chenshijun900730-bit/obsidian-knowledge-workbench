@@ -224,24 +224,56 @@ const fixture = (options: Readonly<{
       status: "paused" as const,
       stopReason: "list-request-limit" as const,
       runOrdinal: 1,
-      remainingGroupCount: 1,
+      selectedGroupCount: 2,
+      completedGroupCount: 0,
+      remainingGroupCount: 2,
+      currentGroupIndex: 0,
+      currentGroupKey: "txt-root-items",
       pdfCount: 10,
       directoryCount: 2,
       ignoredFileCount: 0,
       listRequestCount: 300,
       cumulativeListRequestCount: 300,
+      committedPdfCount: 10,
+      committedPageCount: 1,
+      completedDirectoryCount: 2,
+      pendingDirectoryCount: 1,
+      progressMarker: {
+        committedPdfCount: 10,
+        committedPageCount: 1,
+        completedDirectoryCount: 2,
+        completedGroupCount: 0,
+        currentGroupIndex: 0,
+        pendingStateSha256: "4".repeat(64),
+      },
     })),
     runSegment: vi.fn(async (_input: LargeCatalogVerificationSegmentInput) => ({
       batchId: "batch-paused",
       status: "complete" as const,
       stopReason: "complete" as const,
       runOrdinal: 2,
+      selectedGroupCount: 1,
+      completedGroupCount: 1,
       remainingGroupCount: 0,
+      currentGroupIndex: 1,
+      currentGroupKey: null,
       pdfCount: 1,
       directoryCount: 1,
       ignoredFileCount: 0,
       listRequestCount: 1,
       cumulativeListRequestCount: 4,
+      committedPdfCount: 1,
+      committedPageCount: 1,
+      completedDirectoryCount: 1,
+      pendingDirectoryCount: 0,
+      progressMarker: {
+        committedPdfCount: 1,
+        committedPageCount: 1,
+        completedDirectoryCount: 1,
+        completedGroupCount: 1,
+        currentGroupIndex: 1,
+        pendingStateSha256: "5".repeat(64),
+      },
     })),
   };
   const dependencies: HybridCatalogRuntimeDependencies = {
@@ -289,11 +321,20 @@ describe("HybridCatalogRuntimeService", () => {
         cloudMissingCount: 1,
         groupCount: 3,
         verifiedGroupCount: 1,
+        coveredCandidatePdfCount: 1,
       },
       batch: {
         status: "paused",
         resumeAvailable: true,
         cumulativeListRequestCount: 3,
+        selectedGroupCount: 1,
+        completedGroupCount: 0,
+        currentGroupIndex: 0,
+        currentGroupKey: GROUP_A,
+        committedPdfCount: 0,
+        committedPageCount: 1,
+        completedDirectoryCount: 1,
+        pendingDirectoryCount: 1,
       },
     });
     expect(value.runtime.snapshot().active?.groups.map((group) => group.label))
@@ -303,6 +344,42 @@ describe("HybridCatalogRuntimeService", () => {
     (detached.batch as { batchId: string }).batchId = "mutated";
     expect(value.runtime.snapshot().batch?.batchId).toBe("batch-paused");
     expect(JSON.stringify(value.runtime.snapshot())).not.toContain("/Library");
+  });
+
+  it("counts complete overlay candidates instead of verified records", async () => {
+    const value = fixture();
+
+    await value.runtime.initialize();
+
+    expect(value.runtime.snapshot().active).toMatchObject({
+      pdfCount: 3,
+      verifiedCount: 1,
+      differenceCount: 1,
+      coveredCandidatePdfCount: 1,
+      verifiedGroupCount: 1,
+    });
+  });
+
+  it.each([
+    ["baidu-rate-limited", true],
+    ["baidu-token-expired", true],
+    ["baidu-access-unavailable", true],
+    ["baidu-permission-denied", false],
+    ["baidu-not-found", false],
+    ["invalid-baidu-response", false],
+    ["hybrid-snapshot-corrupt", false],
+  ] as const)("maps %s to resumeAvailable=%s", async (stopReason, resumeAvailable) => {
+    const latest = {
+      ...pausedCheckpoint(),
+      status: "partial" as const,
+      stopReason,
+      errorCodeCounts: { [stopReason]: 1 },
+    };
+    const value = fixture({ latest });
+
+    await value.runtime.initialize();
+
+    expect(value.runtime.snapshot().batch?.resumeAvailable).toBe(resumeAvailable);
   });
 
   it("does not offer resume for a persisted path-not-found failure", async () => {
@@ -389,9 +466,23 @@ describe("HybridCatalogRuntimeService", () => {
     expect(startInput?.signal).toBeInstanceOf(AbortSignal);
     expect(value.runtime.snapshot()).toMatchObject({
       status: "paused",
-      batch: { batchId: "batch-new", resumeAvailable: true, listRequestCount: 300 },
+      batch: {
+        batchId: "batch-new",
+        resumeAvailable: true,
+        listRequestCount: 300,
+        selectedGroupCount: 2,
+        completedGroupCount: 0,
+        currentGroupIndex: 0,
+        currentGroupKey: "txt-root-items",
+        committedPdfCount: 10,
+        committedPageCount: 1,
+        completedDirectoryCount: 2,
+        pendingDirectoryCount: 1,
+      },
     });
     expect(JSON.stringify(value.runtime.snapshot())).not.toContain("/Synthetic");
+    expect(JSON.stringify(value.runtime.snapshot())).not.toContain("pendingStateSha256");
+    expect(value.store.loadActiveCandidates).toHaveBeenCalledTimes(2);
 
     await expect(value.runtime.startLargeVerification({
       cloudRoot: "/Synthetic",

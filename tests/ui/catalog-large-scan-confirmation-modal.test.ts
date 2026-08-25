@@ -152,6 +152,7 @@ describe("large catalog scan confirmation", () => {
         cloudMissingCount: 0,
         groupCount: 1,
         verifiedGroupCount: 0,
+        coveredCandidatePdfCount: 0,
         groups: [{
           groupKey,
           label: "Science",
@@ -172,6 +173,14 @@ describe("large catalog scan confirmation", () => {
         ignoredFileCount: 0,
         listRequestCount: 300,
         cumulativeListRequestCount: 300,
+        selectedGroupCount: 1,
+        completedGroupCount: 0,
+        currentGroupIndex: 0,
+        currentGroupKey: null,
+        committedPdfCount: 0,
+        committedPageCount: 0,
+        completedDirectoryCount: 0,
+        pendingDirectoryCount: 0,
       },
     });
     const confirmation = { request: vi.fn(async () => true) };
@@ -223,6 +232,7 @@ describe("large catalog scan confirmation", () => {
         cloudMissingCount: 0,
         groupCount: 1,
         verifiedGroupCount: 0,
+        coveredCandidatePdfCount: 0,
         groups: [{
           groupKey,
           label: "Science",

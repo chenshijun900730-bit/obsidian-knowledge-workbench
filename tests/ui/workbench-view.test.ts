@@ -230,6 +230,7 @@ describe("workbench", () => {
           cloudMissingCount: 0,
           groupCount: 1,
           verifiedGroupCount: 0,
+          coveredCandidatePdfCount: 0,
           groups: [{
             groupKey,
             label: "Literature",
@@ -373,6 +374,7 @@ describe("workbench", () => {
       cloudMissingCount: 0,
       groupCount: 1,
       verifiedGroupCount: 0,
+      coveredCandidatePdfCount: 0,
       groups: [{
         groupKey,
         label: "Science",
@@ -393,6 +395,14 @@ describe("workbench", () => {
       ignoredFileCount: 0,
       listRequestCount: 1,
       cumulativeListRequestCount: 1,
+      selectedGroupCount: 1,
+      completedGroupCount: 0,
+      currentGroupIndex: 0,
+      currentGroupKey: null,
+      committedPdfCount: 0,
+      committedPageCount: 0,
+      completedDirectoryCount: 0,
+      pendingDirectoryCount: 0,
     };
     const hybrid = new FakeHybridCatalogRuntime({ status: "paused", active, batch: pausedBatch });
     const connection = new FakeCloudCatalogConnectionRuntime({ status: "authorized" });
@@ -500,6 +510,7 @@ describe("workbench", () => {
       cloudMissingCount: 0,
       groupCount: 1,
       verifiedGroupCount: 0,
+      coveredCandidatePdfCount: 0,
       groups: [{
         groupKey,
         label: "Science",
@@ -523,6 +534,14 @@ describe("workbench", () => {
         ignoredFileCount: 0,
         listRequestCount: 1,
         cumulativeListRequestCount: 1,
+        selectedGroupCount: 1,
+        completedGroupCount: 0,
+        currentGroupIndex: 0,
+        currentGroupKey: null,
+        committedPdfCount: 0,
+        committedPageCount: 0,
+        completedDirectoryCount: 0,
+        pendingDirectoryCount: 0,
       },
     });
     let confirmationCalls = 0;

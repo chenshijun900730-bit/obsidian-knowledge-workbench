@@ -296,6 +296,7 @@ describe("hybrid catalog settings", () => {
         cloudMissingCount: 0,
         groupCount: 6,
         verifiedGroupCount: 0,
+        coveredCandidatePdfCount: 0,
         groups: Array.from({ length: 6 }, (_, index) => group(index + 1)),
       },
     };
@@ -430,6 +431,7 @@ describe("hybrid catalog settings", () => {
         cloudMissingCount: 0,
         groupCount: 1,
         verifiedGroupCount: 0,
+        coveredCandidatePdfCount: 0,
         groups: [group(1)],
       },
     };
@@ -496,6 +498,7 @@ describe("hybrid catalog settings", () => {
         cloudMissingCount: 0,
         groupCount: 1,
         verifiedGroupCount: 0,
+        coveredCandidatePdfCount: 0,
         groups: [group(1)],
       },
     };
@@ -565,7 +568,7 @@ describe("hybrid catalog settings", () => {
       active: {
         importedAt: 100, pdfCount: 1, unverifiedCount: 1, verifiedCount: 0,
         differenceCount: 0, cloudMissingCount: 0, groupCount: 1,
-        verifiedGroupCount: 0, groups: [group(1)],
+        verifiedGroupCount: 0, coveredCandidatePdfCount: 0, groups: [group(1)],
       },
       batch: {
         batchId: "batch-settings-paused",
@@ -579,6 +582,14 @@ describe("hybrid catalog settings", () => {
         ignoredFileCount: 0,
         listRequestCount: 12,
         cumulativeListRequestCount: 312,
+        selectedGroupCount: 1,
+        completedGroupCount: 0,
+        currentGroupIndex: 0,
+        currentGroupKey: null,
+        committedPdfCount: 0,
+        committedPageCount: 0,
+        completedDirectoryCount: 0,
+        pendingDirectoryCount: 0,
       },
     };
     const controller = {
@@ -649,7 +660,7 @@ describe("hybrid catalog settings", () => {
       active: {
         importedAt: 100, pdfCount: 1, unverifiedCount: 1, verifiedCount: 0,
         differenceCount: 0, cloudMissingCount: 0, groupCount: 1,
-        verifiedGroupCount: 0, groups: [group(1)],
+        verifiedGroupCount: 0, coveredCandidatePdfCount: 0, groups: [group(1)],
       },
       batch: {
         batchId: "batch-settings-partial",
@@ -663,6 +674,14 @@ describe("hybrid catalog settings", () => {
         ignoredFileCount: 0,
         listRequestCount: 1,
         cumulativeListRequestCount: 1,
+        selectedGroupCount: 1,
+        completedGroupCount: 0,
+        currentGroupIndex: 0,
+        currentGroupKey: null,
+        committedPdfCount: 0,
+        committedPageCount: 0,
+        completedDirectoryCount: 0,
+        pendingDirectoryCount: 0,
       },
     };
     const controller = {
