@@ -239,6 +239,15 @@ const fixture = (options: Readonly<{
     }),
   };
   const store = {
+    loadActiveCandidateDescriptor: vi.fn(async () => activeCandidates?.descriptor ?? null),
+    loadActiveCandidateGroups: vi.fn(async (groupKeys: readonly string[]) => {
+      if (activeCandidates === null) return null;
+      const selected = new Set(groupKeys);
+      return {
+        descriptor: activeCandidates.descriptor,
+        records: activeCandidates.records.filter((record) => selected.has(record.topLevelGroupId)),
+      };
+    }),
     loadActiveCandidates: vi.fn(async () => activeCandidates),
     loadActiveUnified: vi.fn(async () => activeUnified),
     loadActiveOverlays: vi.fn(async () => [{

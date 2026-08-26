@@ -64,6 +64,22 @@ class MemoryHybridCatalogStore implements CandidateCatalogStorePort {
   }> | null> {
     return this.active;
   }
+
+  async loadActiveCandidateDescriptor(): Promise<CandidateCatalogDescriptor | null> {
+    return this.active?.descriptor ?? null;
+  }
+
+  async loadActiveCandidateGroups(groupKeys: readonly string[]): Promise<Readonly<{
+    descriptor: CandidateCatalogDescriptor;
+    records: readonly TxtCandidateRecordV1[];
+  }> | null> {
+    if (this.active === null) return null;
+    const selected = new Set(groupKeys);
+    return {
+      descriptor: this.active.descriptor,
+      records: this.active.records.filter((record) => selected.has(record.topLevelGroupId)),
+    };
+  }
 }
 
 describe("CatalogTxtImportService", () => {

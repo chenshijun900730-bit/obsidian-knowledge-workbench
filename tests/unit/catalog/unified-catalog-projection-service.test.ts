@@ -101,6 +101,16 @@ class ProjectionStore implements UnifiedCatalogStorePort {
   }
 
   async createCandidateImport(): Promise<CandidateImportWriter> { throw new Error("not-used"); }
+  async loadActiveCandidateDescriptor() {
+    return candidateDescriptor(this.candidates.length);
+  }
+  async loadActiveCandidateGroups(groupKeys: readonly string[]) {
+    const selected = new Set(groupKeys);
+    return {
+      descriptor: candidateDescriptor(this.candidates.length),
+      records: this.candidates.filter((record) => selected.has(record.topLevelGroupId)),
+    };
+  }
   async loadActiveCandidates() {
     return { descriptor: candidateDescriptor(this.candidates.length), records: this.candidates };
   }

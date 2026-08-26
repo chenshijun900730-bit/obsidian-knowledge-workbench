@@ -1,7 +1,7 @@
 import { mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { LocalHybridCatalogAdapter } from "../../../src/adapters/local-hybrid-catalog-adapter";
 import type { BaiduCatalogSourcePort } from "../../../src/catalog/catalog-ports";
 import { CatalogReconciliationService } from "../../../src/catalog/catalog-reconciliation-service";
@@ -210,6 +210,25 @@ describe("LargeCatalogVerificationService", () => {
     });
     expect(result).toMatchObject({ status: "complete", stopReason: "complete" });
     expect(source.requests).toEqual([{ path: "/Library/Synthetic", start: 0 }]);
+  });
+
+  it("prepares a selected group without loading the full candidate catalog", async () => {
+    const source = new ScriptedSource([]);
+    const { adapter, service } = await harness(source);
+    const fullLoad = vi.spyOn(adapter, "loadActiveCandidates")
+      .mockRejectedValue(new Error("full-candidate-load-forbidden"));
+
+    await expect(service.prepare({
+      batchId: "batch-selected-read",
+      sourceImportSha256: HASH_A,
+      cloudRoot: "/Library",
+      groups: [selection()],
+    })).resolves.toBeUndefined();
+
+    expect(fullLoad).not.toHaveBeenCalled();
+    expect(source.requests).toEqual([]);
+    expect((await adapter.loadBatch("batch-selected-read"))?.checkpoint)
+      .toMatchObject({ selectedGroupCount: 1, status: "scanning" });
   });
 
   it("emits aggregate progress only after persisted boundaries", async () => {

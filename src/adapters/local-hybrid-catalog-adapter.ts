@@ -11,6 +11,7 @@ import {
   type FileHandle,
 } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, parse, resolve, sep } from "node:path";
+import { StringDecoder } from "node:string_decoder";
 import {
   decodeCandidateCatalogDescriptor,
   decodeCatalogDifferenceRecord,
@@ -62,6 +63,7 @@ const MAX_BATCH_PAGE_BYTES = 64 * 1024 * 1024;
 const SAFE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
 const HASH_PATTERN = /^[a-f0-9]{64}$/u;
 const GROUP_PATTERN = /^(?:txt-root-items|group:[a-f0-9]{64})$/u;
+const CANDIDATE_GROUP_FIELD_PATTERN = /"topLevelGroupId":"(txt-root-items|group:[a-f0-9]{64})"/u;
 const CATALOG_ID_PATTERN = /^(?:txt:[a-f0-9]{64}|baidu:(?:0|[1-9]\d*))$/u;
 
 export interface HybridAtomicRenamePort {
@@ -541,9 +543,9 @@ export class LocalHybridCatalogAdapter implements HybridCatalogStorePort {
     };
   }
 
-  async loadActiveCandidates(): Promise<Readonly<{
+  async #loadActiveCandidateReference(): Promise<Readonly<{
     descriptor: CandidateCatalogDescriptor;
-    records: readonly TxtCandidateRecordV1[];
+    candidatesPath: string;
   }> | null> {
     await this.#ensureLayout();
     try {
@@ -573,13 +575,54 @@ export class LocalHybridCatalogAdapter implements HybridCatalogStorePort {
       || descriptor.importId !== active.importId
       || descriptor.pdfCount !== active.recordCount
     ) throw corrupt();
-    const records = await this.#verifyCandidates(
-      join(importDirectory, "candidates.ndjson"),
-      descriptor.pdfCount,
-      descriptor.candidateSha256,
+    return {
+      descriptor,
+      candidatesPath: join(importDirectory, "candidates.ndjson"),
+    };
+  }
+
+  async loadActiveCandidateDescriptor(): Promise<CandidateCatalogDescriptor | null> {
+    const active = await this.#loadActiveCandidateReference();
+    return active === null ? null : cloneDescriptor(active.descriptor);
+  }
+
+  async loadActiveCandidateGroups(groupKeys: readonly string[]): Promise<Readonly<{
+    descriptor: CandidateCatalogDescriptor;
+    records: readonly TxtCandidateRecordV1[];
+  }> | null> {
+    const selected = new Set(groupKeys);
+    if (
+      selected.size !== groupKeys.length
+      || groupKeys.some((groupKey) => !GROUP_PATTERN.test(groupKey))
+    ) throw corrupt();
+    const active = await this.#loadActiveCandidateReference();
+    if (active === null) return null;
+    const records = await this.#verifyCandidateGroups(
+      active.candidatesPath,
+      active.descriptor.pdfCount,
+      active.descriptor.candidateSha256,
+      selected,
     );
     return {
-      descriptor: cloneDescriptor(descriptor),
+      descriptor: cloneDescriptor(active.descriptor),
+      records: records.map(cloneCandidate),
+    };
+  }
+
+  async loadActiveCandidates(): Promise<Readonly<{
+    descriptor: CandidateCatalogDescriptor;
+    records: readonly TxtCandidateRecordV1[];
+  }> | null> {
+    const active = await this.#loadActiveCandidateReference();
+    if (active === null) return null;
+    const records = await this.#verifyCandidateGroups(
+      active.candidatesPath,
+      active.descriptor.pdfCount,
+      active.descriptor.candidateSha256,
+      null,
+    );
+    return {
+      descriptor: cloneDescriptor(active.descriptor),
       records: records.map(cloneCandidate),
     };
   }
@@ -654,13 +697,12 @@ export class LocalHybridCatalogAdapter implements HybridCatalogStorePort {
     else await this.#writeAtomic(this.#activeCandidatePath, candidateManifestRaw);
     if (unifiedManifestRaw === null) await rm(this.#activeUnifiedPath, { force: true });
     else await this.#writeAtomic(this.#activeUnifiedPath, unifiedManifestRaw);
-    const [restoredCandidates, restoredUnified] = await Promise.all([
-      this.loadActiveCandidates(),
+    const [restoredCandidate, restoredUnified] = await Promise.all([
+      this.loadActiveCandidateDescriptor(),
       this.loadActiveUnified(),
     ]);
     if (
-      JSON.stringify(restoredCandidates?.descriptor ?? null)
-        !== JSON.stringify(candidateDescriptor)
+      JSON.stringify(restoredCandidate) !== JSON.stringify(candidateDescriptor)
       || JSON.stringify(restoredUnified?.descriptor ?? null)
         !== JSON.stringify(input.unified)
     ) throw corrupt();
@@ -669,10 +711,10 @@ export class LocalHybridCatalogAdapter implements HybridCatalogStorePort {
   async createBatch(checkpointInput: LargeCatalogBatchCheckpointV3): Promise<void> {
     await this.#ensureBatchLayout();
     const checkpoint = this.#validatedBatchCheckpoint(checkpointInput);
-    const candidates = await this.loadActiveCandidates();
+    const candidate = await this.loadActiveCandidateDescriptor();
     if (
-      candidates === null
-      || candidates.descriptor.sourceSha256 !== checkpoint.sourceImportSha256
+      candidate === null
+      || candidate.sourceSha256 !== checkpoint.sourceImportSha256
       || checkpoint.runOrdinal !== 1
       || checkpoint.listRequestCount !== 0
       || checkpoint.cumulativeListRequestCount !== 0
@@ -1027,11 +1069,11 @@ export class LocalHybridCatalogAdapter implements HybridCatalogStorePort {
   async loadActiveOverlays(): Promise<readonly ActiveCatalogOverlay[]> {
     await this.#ensureOverlayLayout();
     const references = await this.#readActiveOverlayReferences();
-    const activeCandidates = await this.loadActiveCandidates();
-    if (activeCandidates === null) return [];
+    const activeCandidate = await this.loadActiveCandidateDescriptor();
+    if (activeCandidate === null) return [];
     const overlays: ActiveCatalogOverlay[] = [];
     for (const reference of references) {
-      if (reference.sourceImportSha256 !== activeCandidates.descriptor.sourceSha256) continue;
+      if (reference.sourceImportSha256 !== activeCandidate.sourceSha256) continue;
       const directory = this.#contained(join(this.#overlaysRoot, reference.overlayId));
       await this.#requirePrivateDirectory(directory);
       const descriptorRaw = (await this.#readPrivateFile(
@@ -1082,10 +1124,10 @@ export class LocalHybridCatalogAdapter implements HybridCatalogStorePort {
     input: CatalogReconciliationResult,
   ): Promise<CatalogOverlayDescriptor> {
     await this.#ensureOverlayLayout();
-    const activeCandidates = await this.loadActiveCandidates();
+    const activeCandidate = await this.loadActiveCandidateDescriptor();
     if (
-      activeCandidates === null
-      || activeCandidates.descriptor.sourceSha256 !== input.sourceImportSha256
+      activeCandidate === null
+      || activeCandidate.sourceSha256 !== input.sourceImportSha256
       || !HASH_PATTERN.test(input.sourceImportSha256)
       || !GROUP_PATTERN.test(input.topLevelGroupId)
       || !Number.isSafeInteger(input.completedAt)
@@ -1225,8 +1267,8 @@ export class LocalHybridCatalogAdapter implements HybridCatalogStorePort {
   }>): Promise<void> {
     await this.#ensureOverlayLayout();
     if (!GROUP_PATTERN.test(input.topLevelGroupId)) throw corrupt();
-    const activeCandidates = await this.loadActiveCandidates();
-    if (activeCandidates === null) throw corrupt();
+    const activeCandidate = await this.loadActiveCandidateDescriptor();
+    if (activeCandidate === null) throw corrupt();
     const references = await this.#readActiveOverlayReferences();
     let restored: ActiveOverlayReference | null = null;
     if (input.descriptor !== null) {
@@ -1235,7 +1277,7 @@ export class LocalHybridCatalogAdapter implements HybridCatalogStorePort {
       ));
       if (
         descriptor.topLevelGroupId !== input.topLevelGroupId
-        || descriptor.sourceImportSha256 !== activeCandidates.descriptor.sourceSha256
+        || descriptor.sourceImportSha256 !== activeCandidate.sourceSha256
       ) throw corrupt();
       const directory = this.#contained(join(this.#overlaysRoot, descriptor.overlayId));
       await this.#requirePrivateDirectory(directory);
@@ -1277,11 +1319,11 @@ export class LocalHybridCatalogAdapter implements HybridCatalogStorePort {
     assertNotAborted();
     await this.#ensureUnifiedLayout();
     assertNotAborted();
-    const candidates = await this.loadActiveCandidates();
+    const candidate = await this.loadActiveCandidateDescriptor();
     if (
-      candidates === null
+      candidate === null
       || !HASH_PATTERN.test(input.sourceImportSha256)
-      || candidates.descriptor.sourceSha256 !== input.sourceImportSha256
+      || candidate.sourceSha256 !== input.sourceImportSha256
       || !Number.isSafeInteger(input.completedAt)
       || input.completedAt < 0
       || input.records.length > MAX_UNIFIED_CATALOG_PDF_COUNT
@@ -1359,7 +1401,7 @@ export class LocalHybridCatalogAdapter implements HybridCatalogStorePort {
         schemaVersion: 2,
         snapshotId,
         sourceImportSha256: descriptor.sourceImportSha256,
-        candidateImportId: candidates.descriptor.importId,
+        candidateImportId: candidate.importId,
         descriptorSha256: sha256(descriptorRaw),
         recordCount: descriptor.recordCount,
         differenceCount: descriptor.differenceCount,
@@ -1411,13 +1453,13 @@ export class LocalHybridCatalogAdapter implements HybridCatalogStorePort {
       64 * 1024,
     )).toString("utf8");
     const active = decodeActiveUnifiedManifest(activeRaw);
-    const candidates = await this.loadActiveCandidates();
+    const candidate = await this.loadActiveCandidateDescriptor();
     if (
-      candidates === null
-      || candidates.descriptor.sourceSha256 !== active.sourceImportSha256
+      candidate === null
+      || candidate.sourceSha256 !== active.sourceImportSha256
       || (
         active.schemaVersion === 2
-        && candidates.descriptor.importId !== active.candidateImportId
+        && candidate.importId !== active.candidateImportId
       )
     ) {
       return null;
@@ -1988,22 +2030,86 @@ export class LocalHybridCatalogAdapter implements HybridCatalogStorePort {
     path: string,
     expectedCount: number,
     expectedSha256: string,
+  ): Promise<void> {
+    await this.#verifyCandidateGroups(path, expectedCount, expectedSha256, new Set());
+  }
+
+  async #verifyCandidateGroups(
+    path: string,
+    expectedCount: number,
+    expectedSha256: string,
+    selectedGroupKeys: ReadonlySet<string> | null,
   ): Promise<readonly TxtCandidateRecordV1[]> {
-    const content = await this.#readPrivateFile(path, MAX_CANDIDATE_BYTES);
-    if (sha256(content) !== expectedSha256) throw corrupt();
-    const raw = content.toString("utf8");
-    if (!raw.endsWith("\n")) throw corrupt();
-    const lines = raw.slice(0, -1).split("\n");
-    if (lines.length !== expectedCount || lines.some((line) => line.length === 0)) throw corrupt();
+    if (
+      !Number.isSafeInteger(expectedCount)
+      || expectedCount < 1
+      || !HASH_PATTERN.test(expectedSha256)
+    ) throw corrupt();
+    const contained = this.#contained(path);
     const records: TxtCandidateRecordV1[] = [];
-    const ids = new Set<string>();
-    for (const line of lines) {
-      const decoded = decodeTxtCandidateRecord(line);
-      if (`${line}\n` !== encodeTxtCandidateRecordLine(decoded) || ids.has(decoded.candidateId)) {
+    let count = 0;
+    let handle: FileHandle | undefined;
+    const hasher = createHash("sha256");
+    const decoder = new StringDecoder("utf8");
+    let carry = "";
+    const consume = (line: string): void => {
+      if (line.length === 0) throw corrupt();
+      const groupKey = selectedGroupKeys === null
+        ? null
+        : CANDIDATE_GROUP_FIELD_PATTERN.exec(line)?.[1] ?? null;
+      if (selectedGroupKeys === null || (groupKey !== null && selectedGroupKeys.has(groupKey))) {
+        const decoded = decodeTxtCandidateRecord(line);
+        if (`${line}\n` !== encodeTxtCandidateRecordLine(decoded)) throw corrupt();
+        records.push(decoded);
+      }
+      count += 1;
+      if (count > expectedCount) throw corrupt();
+    };
+    try {
+      const initial = await lstat(contained);
+      if (
+        !initial.isFile()
+        || initial.isSymbolicLink()
+        || (initial.mode & 0o777) !== FILE_MODE
+        || initial.size < 1
+        || initial.size > MAX_CANDIDATE_BYTES
+      ) throw corrupt();
+      handle = await open(contained, constants.O_RDONLY | constants.O_NOFOLLOW);
+      const opened = await handle.stat();
+      if (!sameFile(initial, opened)) throw corrupt();
+      const chunk = Buffer.allocUnsafe(64 * 1024);
+      while (true) {
+        const { bytesRead } = await handle.read(chunk, 0, chunk.length, null);
+        if (bytesRead === 0) break;
+        const bytes = chunk.subarray(0, bytesRead);
+        hasher.update(bytes);
+        const text = carry + decoder.write(bytes);
+        let offset = 0;
+        while (true) {
+          const end = text.indexOf("\n", offset);
+          if (end < 0) break;
+          consume(text.slice(offset, end));
+          offset = end + 1;
+        }
+        carry = text.slice(offset);
+      }
+      carry += decoder.end();
+      if (carry.length !== 0 || count !== expectedCount || hasher.digest("hex") !== expectedSha256) {
         throw corrupt();
       }
-      ids.add(decoded.candidateId);
-      records.push(decoded);
+      const completed = await handle.stat();
+      const completedPath = await lstat(contained);
+      if (!sameFile(initial, completed) || !sameFile(initial, completedPath)) throw corrupt();
+    } catch {
+      throw corrupt();
+    } finally {
+      if (handle !== undefined) {
+        try {
+          await handle.close();
+        } catch {
+          // Read-only cleanup cannot expose native details.
+        }
+      }
     }
     return records;
   }

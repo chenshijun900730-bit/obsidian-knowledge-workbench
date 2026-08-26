@@ -160,6 +160,30 @@ describe("LocalHybridCatalogAdapter", () => {
     expect(persisted).not.toContain("/private/");
   });
 
+  it("loads only selected candidate groups while preserving full-file integrity", async () => {
+    const root = await temporaryRoot();
+    const adapter = new LocalHybridCatalogAdapter(root);
+    const first = candidate();
+    const second: TxtCandidateRecordV1 = {
+      ...candidate("B.pdf"),
+      relativePath: "Other/B.pdf",
+      parentRelativePath: "Other",
+      topLevelGroupId: `group:${"d".repeat(64)}`,
+      hierarchyTags: ["folder/Other"],
+    };
+    const descriptor = await commit(adapter, "import-selected", [first, second]);
+
+    await expect(adapter.loadActiveCandidateDescriptor()).resolves.toEqual(descriptor);
+    await expect(adapter.loadActiveCandidateGroups([first.topLevelGroupId])).resolves.toEqual({
+      descriptor,
+      records: [first],
+    });
+    await expect(adapter.loadActiveCandidateGroups([second.topLevelGroupId])).resolves.toEqual({
+      descriptor,
+      records: [second],
+    });
+  });
+
   it("makes commit idempotent and rejects append after completion", async () => {
     const adapter = new LocalHybridCatalogAdapter(await temporaryRoot());
     const writer = await adapter.createCandidateImport("import-1");

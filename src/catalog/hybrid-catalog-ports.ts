@@ -35,6 +35,11 @@ export interface CandidateImportWriter {
 
 export interface CandidateCatalogStorePort {
   createCandidateImport(importId: string): Promise<CandidateImportWriter>;
+  loadActiveCandidateDescriptor(): Promise<CandidateCatalogDescriptor | null>;
+  loadActiveCandidateGroups(groupKeys: readonly string[]): Promise<Readonly<{
+    descriptor: CandidateCatalogDescriptor;
+    records: readonly TxtCandidateRecordV1[];
+  }> | null>;
   loadActiveCandidates(): Promise<Readonly<{
     descriptor: CandidateCatalogDescriptor;
     records: readonly TxtCandidateRecordV1[];

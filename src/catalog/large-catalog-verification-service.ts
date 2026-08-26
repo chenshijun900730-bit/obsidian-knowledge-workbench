@@ -159,7 +159,9 @@ export class LargeCatalogVerificationService {
     if (!HASH_PATTERN.test(input.sourceImportSha256)) {
       throw new HybridCatalogError("hybrid-batch-invalid");
     }
-    const candidates = await this.#store.loadActiveCandidates();
+    const candidates = await this.#store.loadActiveCandidateGroups(
+      input.groups.map((group) => group.groupKey),
+    );
     if (candidates === null || candidates.descriptor.sourceSha256 !== input.sourceImportSha256) {
       throw new HybridCatalogError("hybrid-batch-unavailable");
     }
@@ -665,7 +667,7 @@ export class LargeCatalogVerificationService {
     group: LargeCatalogBatchGroupV3,
     cloudRoot: string,
   ): Promise<void> {
-    const activeCandidates = await this.#store.loadActiveCandidates();
+    const activeCandidates = await this.#store.loadActiveCandidateGroups([group.groupKey]);
     const loaded = await this.#store.loadBatch(checkpoint.batchId);
     if (
       activeCandidates === null
