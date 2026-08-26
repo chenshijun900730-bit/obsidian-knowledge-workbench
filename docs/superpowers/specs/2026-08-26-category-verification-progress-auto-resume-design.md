@@ -1,6 +1,6 @@
 # Knowledge Workbench 分类核验可信进度与自动分段续跑设计
 
-- 状态：主界面、自动续跑规则与书面规格已获用户批准
+- 状态：已实现；自动化回归、normal build 与 acceptance build 已通过；真实百度核验待单独授权
 - 日期：2026-08-26
 - 适用产品：Knowledge Workbench for Obsidian
 - 目标版本：`v0.1.2`
