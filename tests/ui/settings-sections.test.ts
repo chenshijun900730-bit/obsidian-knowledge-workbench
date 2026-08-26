@@ -354,6 +354,82 @@ describe("shared grouped settings surface", () => {
     expect(verificationInput.disabled).toBe(true);
   });
 
+  it("keeps status visible and folds verification counters", () => {
+    const groupKey = `group:${"7".repeat(64)}`;
+    const controller = connectedControllerFixture({
+      hybridCatalog: () => ({
+        status: "paused",
+        active: {
+          importedAt: 1,
+          pdfCount: 68_959,
+          coveredCandidatePdfCount: 11_870,
+          unverifiedCount: 57_089,
+          verifiedCount: 10_000,
+          differenceCount: 1_870,
+          cloudMissingCount: 0,
+          groupCount: 24,
+          verifiedGroupCount: 7,
+          groups: [{
+            groupKey,
+            label: "Literature",
+            pdfCount: 252,
+            mode: "recursive",
+            verificationStatus: "unverified",
+          }],
+        },
+        batch: {
+          batchId: "batch-settings-details",
+          status: "paused",
+          stopReason: "pdf-limit",
+          resumeAvailable: true,
+          runOrdinal: 2,
+          selectedGroupCount: 1,
+          completedGroupCount: 0,
+          remainingGroupCount: 1,
+          currentGroupIndex: 0,
+          currentGroupKey: groupKey,
+          pdfCount: 9_500,
+          directoryCount: 120,
+          ignoredFileCount: 3,
+          listRequestCount: 27,
+          cumulativeListRequestCount: 427,
+          committedPdfCount: 11_870,
+          committedPageCount: 14,
+          completedDirectoryCount: 112,
+          pendingDirectoryCount: 8,
+          autoResumeState: "inactive",
+          autoSegmentIndex: 0,
+          autoSegmentLimit: LARGE_CATALOG_AUTO_CHAIN_MAX_SEGMENTS,
+        },
+      }),
+      subscribeHybridCatalog: () => () => undefined,
+      previewCatalogTxt: async () => undefined,
+      requestCatalogTxtImport: async () => undefined,
+      requestLargeCatalogVerification: async () => undefined,
+      requestResumeLargeCatalogVerification: async () => undefined,
+      cancelLargeCatalogVerification: () => undefined,
+    });
+    const root = createTestDiv();
+    createSettingsSectionsSurface({
+      app: {} as App,
+      controller,
+      policy: NORMAL_RUNTIME_POLICY,
+    }).render(root, "zh-CN");
+
+    expect(root.querySelector('[data-catalog-hybrid-batch-summary="true"]')?.textContent)
+      .toContain("已暂停");
+    const details = root.querySelector<HTMLDetailsElement>(
+      'details[data-settings-verification-details="true"]',
+    )!;
+    expect(details.open).toBe(false);
+    expect(details.querySelector('[data-catalog-hybrid-batch-requests="true"]')?.textContent)
+      .toContain("427");
+    expect(details.querySelector('[data-catalog-hybrid-batch-queue="true"]')?.textContent)
+      .toContain("8");
+    expect(details.querySelector('[data-catalog-hybrid-batch-stop="true"]')?.textContent)
+      .toContain("达到 PDF 上限");
+  });
+
   it("admits only one pending scan or category verification action", async () => {
     const groupKey = `group:${"e".repeat(64)}`;
     const scanGate = deferred();

@@ -874,8 +874,23 @@ export function createSettingsSectionsSurface(
         batchSummary.dataset.catalogHybridBatchSummary = "true";
         const batchRequests = doc.createElement("p");
         batchRequests.dataset.catalogHybridBatchRequests = "true";
+        const batchQueue = doc.createElement("p");
+        batchQueue.dataset.catalogHybridBatchQueue = "true";
+        const batchStop = doc.createElement("p");
+        batchStop.dataset.catalogHybridBatchStop = "true";
         const batchGuidance = doc.createElement("p");
         batchGuidance.dataset.catalogHybridBatchGuidance = "true";
+        const verificationDetails = doc.createElement("details");
+        verificationDetails.dataset.settingsVerificationDetails = "true";
+        const verificationDetailsTitle = doc.createElement("summary");
+        verificationDetailsTitle.textContent = i18n.t("verification.details.title");
+        verificationDetails.append(
+          verificationDetailsTitle,
+          batchRequests,
+          batchQueue,
+          batchStop,
+          batchGuidance,
+        );
 
         const txtLabel = doc.createElement("label");
         txtLabel.className = "knowledge-workbench__settings-row";
@@ -1066,6 +1081,12 @@ export function createSettingsSectionsSurface(
             segment: i18n.number(current?.batch?.listRequestCount ?? 0),
             cumulative: i18n.number(current?.batch?.cumulativeListRequestCount ?? 0),
           });
+          batchQueue.textContent = i18n.t("settings.surface.batchQueue", {
+            count: i18n.number(current?.batch?.pendingDirectoryCount ?? 0),
+          });
+          batchStop.textContent = i18n.t("settings.surface.batchStop", {
+            reason: localizedStopReason(current?.batch?.stopReason),
+          });
           batchGuidance.hidden = current?.batch?.stopReason !== "baidu-not-found";
           batchGuidance.textContent = current?.batch?.stopReason === "baidu-not-found"
             ? i18n.t("settings.surface.notFoundGuidance")
@@ -1152,8 +1173,7 @@ export function createSettingsSectionsSurface(
           activeSummary,
           previewSummary,
           batchSummary,
-          batchRequests,
-          batchGuidance,
+          verificationDetails,
           txtLabel,
           txtActions,
           selectionTitle,

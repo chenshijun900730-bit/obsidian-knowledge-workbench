@@ -44,7 +44,10 @@ import {
   FakeCloudCatalogRuntime,
   FakeHybridCatalogRuntime,
 } from "../fakes/fake-cloud-catalog-runtime";
-import { HybridCatalogError } from "../../src/catalog/hybrid-catalog-types";
+import {
+  HybridCatalogError,
+} from "../../src/catalog/hybrid-catalog-types";
+import type { LargeCatalogBatchSummary } from "../../src/catalog/hybrid-catalog-runtime";
 
 const createTestDiv = (): HTMLDivElement => document.createElementNS(
   "http://www.w3.org/1999/xhtml",
@@ -330,6 +333,103 @@ describe("workbench", () => {
     expect(replacement.selectionStart).toBe(4);
     expect(replacement.selectionEnd).toBe(12);
     expect(replacement.selectionDirection).toBe("forward");
+    root.remove();
+  });
+
+  it("preserves verification details and focus while a new segment resets its quota", () => {
+    const root = createTestDiv();
+    document.body.append(root);
+    const groupKey = `group:${"7".repeat(64)}`;
+    const active = {
+      importedAt: 1,
+      pdfCount: 68_959,
+      coveredCandidatePdfCount: 11_870,
+      unverifiedCount: 57_089,
+      verifiedCount: 10_000,
+      differenceCount: 1_870,
+      cloudMissingCount: 0,
+      groupCount: 24,
+      verifiedGroupCount: 7,
+      groups: [{
+        groupKey,
+        label: "Literature",
+        pdfCount: 252,
+        mode: "recursive" as const,
+        verificationStatus: "unverified" as const,
+      }],
+    };
+    const batch = (
+      overrides: Partial<LargeCatalogBatchSummary> = {},
+    ): LargeCatalogBatchSummary => ({
+      batchId: "batch-rerender",
+      status: "scanning",
+      stopReason: null,
+      resumeAvailable: false,
+      runOrdinal: 1,
+      selectedGroupCount: 1,
+      completedGroupCount: 0,
+      remainingGroupCount: 1,
+      currentGroupIndex: 0,
+      currentGroupKey: groupKey,
+      pdfCount: 9_500,
+      directoryCount: 120,
+      ignoredFileCount: 3,
+      listRequestCount: 27,
+      cumulativeListRequestCount: 427,
+      committedPdfCount: 11_870,
+      committedPageCount: 14,
+      completedDirectoryCount: 112,
+      pendingDirectoryCount: 8,
+      autoResumeState: "running",
+      autoSegmentIndex: 1,
+      autoSegmentLimit: LARGE_CATALOG_AUTO_CHAIN_MAX_SEGMENTS,
+      ...overrides,
+    });
+    const firstModel = {
+      ...populatedWorkbenchModel(),
+      activeTab: "verification" as const,
+      verificationRoot: "/Synthetic",
+      selectedVerificationGroupKeys: [groupKey],
+      catalogConnection: { status: "authorized" as const },
+      hybridCatalog: { status: "scanning" as const, active, batch: batch() },
+    };
+    renderWorkbench(root, firstModel, noOpWorkbenchActions());
+    const details = root.querySelector<HTMLDetailsElement>('[data-verification-run-details]')!;
+    details.open = true;
+    const summary = details.querySelector<HTMLElement>("summary")!;
+    summary.focus();
+
+    const nextSegmentModel = {
+      ...firstModel,
+      hybridCatalog: {
+        status: "scanning" as const,
+        active,
+        batch: batch({
+          runOrdinal: 2,
+          pdfCount: 200,
+          directoryCount: 2,
+          ignoredFileCount: 0,
+          listRequestCount: 1,
+          cumulativeListRequestCount: 428,
+          committedPdfCount: 12_070,
+          committedPageCount: 15,
+          completedDirectoryCount: 113,
+          pendingDirectoryCount: 7,
+          autoSegmentIndex: 2,
+        }),
+      },
+    };
+    renderWorkbench(root, nextSegmentModel, noOpWorkbenchActions());
+
+    const rerendered = root.querySelector<HTMLDetailsElement>('[data-verification-run-details]')!;
+    expect(rerendered.open).toBe(true);
+    expect(document.activeElement).toBe(rerendered.querySelector("summary"));
+    expect(rerendered.querySelector('[data-verification-run-requests]')?.textContent)
+      .toContain("428");
+    expect(root.querySelector<HTMLProgressElement>('[data-verification-segment-budget]')?.value)
+      .toBe(200);
+    expect(root.querySelector<HTMLProgressElement>('[data-verification-overall-progress]')?.value)
+      .toBe(11_870);
     root.remove();
   });
 

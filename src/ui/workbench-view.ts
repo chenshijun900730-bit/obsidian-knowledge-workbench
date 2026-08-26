@@ -242,6 +242,9 @@ export function renderWorkbench(
         direction: (active as HTMLInputElement).selectionDirection,
       }
     : null;
+  const verificationRunDetailsOpen = root.querySelector<HTMLDetailsElement>(
+    "details[data-verification-run-details]",
+  )?.open ?? false;
   disposeVerificationPage(root);
   root.replaceChildren();
   root.classList.add("knowledge-workbench");
@@ -285,6 +288,7 @@ export function renderWorkbench(
       rootPath: model.verificationRoot,
       rootLocked: model.verificationRootLocked,
       actionMessageCode: model.verificationActionMessageCode,
+      runDetailsOpen: verificationRunDetailsOpen,
       selectedGroupKeys: model.selectedVerificationGroupKeys,
       connection: model.catalogConnection,
       hybrid: model.hybridCatalog,
