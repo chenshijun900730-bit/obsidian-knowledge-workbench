@@ -74,6 +74,15 @@ describe("dedicated-vault acceptance evidence", () => {
     expect(config).toMatch(/name: "acceptance-heavy"[\s\S]*?groupOrder: 2/u);
   });
 
+  it("runs acceptance workflows without worker or file-level parallelism", () => {
+    const config = readFileSync(resolve(process.cwd(), "vitest.config.ts"), "utf8");
+    const acceptanceWorkflows = config.match(
+      /name: "acceptance-workflows"([\s\S]*?)name: "acceptance-heavy"/u,
+    )?.[1] ?? "";
+    expect(acceptanceWorkflows).toContain("maxWorkers: 1");
+    expect(acceptanceWorkflows).toContain("fileParallelism: false");
+  });
+
   it("accepts only the documented finite metrics and fixed status enums", () => {
     expect(decodeAcceptanceEvidence(valid())).toEqual(valid());
   });
