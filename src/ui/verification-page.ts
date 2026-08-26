@@ -8,12 +8,12 @@ import {
   type CatalogMessageCode,
   type VerificationActionMessageCode,
 } from "./catalog-message-presenter";
-import { presentCatalogStopReason } from "./catalog-stop-reason-presenter";
 import { connectionCanVerify } from "./verification-connection-semantics";
 import { normalizeCatalogScanRoot } from "../catalog/catalog-path";
 import {
   createCloudDirectoryField,
 } from "./cloud-directory-field";
+import { renderVerificationProgress } from "./verification-progress";
 
 export { connectionCanVerify } from "./verification-connection-semantics";
 
@@ -32,6 +32,7 @@ export interface VerificationPageModel {
   readonly rootLocked: boolean;
   readonly selectedGroupKeys: readonly string[];
   readonly actionMessageCode?: VerificationActionMessageCode;
+  readonly runDetailsOpen?: boolean;
   readonly connection?: CloudCatalogConnectionViewModel;
   readonly hybrid?: HybridCatalogViewModel;
   readonly actions: VerificationPageActions;
@@ -268,38 +269,21 @@ export function renderVerificationPage(
   scopeEditor.append(groupTitle, choices);
   root.append(scopeEditor);
 
-  if (batch !== undefined) {
-    const progress = doc.createElement("section");
-    progress.className = "knowledge-workbench__verification-progress";
-    const counts = doc.createElement("p");
-    counts.textContent = i18n.t("verification.batch.counts", {
-      pdf: i18n.number(batch.pdfCount),
-      directory: i18n.number(batch.directoryCount),
-      remaining: i18n.number(batch.remainingGroupCount),
-    });
-    const requests = doc.createElement("p");
-    requests.textContent = i18n.t("verification.batch.requests", {
-      current: i18n.number(batch.listRequestCount),
-      cumulative: i18n.number(batch.cumulativeListRequestCount),
-    });
-    progress.append(counts, requests);
-    if (batch.stopReason !== null && !busy && !currentConnectionFault) {
-      const stop = doc.createElement("p");
-      stop.textContent = i18n.t("verification.batch.stop", {
-        reason: presentCatalogStopReason(batch.stopReason, i18n),
-      });
-      progress.append(stop);
-    }
-    if (
-      batch.resumeAvailable
-      && (model.hybrid?.status === "paused" || model.hybrid?.status === "partial")
-      && !currentConnectionFault
-    ) {
-      const preserved = doc.createElement("p");
-      preserved.textContent = i18n.t("verification.checkpoint.preserved");
-      progress.append(preserved);
-    }
-    root.append(progress);
+  if (active !== undefined && batch !== undefined) {
+    const currentGroupLabel = active.groups.find(
+      (group) => group.groupKey === batch.currentGroupKey,
+    )?.label ?? null;
+    const progressBatch = busy || currentConnectionFault
+      ? { ...batch, stopReason: null }
+      : batch;
+    root.append(renderVerificationProgress(doc, {
+      active,
+      batch: progressBatch,
+      busy,
+      currentGroupLabel,
+      detailsOpen: model.runDetailsOpen ?? false,
+      i18n,
+    }));
   }
 
   const actionRow = doc.createElement("div");
@@ -308,7 +292,7 @@ export function renderVerificationPage(
     const cancel = doc.createElement("button");
     cancel.type = "button";
     cancel.dataset.action = "cancel-verification";
-    cancel.textContent = i18n.t("verification.action.cancel");
+    cancel.textContent = i18n.t("verification.action.pause");
     cancel.addEventListener("click", () => {
       actions.onCancel();
       const requested = doc.createElement("p");

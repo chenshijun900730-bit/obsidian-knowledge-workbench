@@ -579,3 +579,134 @@
     transition: none !important;
   }
 }
+
+.knowledge-workbench__verification-progress {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--size-4-3);
+  margin-block: var(--size-4-4);
+}
+
+.knowledge-workbench__verification-progress-card,
+.knowledge-workbench__verification-auto-state,
+.knowledge-workbench__verification-progress details {
+  padding: var(--size-4-3);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-m);
+  background: var(--background-secondary);
+}
+
+.knowledge-workbench__verification-progress-heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--size-4-2);
+}
+
+.knowledge-workbench__verification-progress-heading h3,
+.knowledge-workbench__verification-progress-heading span,
+.knowledge-workbench__verification-progress-hint,
+.knowledge-workbench__verification-auto-state {
+  margin: 0;
+}
+
+.knowledge-workbench__verification-progress-heading span,
+.knowledge-workbench__verification-progress-hint {
+  color: var(--text-muted);
+}
+
+.knowledge-workbench__verification-progress progress,
+.knowledge-workbench__verification-current-indicator {
+  width: 100%;
+  height: var(--size-4-2);
+  margin-block-start: var(--size-4-2);
+  overflow: hidden;
+  border: 0;
+  border-radius: var(--radius-s);
+  background: var(--background-modifier-border);
+}
+
+.knowledge-workbench__verification-progress progress::-webkit-progress-bar {
+  background: var(--background-modifier-border);
+}
+
+.knowledge-workbench__verification-progress progress::-webkit-progress-value,
+.knowledge-workbench__verification-progress progress::-moz-progress-bar {
+  background: var(--interactive-accent);
+}
+
+.knowledge-workbench__verification-current-indicator {
+  position: relative;
+}
+
+.knowledge-workbench__verification-current-indicator.is-running::after {
+  position: absolute;
+  inset-block: 0;
+  width: 34%;
+  border-radius: inherit;
+  background: var(--interactive-accent);
+  content: "";
+  animation: knowledge-workbench-verification-activity 1.4s ease-in-out infinite;
+}
+
+.knowledge-workbench__verification-auto-state {
+  grid-column: 1 / -1;
+  border-inline-start: var(--size-4-1) solid var(--text-success);
+}
+
+.knowledge-workbench__verification-progress details {
+  grid-column: 1 / -1;
+}
+
+.knowledge-workbench__verification-progress details > summary {
+  cursor: pointer;
+  font-weight: var(--font-semibold);
+}
+
+.knowledge-workbench__verification-progress dl {
+  display: grid;
+  grid-template-columns: minmax(12rem, 1fr) minmax(0, 1fr);
+  gap: var(--size-4-1) var(--size-4-3);
+  margin-block-end: 0;
+}
+
+.knowledge-workbench__verification-progress dt {
+  color: var(--text-muted);
+}
+
+.knowledge-workbench__verification-progress dd {
+  margin: 0;
+  text-align: end;
+}
+
+@keyframes knowledge-workbench-verification-activity {
+  from { transform: translateX(-110%); }
+  to { transform: translateX(300%); }
+}
+
+@media (max-width: 760px) {
+  .knowledge-workbench__verification-progress {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .knowledge-workbench__verification-progress-card,
+  .knowledge-workbench__verification-auto-state,
+  .knowledge-workbench__verification-progress details {
+    grid-column: 1;
+  }
+
+  .knowledge-workbench__verification-progress dl {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .knowledge-workbench__verification-progress dd {
+    text-align: start;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .knowledge-workbench__verification-current-indicator::after {
+    animation: none;
+    transform: none;
+  }
+}

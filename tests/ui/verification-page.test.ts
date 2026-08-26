@@ -1,7 +1,10 @@
 // @vitest-environment jsdom
 import { describe, expect, it, vi } from "vitest";
 import type { CloudCatalogConnectionViewModel } from "../../src/catalog/cloud-catalog-runtime";
-import type { HybridCatalogViewModel } from "../../src/catalog/hybrid-catalog-runtime";
+import type {
+  HybridCatalogViewModel,
+  LargeCatalogBatchSummary,
+} from "../../src/catalog/hybrid-catalog-runtime";
 import { createWorkbenchI18n } from "../../src/i18n/workbench-i18n";
 import {
   renderVerificationPage,
@@ -274,6 +277,53 @@ describe("verification page", () => {
     expect(root.textContent).toContain("正在取消");
     expect(root.textContent).not.toContain("检查点与已完成");
     expect(root.querySelector('[data-action="start-verification"]')).toBeNull();
+  });
+
+  it("shows only pause while the automatic chain is running and resume after its limit", () => {
+    const runningBatch: LargeCatalogBatchSummary = {
+      batchId: "batch-actions",
+      status: "scanning",
+      stopReason: null,
+      resumeAvailable: false,
+      runOrdinal: 2,
+      selectedGroupCount: 1,
+      completedGroupCount: 0,
+      remainingGroupCount: 1,
+      currentGroupIndex: 0,
+      currentGroupKey: GROUP_KEY,
+      pdfCount: 200,
+      directoryCount: 2,
+      ignoredFileCount: 0,
+      listRequestCount: 1,
+      cumulativeListRequestCount: 428,
+      committedPdfCount: 12_070,
+      committedPageCount: 15,
+      completedDirectoryCount: 113,
+      pendingDirectoryCount: 7,
+      autoResumeState: "running",
+      autoSegmentIndex: 2,
+      autoSegmentLimit: LARGE_CATALOG_AUTO_CHAIN_MAX_SEGMENTS,
+    };
+    const root = testRoot();
+    renderVerificationPage(root, model({ status: "scanning", active, batch: runningBatch }));
+    expect(root.querySelector('[data-action="resume-verification"]')).toBeNull();
+    expect(root.querySelector('[data-action="cancel-verification"]')?.textContent)
+      .toBe("暂停核验");
+
+    renderVerificationPage(root, model({
+      status: "paused",
+      active,
+      batch: {
+        ...runningBatch,
+        status: "paused",
+        stopReason: "pdf-limit",
+        resumeAvailable: true,
+        autoResumeState: "stopped-limit",
+        autoSegmentIndex: LARGE_CATALOG_AUTO_CHAIN_MAX_SEGMENTS,
+      },
+    }));
+    expect(root.querySelector('[data-action="resume-verification"]')).not.toBeNull();
+    expect(root.textContent).toContain("已达到 12 段自动续跑安全上限");
   });
 
   it.each(["authorized", "scanning", "paused", "partial"] as const)(
