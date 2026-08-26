@@ -170,6 +170,7 @@ export class FakeHybridCatalogRuntime implements HybridCatalogRuntime {
   readonly importPaths: string[] = [];
   readonly startInputs: HybridCatalogVerificationInput[] = [];
   readonly resumeRoots: string[] = [];
+  readonly resumeInputs: HybridCatalogVerificationInput[] = [];
   cancelCalls = 0;
   initializeCalls = 0;
   disposeCalls = 0;
@@ -195,9 +196,10 @@ export class FakeHybridCatalogRuntime implements HybridCatalogRuntime {
     this.beforeStart?.();
     this.startInputs.push(structuredClone(input));
   }
-  async resumeLargeVerification(cloudRoot: string): Promise<void> {
+  async resumeLargeVerification(input: HybridCatalogVerificationInput): Promise<void> {
     this.beforeResume?.();
-    this.resumeRoots.push(cloudRoot);
+    this.resumeRoots.push(input.cloudRoot);
+    this.resumeInputs.push(structuredClone(input));
   }
   cancelLargeVerification(): void { this.cancelCalls += 1; }
   dispose(): void {

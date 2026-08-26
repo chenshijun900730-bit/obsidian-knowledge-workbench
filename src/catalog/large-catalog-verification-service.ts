@@ -50,6 +50,7 @@ export interface LargeCatalogVerificationStartInput {
 export interface LargeCatalogVerificationSegmentInput {
   readonly batchId: string;
   readonly cloudRoot: string;
+  readonly allowedGroupKeys: readonly string[];
   readonly signal?: AbortSignal;
   readonly onProgress?: ProgressListener;
 }
@@ -227,6 +228,7 @@ export class LargeCatalogVerificationService {
     return this.runSegment({
       batchId: input.batchId,
       cloudRoot: input.cloudRoot,
+      allowedGroupKeys: input.groups.map((group) => group.groupKey),
       ...(input.signal === undefined ? {} : { signal: input.signal }),
       ...(input.onProgress === undefined ? {} : { onProgress: input.onProgress }),
     });
@@ -248,6 +250,7 @@ export class LargeCatalogVerificationService {
       const loaded = await this.#store.loadBatch(input.batchId);
       if (loaded === null) throw new HybridCatalogError("hybrid-batch-unavailable");
       let checkpoint = loaded.checkpoint;
+      const allowedGroupKeys = this.#allowedGroupKeys(input.allowedGroupKeys, checkpoint);
       const recoveredFromScanning = loaded.checkpoint.status === "scanning";
       const committedPdfCount = loaded.records.length;
       if (checkpoint.cloudRootSha256 !== sha256(cloudRoot)) {
@@ -255,6 +258,10 @@ export class LargeCatalogVerificationService {
       }
       if (checkpoint.status === "complete") {
         return summarizeLargeCatalogVerification(checkpoint, committedPdfCount);
+      }
+      const currentGroup = checkpoint.groups[checkpoint.currentGroupIndex];
+      if (currentGroup === undefined || !allowedGroupKeys.has(currentGroup.groupKey)) {
+        throw new HybridCatalogError("hybrid-batch-invalid");
       }
       if (
         !loaded.identitiesComplete
@@ -293,6 +300,7 @@ export class LargeCatalogVerificationService {
         input.onProgress,
         committedPdfCount,
         recoveredFromScanning,
+        allowedGroupKeys,
       );
     } finally {
       this.#active = false;
@@ -308,6 +316,7 @@ export class LargeCatalogVerificationService {
     listener: ProgressListener | undefined,
     initialCommittedPdfCount: number,
     recoveredFromScanning: boolean,
+    allowedGroupKeys: ReadonlySet<string>,
   ): Promise<LargeCatalogVerificationSummary> {
     let checkpoint = initial;
     let committedPdfCount = initialCommittedPdfCount;
@@ -315,6 +324,15 @@ export class LargeCatalogVerificationService {
       const group = checkpoint.groups[checkpoint.currentGroupIndex];
       if (group === undefined || group.status !== "scanning") {
         throw new HybridCatalogError("hybrid-batch-invalid");
+      }
+      if (!allowedGroupKeys.has(group.groupKey)) {
+        return this.#finalizePaused(
+          checkpoint,
+          "selection-limit",
+          listener,
+          committedPdfCount,
+          recoveredFromScanning,
+        );
       }
       const current = group.pending[0];
       if (current === undefined) {
@@ -766,6 +784,29 @@ export class LargeCatalogVerificationService {
     }
     if (root === "/") throw new HybridCatalogError("hybrid-batch-invalid");
     return root;
+  }
+
+  #allowedGroupKeys(
+    values: readonly string[],
+    checkpoint: LargeCatalogBatchCheckpointV3,
+  ): ReadonlySet<string> {
+    const unknownValues: unknown = values;
+    if (
+      !Array.isArray(unknownValues)
+      || unknownValues.length < 1
+      || unknownValues.length > LARGE_CATALOG_RUN_BUDGET.maxSelectedTopLevelGroups
+      || new Set<unknown>(unknownValues).size !== unknownValues.length
+    ) throw new HybridCatalogError("hybrid-batch-invalid");
+    const batchGroupKeys = new Set(checkpoint.groups.map((group) => group.groupKey));
+    const decoded: string[] = [];
+    for (const value of unknownValues) {
+      if (typeof value !== "string") throw new HybridCatalogError("hybrid-batch-invalid");
+      if (!GROUP_PATTERN.test(value) || !batchGroupKeys.has(value)) {
+        throw new HybridCatalogError("hybrid-batch-invalid");
+      }
+      decoded.push(value);
+    }
+    return new Set(decoded);
   }
 
   #groupRoot(cloudRoot: string, group: LargeCatalogBatchGroupV3): string {

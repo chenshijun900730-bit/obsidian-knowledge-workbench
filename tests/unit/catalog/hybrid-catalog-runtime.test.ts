@@ -481,7 +481,10 @@ describe("HybridCatalogRuntimeService", () => {
         resumeAvailable: false,
       },
     });
-    await expect(value.runtime.resumeLargeVerification("/Synthetic"))
+    await expect(value.runtime.resumeLargeVerification({
+      cloudRoot: "/Synthetic",
+      groupKeys: [GROUP_A],
+    }))
       .rejects.toEqual(new HybridCatalogError("hybrid-batch-unavailable"));
     expect(value.verification.runSegment).not.toHaveBeenCalled();
   });
@@ -692,7 +695,7 @@ describe("HybridCatalogRuntimeService", () => {
       autoSegmentLimit: LARGE_CATALOG_AUTO_CHAIN_MAX_SEGMENTS,
     });
 
-    await value.runtime.resumeLargeVerification("/Synthetic");
+    await value.runtime.resumeLargeVerification({ cloudRoot: "/Synthetic", groupKeys: [GROUP_A] });
 
     expect(value.verification.runSegment).toHaveBeenCalledTimes(12);
     expect(value.runtime.snapshot().batch).toMatchObject({
@@ -745,12 +748,13 @@ describe("HybridCatalogRuntimeService", () => {
     await value.runtime.initialize();
     expect(value.verification.runSegment).not.toHaveBeenCalled();
 
-    await value.runtime.resumeLargeVerification("/Synthetic");
+    await value.runtime.resumeLargeVerification({ cloudRoot: "/Synthetic", groupKeys: [GROUP_A] });
 
     const resumeInput = value.verification.runSegment.mock.calls[0]?.[0];
     expect(resumeInput).toMatchObject({
       batchId: "batch-paused",
       cloudRoot: "/Synthetic",
+      allowedGroupKeys: [GROUP_A],
     });
     expect(resumeInput?.signal).toBeInstanceOf(AbortSignal);
     expect(value.runtime.snapshot()).toMatchObject({
@@ -768,7 +772,7 @@ describe("HybridCatalogRuntimeService", () => {
     await value.runtime.previewTxt("/must-not-open.txt");
     await value.runtime.importTxt("/must-not-open.txt");
     await value.runtime.startLargeVerification({ cloudRoot: "/NoCall", groupKeys: [GROUP_A] });
-    await value.runtime.resumeLargeVerification("/NoCall");
+    await value.runtime.resumeLargeVerification({ cloudRoot: "/NoCall", groupKeys: [GROUP_A] });
     value.runtime.cancelLargeVerification();
 
     expect(value.openCalls).toEqual([]);

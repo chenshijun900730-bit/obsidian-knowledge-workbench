@@ -56,6 +56,7 @@ export interface SettingsController {
   ): Promise<void>;
   requestResumeLargeCatalogVerification?(
     rootPath: string,
+    groupKeys: readonly string[],
     onConfirmed?: () => void,
   ): Promise<void>;
   cancelLargeCatalogVerification?(): void;
@@ -124,6 +125,7 @@ const SETTINGS_STATUS_MESSAGE = {
 const SETTINGS_STOP_REASON_MESSAGE = {
   complete: "settings.stop.complete",
   "user-canceled": "settings.stop.userCanceled",
+  "selection-limit": "settings.stop.selectionLimit",
   "pdf-limit": "settings.stop.pdfLimit",
   "directory-limit": "settings.stop.directoryLimit",
   "list-request-limit": "settings.stop.listRequestLimit",
@@ -1027,9 +1029,10 @@ export function createSettingsSectionsSurface(
           verificationActionPending = true;
           recomputeLargeVerificationActions();
           const rootPath = this.largeCatalogVerificationRoot;
+          const groupKeys = [...selectedGroupKeys];
           void run(
             "settings.save.categoryResume",
-            () => requestResumeLargeCatalogVerification(rootPath, () => {
+            () => requestResumeLargeCatalogVerification(rootPath, groupKeys, () => {
               if (!isCurrent()) return;
               this.largeCatalogVerificationRoot = "";
               verificationDirectoryField.setPath("");

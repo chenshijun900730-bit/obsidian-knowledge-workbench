@@ -493,6 +493,10 @@ describe("WorkbenchController verification page state", () => {
     expect(confirmations).toHaveLength(2);
     expect(hybrid.startInputs).toEqual([{ cloudRoot: "/Synthetic", groupKeys: [groupKey] }]);
     expect(hybrid.resumeRoots).toEqual(["/Synthetic"]);
+    expect(hybrid.resumeInputs).toEqual([{
+      cloudRoot: "/Synthetic",
+      groupKeys: [groupKey],
+    }]);
     expect(hybrid.cancelCalls).toBe(1);
     fixture.controller.dispose();
   });
@@ -542,6 +546,7 @@ describe("WorkbenchController verification page state", () => {
     });
     expect(fixture.controller.snapshot().verificationRootLocked).toBe(false);
     fixture.controller.setVerificationRoot("/Wrong-candidate");
+    fixture.controller.toggleVerificationGroup(groupKey);
 
     await expect(fixture.controller.resumeSelectedVerification())
       .rejects.toThrow("hybrid-cloud-root-mismatch");
@@ -604,6 +609,7 @@ describe("WorkbenchController verification page state", () => {
       catalogLargeScanConfirmation: { request: async () => true },
     });
     fixture.controller.setVerificationRoot("/Candidate");
+    fixture.controller.toggleVerificationGroup(groupKey);
     hybrid.beforeResume = () => { throw new HybridCatalogError("hybrid-batch-invalid"); };
     await expect(fixture.controller.resumeSelectedVerification())
       .rejects.toThrow("hybrid-batch-invalid");

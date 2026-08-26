@@ -22,11 +22,6 @@ export interface UnifiedCatalogSearchPage {
   readonly limit: number;
 }
 
-interface IndexedUnifiedRecord {
-  readonly record: UnifiedCatalogRecordV1;
-  readonly searchableFields: readonly string[];
-}
-
 const STATUS_VALUES: readonly CatalogVerificationStatus[] = ["unverified", "verified", "difference"];
 const DIFFERENCE_VALUES: readonly CatalogDifferenceKind[] = [
   "cloud-added",
@@ -56,28 +51,6 @@ const fixedCompare = (left: UnifiedCatalogRecordV1, right: UnifiedCatalogRecordV
   return 0;
 };
 
-const bigrams = (value: string): readonly string[] => {
-  const characters = [...value];
-  const result: string[] = [];
-  for (let index = 0; index < characters.length - 1; index += 1) {
-    result.push(`${characters[index]!}${characters[index + 1]!}`);
-  }
-  return result;
-};
-
-const binaryIncludes = (values: readonly number[], target: number): boolean => {
-  let low = 0;
-  let high = values.length - 1;
-  while (low <= high) {
-    const middle = Math.floor((low + high) / 2);
-    const value = values[middle];
-    if (value === target) return true;
-    if (value === undefined || value > target) high = middle - 1;
-    else low = middle + 1;
-  }
-  return false;
-};
-
 const validateEnumFilter = <T extends string>(
   values: readonly T[] | undefined,
   allowed: readonly T[],
@@ -98,41 +71,11 @@ const validateEnumFilter = <T extends string>(
 };
 
 export class UnifiedCatalogSearchService {
-  readonly #records: readonly IndexedUnifiedRecord[];
-  readonly #allIndexes: readonly number[];
-  readonly #tokenIndexes = new Map<string, readonly number[]>();
-  readonly #isbnIndexes = new Map<string, readonly number[]>();
+  readonly #records: readonly UnifiedCatalogRecordV1[];
+  #searchableText: readonly string[] | null = null;
 
   constructor(records: readonly UnifiedCatalogRecordV1[]) {
-    const cloned = records.map(cloneRecord).sort(fixedCompare);
-    this.#records = cloned.map((record) => ({
-      record,
-      searchableFields: [
-        record.filename,
-        record.title,
-        record.relativePath,
-        ...(record.cloudPath === null ? [] : [record.cloudPath]),
-        ...record.hierarchyTags,
-      ].map(normalizeSearchText),
-    }));
-    this.#allIndexes = this.#records.map((_, index) => index);
-    const mutableTokens = new Map<string, number[]>();
-    const mutableIsbns = new Map<string, number[]>();
-    this.#records.forEach((indexed, index) => {
-      const tokens = new Set(indexed.searchableFields.flatMap((field) => bigrams(field)));
-      for (const token of tokens) {
-        const postings = mutableTokens.get(token);
-        if (postings === undefined) mutableTokens.set(token, [index]);
-        else postings.push(index);
-      }
-      for (const isbn of indexed.record.isbnCandidates) {
-        const postings = mutableIsbns.get(isbn);
-        if (postings === undefined) mutableIsbns.set(isbn, [index]);
-        else postings.push(index);
-      }
-    });
-    for (const [token, indexes] of mutableTokens) this.#tokenIndexes.set(token, indexes);
-    for (const [isbn, indexes] of mutableIsbns) this.#isbnIndexes.set(isbn, indexes);
+    this.#records = records.map(cloneRecord).sort(fixedCompare);
   }
 
   query(query: UnifiedCatalogSearchQuery): UnifiedCatalogSearchPage {
@@ -141,11 +84,11 @@ export class UnifiedCatalogSearchService {
     const exactIsbn = /^(?:\d{13}|\d{9}[\dXx])$/u.test(text)
       ? text.toLocaleUpperCase("en-US")
       : undefined;
+    const searchableText = text.length === 0 ? null : this.#searchableTextForRecords();
     const matches: number[] = [];
-    for (const index of this.#candidatesFor(text)) {
-      const indexed = this.#records[index];
-      if (indexed === undefined) continue;
-      const record = indexed.record;
+    for (let index = 0; index < this.#records.length; index += 1) {
+      const record = this.#records[index];
+      if (record === undefined) continue;
       if (!filters.includeCloudMissing && !record.visibleByDefault) continue;
       if (filters.statuses !== undefined && !filters.statuses.includes(record.verificationStatus)) continue;
       if (
@@ -156,7 +99,7 @@ export class UnifiedCatalogSearchService {
       if (filters.hierarchyTag !== undefined && !record.hierarchyTags.includes(filters.hierarchyTag)) continue;
       if (
         text.length > 0
-        && !indexed.searchableFields.some((field) => field.includes(text))
+        && searchableText?.[index]?.includes(text) !== true
         && (exactIsbn === undefined || !record.isbnCandidates.includes(exactIsbn))
       ) continue;
       matches.push(index);
@@ -164,32 +107,23 @@ export class UnifiedCatalogSearchService {
     return {
       items: matches
         .slice(query.offset, query.offset + query.limit)
-        .map((index) => cloneRecord(this.#records[index]!.record)),
+        .map((index) => cloneRecord(this.#records[index]!)),
       total: matches.length,
       offset: query.offset,
       limit: query.limit,
     };
   }
 
-  #candidatesFor(text: string): readonly number[] {
-    if (text.length === 0) return this.#allIndexes;
-    if (/^(?:\d{13}|\d{9}[\dXx])$/u.test(text)) {
-      return this.#isbnIndexes.get(text.toLocaleUpperCase("en-US")) ?? [];
-    }
-    const tokens = [...new Set(bigrams(text))];
-    if (tokens.length === 0) return this.#allIndexes;
-    const postings: Array<readonly number[]> = [];
-    for (const token of tokens) {
-      const indexes = this.#tokenIndexes.get(token);
-      if (indexes === undefined) return [];
-      postings.push(indexes);
-    }
-    postings.sort((left, right) => left.length - right.length);
-    const smallest = postings[0];
-    if (smallest === undefined) return this.#allIndexes;
-    return smallest.filter((index) => postings.slice(1).every((indexes) => (
-      binaryIncludes(indexes, index)
-    )));
+  #searchableTextForRecords(): readonly string[] {
+    if (this.#searchableText !== null) return this.#searchableText;
+    this.#searchableText = this.#records.map((record) => normalizeSearchText([
+      record.filename,
+      record.title,
+      record.relativePath,
+      ...(record.cloudPath === null ? [] : [record.cloudPath]),
+      ...record.hierarchyTags,
+    ].join("\u0000")));
+    return this.#searchableText;
   }
 
   #validateQuery(query: UnifiedCatalogSearchQuery): Readonly<{

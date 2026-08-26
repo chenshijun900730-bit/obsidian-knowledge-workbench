@@ -47,6 +47,7 @@ const LARGE_ERROR_CODES: readonly LargeCatalogErrorCode[] = [
 ];
 const LARGE_PAUSE_REASONS = [
   "user-canceled",
+  "selection-limit",
   "pdf-limit",
   "directory-limit",
   "list-request-limit",

@@ -203,7 +203,11 @@ describe("LargeCatalogVerificationService", () => {
     source.afterPermit = async () => {
       expect((await adapter.loadBatch("batch-1"))?.checkpoint.listRequestCount).toBe(1);
     };
-    const result = await service.runSegment({ batchId: "batch-1", cloudRoot: "/Library" });
+    const result = await service.runSegment({
+      batchId: "batch-1",
+      cloudRoot: "/Library",
+      allowedGroupKeys: [GROUP],
+    });
     expect(result).toMatchObject({ status: "complete", stopReason: "complete" });
     expect(source.requests).toEqual([{ path: "/Library/Synthetic", start: 0 }]);
   });
@@ -269,6 +273,7 @@ describe("LargeCatalogVerificationService", () => {
     await expect(service.runSegment({
       batchId: "batch-root-guard",
       cloudRoot: "/Different-library",
+      allowedGroupKeys: [GROUP],
     })).rejects.toEqual(new HybridCatalogError("hybrid-cloud-root-mismatch"));
     expect(source.requests).toEqual([]);
 
@@ -288,6 +293,7 @@ describe("LargeCatalogVerificationService", () => {
     await expect(invariant.service.runSegment({
       batchId: "batch-clock-invariant",
       cloudRoot: "/Library",
+      allowedGroupKeys: [GROUP],
     })).rejects.toEqual(new HybridCatalogError("hybrid-batch-invalid"));
     expect(invariantSource.requests).toEqual([]);
   });
@@ -326,6 +332,57 @@ describe("LargeCatalogVerificationService", () => {
     expect((await adapter.loadActiveUnified())?.records.filter((record) => (
       record.topLevelGroupId === GROUP
     )).every((record) => record.verificationStatus === "verified")).toBe(true);
+  });
+
+  it("stops before the next saved category when resume allows only the current selection", async () => {
+    const source = new ScriptedSource([
+      {
+        path: "/Library/Synthetic",
+        start: 0,
+        error: new CatalogError("baidu-rate-limited", true),
+      },
+      {
+        path: "/Library/Synthetic",
+        start: 0,
+        entries: [],
+      },
+    ]);
+    let now = 100;
+    const { adapter, service } = await harness(source, () => now++);
+    const first = await service.start({
+      batchId: "batch-selected-only",
+      sourceImportSha256: HASH_A,
+      cloudRoot: "/Library",
+      groups: [
+        selection(),
+        selection({
+          groupKey: "txt-root-items",
+          rootRelativePath: "",
+          mode: "direct-files-only",
+        }),
+      ],
+    });
+    expect(first).toMatchObject({ status: "partial", stopReason: "baidu-rate-limited" });
+
+    const resumed = await service.runSegment({
+      batchId: "batch-selected-only",
+      cloudRoot: "/Library",
+      allowedGroupKeys: [GROUP],
+    });
+
+    expect(resumed).toMatchObject({
+      status: "paused",
+      stopReason: "selection-limit",
+      completedGroupCount: 1,
+      currentGroupKey: "txt-root-items",
+    });
+    expect(source.requests).toEqual([
+      { path: "/Library/Synthetic", start: 0 },
+      { path: "/Library/Synthetic", start: 0 },
+    ]);
+    expect((await adapter.loadActiveOverlays()).map((overlay) => (
+      overlay.descriptor.topLevelGroupId
+    ))).toEqual([GROUP]);
   });
 
   it("lists root items directly and never enqueues returned directories", async () => {
@@ -411,7 +468,11 @@ describe("LargeCatalogVerificationService", () => {
     expect(source.requests).toHaveLength(2);
     expect(await adapter.loadActiveOverlays()).toEqual([]);
 
-    const resumed = await service.runSegment({ batchId: "batch-resume", cloudRoot: "/Library" });
+    const resumed = await service.runSegment({
+      batchId: "batch-resume",
+      cloudRoot: "/Library",
+      allowedGroupKeys: [GROUP],
+    });
     expect(resumed.status).toBe("complete");
     expect(source.requests).toHaveLength(3);
     expect((await adapter.loadBatch("batch-resume"))?.checkpoint)
@@ -593,6 +654,7 @@ describe("LargeCatalogVerificationService", () => {
     const resumed = await service.runSegment({
       batchId: `batch-resume-ignored-${kind}`,
       cloudRoot: "/Library",
+      allowedGroupKeys: [GROUP],
     });
     expect(resumed).toMatchObject({
       status: "partial",
@@ -636,6 +698,7 @@ describe("LargeCatalogVerificationService", () => {
     const resumed = await service.runSegment({
       batchId: "batch-resume-directory",
       cloudRoot: "/Library",
+      allowedGroupKeys: [GROUP],
     });
     expect(resumed).toMatchObject({
       status: "partial",
@@ -697,6 +760,7 @@ describe("LargeCatalogVerificationService", () => {
     await expect(service.runSegment({
       batchId: "batch-legacy-identities",
       cloudRoot: "/Library",
+      allowedGroupKeys: [GROUP],
     })).rejects.toEqual(new HybridCatalogError("hybrid-batch-invalid"));
     expect(source.requests).toHaveLength(2);
   });

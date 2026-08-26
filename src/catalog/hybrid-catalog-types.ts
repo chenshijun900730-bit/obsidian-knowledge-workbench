@@ -157,6 +157,7 @@ export interface CatalogReconciliationResult {
 
 export type LargeCatalogPauseReason =
   | "user-canceled"
+  | "selection-limit"
   | "pdf-limit"
   | "directory-limit"
   | "list-request-limit"

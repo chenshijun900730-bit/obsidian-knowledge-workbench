@@ -7,6 +7,7 @@ export type CatalogStopReason = CatalogScanStopReason | LargeCatalogStopReason;
 const STOP_REASON_KEYS: Readonly<Record<CatalogStopReason, WorkbenchMessageKey>> = Object.freeze({
   complete: "settings.stop.complete",
   "user-canceled": "settings.stop.userCanceled",
+  "selection-limit": "settings.stop.selectionLimit",
   "pdf-limit": "settings.stop.pdfLimit",
   "directory-limit": "settings.stop.directoryLimit",
   "list-request-limit": "settings.stop.listRequestLimit",

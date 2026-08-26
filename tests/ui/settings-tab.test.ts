@@ -624,7 +624,11 @@ describe("hybrid catalog settings", () => {
       previewCatalogTxt: async () => undefined,
       requestCatalogTxtImport: async () => undefined,
       requestLargeCatalogVerification: async () => undefined,
-      requestResumeLargeCatalogVerification: async (root: string, onConfirmed?: () => void) => {
+      requestResumeLargeCatalogVerification: async (
+        root: string,
+        _groupKeys: readonly string[],
+        onConfirmed?: () => void,
+      ) => {
         calls.resume.push(root);
         onConfirmed?.();
         hybrid = { ...hybrid, status: "scanning" };

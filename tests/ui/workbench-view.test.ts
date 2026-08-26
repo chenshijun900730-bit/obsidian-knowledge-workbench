@@ -520,6 +520,7 @@ describe("workbench", () => {
     });
     fixture.controller.setVerificationRoot("/Wrong-candidate");
     fixture.controller.selectTab("verification");
+    fixture.controller.toggleVerificationGroup(groupKey);
     hybrid.beforeResume = () => {
       hybrid.setSnapshot({ status: "scanning", active, batch: pausedBatch });
       hybrid.setSnapshot({

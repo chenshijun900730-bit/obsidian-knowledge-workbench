@@ -429,6 +429,8 @@ export class WorkbenchController {
   async resumeSelectedVerification(): Promise<void> {
     if (this.disposed) return;
     this.clearVerificationHybridMessageSuppression();
+    const groupKeys = [...this.model.selectedVerificationGroupKeys];
+    if (groupKeys.length === 0) throw new RangeError("verification-group-required");
     const alreadyLocked = this.lockedVerificationRoot !== null;
     const candidate = this.lockedVerificationRoot ?? this.model.verificationRoot;
     let normalized: string;
@@ -440,7 +442,7 @@ export class WorkbenchController {
     }
     let lockedForAttempt = false;
     try {
-      await this.requestResumeLargeCatalogVerification(normalized, () => {
+      await this.requestResumeLargeCatalogVerification(normalized, groupKeys, () => {
         if (alreadyLocked) return;
         lockedForAttempt = true;
         this.lockVerificationRoot(normalized);
@@ -745,6 +747,7 @@ export class WorkbenchController {
 
   async requestResumeLargeCatalogVerification(
     rootPath: string,
+    groupKeys: readonly string[],
     onConfirmed?: () => void,
   ): Promise<void> {
     if (this.disposed) return;
@@ -756,14 +759,22 @@ export class WorkbenchController {
       || confirmation === undefined
       || hybrid.snapshot().batch?.resumeAvailable !== true
     ) throw new Error("catalog-unavailable");
+    const active = hybrid.snapshot().active;
+    if (active === undefined) throw new Error("catalog-unavailable");
+    const groupsByKey = new Map(active.groups.map((group) => [group.groupKey, group]));
+    const groups = groupKeys.map((groupKey) => {
+      const group = groupsByKey.get(groupKey);
+      if (group === undefined) throw new Error("catalog-unavailable");
+      return { groupKey, label: group.label, pdfCount: group.pdfCount };
+    });
     const confirmed = await confirmation.request({
       kind: "resume",
       cloudRoot: normalized,
-      groups: [],
+      groups,
     });
     if (this.disposed || !confirmed) return;
     onConfirmed?.();
-    await hybrid.resumeLargeVerification(normalized);
+    await hybrid.resumeLargeVerification({ cloudRoot: normalized, groupKeys });
     if (!this.disposed) await refreshCatalogProjection(this.dependencies.catalog);
   }
 

@@ -208,6 +208,7 @@ describe("large catalog scan confirmation", () => {
     );
     await controller.requestResumeLargeCatalogVerification(
       "/Synthetic",
+      [groupKey],
       () => { events.push("clear-resume"); },
     );
 
@@ -219,7 +220,7 @@ describe("large catalog scan confirmation", () => {
     expect(confirmation.request).toHaveBeenNthCalledWith(2, {
       kind: "resume",
       cloudRoot: "/Synthetic",
-      groups: [],
+      groups: [{ groupKey, label: "Science", pdfCount: 30 }],
     });
     expect(hybrid.startInputs).toEqual([{ cloudRoot: "/Synthetic", groupKeys: [groupKey] }]);
     expect(hybrid.resumeRoots).toEqual(["/Synthetic"]);
