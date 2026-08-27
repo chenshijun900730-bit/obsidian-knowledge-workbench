@@ -240,6 +240,17 @@ const fixture = (options: Readonly<{
   };
   const store = {
     loadActiveCandidateDescriptor: vi.fn(async () => activeCandidates?.descriptor ?? null),
+    loadActiveCandidateSummary: vi.fn(async () => activeCandidates === null ? null : ({
+      descriptor: activeCandidates.descriptor,
+      groups: [...new Map(activeCandidates.records.map((record) => [record.topLevelGroupId, record]))]
+        .map(([groupKey, record]) => ({
+          groupKey,
+          label: groupKey === "txt-root-items" ? "Root items" : record.relativePath.split("/")[0]!,
+          rootRelativePath: groupKey === "txt-root-items" ? "" : record.relativePath.split("/")[0]!,
+          pdfCount: activeCandidates!.records.filter((value) => value.topLevelGroupId === groupKey).length,
+          mode: groupKey === "txt-root-items" ? "direct-files-only" as const : "recursive" as const,
+        })),
+    })),
     loadActiveCandidateGroups: vi.fn(async (groupKeys: readonly string[]) => {
       if (activeCandidates === null) return null;
       const selected = new Set(groupKeys);
@@ -250,6 +261,35 @@ const fixture = (options: Readonly<{
     }),
     loadActiveCandidates: vi.fn(async () => activeCandidates),
     loadActiveUnified: vi.fn(async () => activeUnified),
+    loadActiveUnifiedSummary: vi.fn(async () => activeUnified === null ? null : ({
+      descriptor: activeUnified.descriptor,
+      aggregate: {
+        verificationCounts: activeUnified.records.reduce((counts, record) => {
+          counts[record.verificationStatus] += 1;
+          if (record.differenceKinds.includes("cloud-missing")) counts.cloudMissing += 1;
+          return counts;
+        }, { unverified: 0, verified: 0, difference: 0, cloudMissing: 0 }),
+        differenceGroupKeys: activeUnified.records
+          .filter((record) => record.verificationStatus === "difference")
+          .map((record) => record.topLevelGroupId),
+        groups: [],
+        hierarchyTags: [],
+        differenceKindCounts: { "cloud-added": 0, "cloud-missing": 0, renamed: 0, moved: 0 },
+      },
+    })),
+    loadActiveOverlayDescriptors: vi.fn(async () => [{
+      schemaVersion: 1 as const,
+      overlayId: "overlay-1",
+      sourceImportSha256: HASH_A,
+      topLevelGroupId: GROUP_A,
+      completedAt: 140,
+      recordCount: 1,
+      differenceCount: 0,
+      supersededCount: 0,
+      recordsSha256: "1".repeat(64),
+      differencesSha256: "2".repeat(64),
+      supersededSha256: "3".repeat(64),
+    }]),
     loadActiveOverlays: vi.fn(async () => [{
       descriptor: {
         schemaVersion: 1 as const,
@@ -588,7 +628,7 @@ describe("HybridCatalogRuntimeService", () => {
     });
     expect(JSON.stringify(value.runtime.snapshot())).not.toContain("/Synthetic");
     expect(JSON.stringify(value.runtime.snapshot())).not.toContain("pendingStateSha256");
-    expect(value.store.loadActiveCandidates).toHaveBeenCalledTimes(2);
+    expect(value.store.loadActiveCandidateSummary).toHaveBeenCalledTimes(2);
 
     await expect(value.runtime.startLargeVerification({
       cloudRoot: "/Synthetic",

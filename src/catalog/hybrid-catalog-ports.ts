@@ -2,9 +2,11 @@ import type { CloudCatalogRecord } from "./catalog-types";
 import type {
   ActiveCatalogOverlay,
   CandidateCatalogDescriptor,
+  CatalogDifferenceKind,
   CatalogDifferenceRecordV1,
   CatalogOverlayDescriptor,
   CatalogReconciliationResult,
+  CatalogVerificationStatus,
   CatalogTxtImportSummary,
   LargeCatalogBatchCheckpointV3,
   LargeCatalogRunReceiptV3,
@@ -12,6 +14,50 @@ import type {
   UnifiedCatalogDescriptor,
   UnifiedCatalogRecordV1,
 } from "./hybrid-catalog-types";
+import type {
+  UnifiedCatalogSearchPage,
+  UnifiedCatalogSearchQuery,
+} from "./unified-catalog-search-service";
+
+export interface CandidateCatalogGroupSummary {
+  readonly groupKey: string;
+  readonly label: string;
+  readonly rootRelativePath: string;
+  readonly pdfCount: number;
+  readonly mode: "recursive" | "direct-files-only";
+}
+
+export interface ActiveCandidateCatalogSummary {
+  readonly descriptor: CandidateCatalogDescriptor;
+  readonly groups: readonly CandidateCatalogGroupSummary[];
+}
+
+export interface UnifiedCatalogAggregateSummary {
+  readonly verificationCounts: Readonly<Record<CatalogVerificationStatus, number>> & Readonly<{
+    cloudMissing: number;
+  }>;
+  readonly differenceGroupKeys: readonly string[];
+  readonly groups: readonly Readonly<{
+    groupKey: string;
+    label: string;
+    count: number;
+  }>[];
+  readonly hierarchyTags: readonly Readonly<{
+    tag: string;
+    label: string;
+    count: number;
+  }>[];
+  readonly differenceKindCounts: Readonly<Record<CatalogDifferenceKind, number>>;
+}
+
+export interface ActiveUnifiedCatalogSummary {
+  readonly descriptor: UnifiedCatalogDescriptor;
+  readonly aggregate: UnifiedCatalogAggregateSummary;
+}
+
+export interface ActiveUnifiedCatalogQueryResult extends ActiveUnifiedCatalogSummary {
+  readonly page: UnifiedCatalogSearchPage;
+}
 
 export interface LargeCatalogPageIdentity {
   readonly fsId: string;
@@ -36,6 +82,7 @@ export interface CandidateImportWriter {
 export interface CandidateCatalogStorePort {
   createCandidateImport(importId: string): Promise<CandidateImportWriter>;
   loadActiveCandidateDescriptor(): Promise<CandidateCatalogDescriptor | null>;
+  loadActiveCandidateSummary(): Promise<ActiveCandidateCatalogSummary | null>;
   loadActiveCandidateGroups(groupKeys: readonly string[]): Promise<Readonly<{
     descriptor: CandidateCatalogDescriptor;
     records: readonly TxtCandidateRecordV1[];
@@ -78,7 +125,13 @@ export interface LargeCatalogBatchStorePort {
 }
 
 export interface UnifiedCatalogStorePort extends CandidateCatalogStorePort {
+  loadActiveOverlayDescriptors(): Promise<readonly CatalogOverlayDescriptor[]>;
   loadActiveOverlays(): Promise<readonly ActiveCatalogOverlay[]>;
+  loadActiveUnifiedSummary(): Promise<ActiveUnifiedCatalogSummary | null>;
+  queryActiveUnified(
+    query: UnifiedCatalogSearchQuery,
+    signal?: AbortSignal,
+  ): Promise<ActiveUnifiedCatalogQueryResult | null>;
   writeUnifiedSnapshot(input: Readonly<{
     sourceImportSha256: string;
     records: readonly UnifiedCatalogRecordV1[];
@@ -86,6 +139,9 @@ export interface UnifiedCatalogStorePort extends CandidateCatalogStorePort {
     completedAt: number;
     signal?: AbortSignal;
   }>): Promise<UnifiedCatalogDescriptor>;
+  writeUnifiedGroupSnapshot(
+    input: CatalogReconciliationResult & Readonly<{ signal?: AbortSignal }>,
+  ): Promise<UnifiedCatalogDescriptor>;
   loadActiveUnified(): Promise<Readonly<{
     descriptor: UnifiedCatalogDescriptor;
     records: readonly UnifiedCatalogRecordV1[];

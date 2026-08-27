@@ -11,9 +11,9 @@ import {
   type LargeCatalogVerificationSelection,
   type LargeVerificationProgressEvent,
 } from "../../../src/catalog/large-catalog-verification-service";
-import { UnifiedCatalogProjectionService } from "../../../src/catalog/unified-catalog-projection-service";
 import type { CandidateImportWriter } from "../../../src/catalog/hybrid-catalog-ports";
 import { HybridCatalogError } from "../../../src/catalog/hybrid-catalog-types";
+import { UnifiedCatalogProjectionService } from "../../../src/catalog/unified-catalog-projection-service";
 
 const roots: string[] = [];
 const HASH_A = "a".repeat(64);
@@ -131,6 +131,7 @@ const seedCandidates = async (adapter: LocalHybridCatalogAdapter): Promise<void>
       maxDepth: 3,
     },
   });
+  await new UnifiedCatalogProjectionService(adapter, { now: () => 1 }).rebuild();
 };
 
 const selection = (
@@ -150,7 +151,6 @@ const harness = async (source: ScriptedSource, now: () => number = () => 100) =>
     source,
     store: adapter,
     reconcile: new CatalogReconciliationService(),
-    project: new UnifiedCatalogProjectionService(adapter, { now }),
     now,
   });
   return { adapter, root, service };
@@ -541,13 +541,13 @@ describe("LargeCatalogVerificationService", () => {
     }]);
     const adapter = new LocalHybridCatalogAdapter(await temporaryRoot());
     await seedCandidates(adapter);
+    vi.spyOn(adapter, "writeUnifiedGroupSnapshot").mockRejectedValue(
+      new HybridCatalogError("hybrid-snapshot-corrupt"),
+    );
     const service = new LargeCatalogVerificationService({
       source,
       store: adapter,
       reconcile: new CatalogReconciliationService(),
-      project: {
-        rebuild: async () => { throw new HybridCatalogError("hybrid-snapshot-corrupt"); },
-      },
       now: () => 100,
     });
 
@@ -801,7 +801,6 @@ describe("LargeCatalogVerificationService", () => {
       source,
       store: adapter,
       reconcile: new CatalogReconciliationService(),
-      project: new UnifiedCatalogProjectionService(adapter, { now: () => 100 }),
       now: () => 100,
     });
     await service.start({
@@ -889,7 +888,6 @@ describe("LargeCatalogVerificationService", () => {
       source,
       store: adapter,
       reconcile: new CatalogReconciliationService(),
-      project: new UnifiedCatalogProjectionService(adapter, { now: () => 100 }),
       now: () => 100,
     });
     const result = await service.start({

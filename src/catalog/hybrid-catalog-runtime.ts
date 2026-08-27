@@ -14,7 +14,6 @@ import {
   type LargeCatalogErrorCode,
   type LargeCatalogGroupMode,
   type LargeCatalogStopReason,
-  type TxtCandidateRecordV1,
 } from "./hybrid-catalog-types";
 import type {
   LargeCatalogVerificationService,
@@ -132,9 +131,10 @@ export interface HybridCatalogRuntimeDependencies {
   readonly imports: Pick<CatalogTxtImportService, "preview" | "import">;
   readonly store: Pick<
     HybridCatalogStorePort,
-    | "loadActiveCandidates"
-    | "loadActiveUnified"
-    | "loadActiveOverlays"
+    | "loadActiveCandidateDescriptor"
+    | "loadActiveCandidateSummary"
+    | "loadActiveUnifiedSummary"
+    | "loadActiveOverlayDescriptors"
     | "loadLatestBatch"
     | "restoreCatalogActivation"
   >;
@@ -248,13 +248,6 @@ const statusForBatch = (
   if (batch?.status === "partial") return "partial";
   return active === undefined ? "empty" : "ready";
 };
-
-const firstSegment = (record: TxtCandidateRecordV1): string =>
-  record.relativePath.split("/")[0] ?? "";
-
-const groupLabel = (record: TxtCandidateRecordV1): string => (
-  record.topLevelGroupId === "txt-root-items" ? "Root items" : firstSegment(record)
-);
 
 const groupCompare = (
   left: HybridCatalogGroupViewModel,
@@ -385,12 +378,12 @@ export class HybridCatalogRuntimeService implements HybridCatalogRuntime {
       }
     };
     try {
-      const [priorCandidates, priorUnified] = await Promise.all([
-        this.dependencies.store.loadActiveCandidates(),
-        this.dependencies.store.loadActiveUnified(),
+      const [priorCandidate, priorUnified] = await Promise.all([
+        this.dependencies.store.loadActiveCandidateDescriptor(),
+        this.dependencies.store.loadActiveUnifiedSummary(),
       ]);
       priorActivation = {
-        candidate: priorCandidates?.descriptor ?? null,
+        candidate: priorCandidate,
         unified: priorUnified?.descriptor ?? null,
       };
       if (!isCurrent()) return;
@@ -558,13 +551,13 @@ export class HybridCatalogRuntimeService implements HybridCatalogRuntime {
   }
 
   private async loadActive(): Promise<HybridCatalogActiveSummary | undefined> {
-    const candidates = await this.dependencies.store.loadActiveCandidates();
+    const candidates = await this.dependencies.store.loadActiveCandidateSummary();
     this.selections.clear();
     if (candidates === null) {
       this.activeSourceSha256 = null;
       const [unified, overlays] = await Promise.all([
-        this.dependencies.store.loadActiveUnified(),
-        this.dependencies.store.loadActiveOverlays(),
+        this.dependencies.store.loadActiveUnifiedSummary(),
+        this.dependencies.store.loadActiveOverlayDescriptors(),
       ]);
       if (unified !== null || overlays.length > 0) {
         throw new HybridCatalogError("hybrid-snapshot-corrupt");
@@ -572,83 +565,49 @@ export class HybridCatalogRuntimeService implements HybridCatalogRuntime {
       return undefined;
     }
     this.activeSourceSha256 = candidates.descriptor.sourceSha256;
-    const candidateGroups = new Map<string, Readonly<{
-      first: TxtCandidateRecordV1;
-      count: number;
-      rootRelativePath: string;
-    }>>();
-    for (const record of candidates.records) {
-      if (!GROUP_PATTERN.test(record.topLevelGroupId)) {
-        throw new HybridCatalogError("hybrid-snapshot-corrupt");
-      }
-      const rootRelativePath = record.topLevelGroupId === "txt-root-items"
-        ? ""
-        : firstSegment(record);
-      if (
-        (record.topLevelGroupId === "txt-root-items" && record.relativePath.includes("/"))
-        || (record.topLevelGroupId !== "txt-root-items" && rootRelativePath.length === 0)
-      ) throw new HybridCatalogError("hybrid-snapshot-corrupt");
-      const prior = candidateGroups.get(record.topLevelGroupId);
-      if (prior !== undefined && prior.rootRelativePath !== rootRelativePath) {
-        throw new HybridCatalogError("hybrid-snapshot-corrupt");
-      }
-      candidateGroups.set(record.topLevelGroupId, {
-        first: prior?.first ?? record,
-        count: (prior?.count ?? 0) + 1,
-        rootRelativePath,
-      });
-    }
-
-    const unified = await this.dependencies.store.loadActiveUnified();
+    const unified = await this.dependencies.store.loadActiveUnifiedSummary();
     if (
       unified !== null
       && unified.descriptor.sourceImportSha256 !== candidates.descriptor.sourceSha256
     ) throw new HybridCatalogError("hybrid-snapshot-corrupt");
-    let unverifiedCount = candidates.descriptor.pdfCount;
-    let verifiedCount = 0;
-    let cloudMissingCount = 0;
-    const differenceGroups = new Set<string>();
-    if (unified !== null) {
-      unverifiedCount = 0;
-      for (const record of unified.records) {
-        if (record.verificationStatus === "unverified") unverifiedCount += 1;
-        else if (record.verificationStatus === "verified") verifiedCount += 1;
-        else differenceGroups.add(record.topLevelGroupId);
-        if (record.differenceKinds.includes("cloud-missing")) cloudMissingCount += 1;
-      }
-    }
+    const unverifiedCount = unified?.aggregate.verificationCounts.unverified
+      ?? candidates.descriptor.pdfCount;
+    const verifiedCount = unified?.aggregate.verificationCounts.verified ?? 0;
+    const cloudMissingCount = unified?.aggregate.verificationCounts.cloudMissing ?? 0;
+    const differenceGroups = new Set(unified?.aggregate.differenceGroupKeys ?? []);
 
-    const overlays = await this.dependencies.store.loadActiveOverlays();
+    const overlays = await this.dependencies.store.loadActiveOverlayDescriptors();
     const activeOverlays = overlays.filter((overlay) => (
-      overlay.descriptor.sourceImportSha256 === candidates.descriptor.sourceSha256
+      overlay.sourceImportSha256 === candidates.descriptor.sourceSha256
     ));
     const verifiedGroups = new Set(activeOverlays.map((overlay) => (
-      overlay.descriptor.topLevelGroupId
+      overlay.topLevelGroupId
     )));
-    const coveredCandidatePdfCount = [...candidateGroups.entries()].reduce(
-      (total, [groupKey, candidateGroup]) => (
-        verifiedGroups.has(groupKey) ? total + candidateGroup.count : total
+    const coveredCandidatePdfCount = candidates.groups.reduce(
+      (total, candidateGroup) => (
+        verifiedGroups.has(candidateGroup.groupKey) ? total + candidateGroup.pdfCount : total
       ),
       0,
     );
-    const groups = [...candidateGroups.entries()].map(([groupKey, candidateGroup]) => {
-      const first = candidateGroup.first;
-      const label = groupLabel(first);
-      const rootRelativePath = candidateGroup.rootRelativePath;
-      const mode: LargeCatalogGroupMode = groupKey === "txt-root-items"
-        ? "direct-files-only"
-        : "recursive";
-      this.selections.set(groupKey, { groupKey, rootRelativePath, mode });
-      const verificationStatus: CatalogVerificationStatus = !verifiedGroups.has(groupKey)
+    const groups = candidates.groups.map((candidateGroup) => {
+      if (!GROUP_PATTERN.test(candidateGroup.groupKey)) {
+        throw new HybridCatalogError("hybrid-snapshot-corrupt");
+      }
+      this.selections.set(candidateGroup.groupKey, {
+        groupKey: candidateGroup.groupKey,
+        rootRelativePath: candidateGroup.rootRelativePath,
+        mode: candidateGroup.mode,
+      });
+      const verificationStatus: CatalogVerificationStatus = !verifiedGroups.has(candidateGroup.groupKey)
         ? "unverified"
-        : differenceGroups.has(groupKey)
+        : differenceGroups.has(candidateGroup.groupKey)
           ? "difference"
           : "verified";
       return {
-        groupKey,
-        label,
-        pdfCount: candidateGroup.count,
-        mode,
+        groupKey: candidateGroup.groupKey,
+        label: candidateGroup.label,
+        pdfCount: candidateGroup.pdfCount,
+        mode: candidateGroup.mode,
         verificationStatus,
       } satisfies HybridCatalogGroupViewModel;
     }).sort(groupCompare);

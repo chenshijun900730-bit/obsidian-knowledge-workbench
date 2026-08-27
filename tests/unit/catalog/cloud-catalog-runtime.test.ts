@@ -17,6 +17,7 @@ import {
 import { FakeHybridCatalogRuntime } from "../../fakes/fake-cloud-catalog-runtime";
 import type { UnifiedCatalogStorePort } from "../../../src/catalog/hybrid-catalog-ports";
 import type { UnifiedCatalogRecordV1 } from "../../../src/catalog/hybrid-catalog-types";
+import { UnifiedCatalogSearchService } from "../../../src/catalog/unified-catalog-search-service";
 
 const fileRecord = (path: string, fsId: string): CloudCatalogRecord => {
   const filename = path.slice(path.lastIndexOf("/") + 1);
@@ -154,9 +155,9 @@ const unifiedRecord = (input: Readonly<{
 
 const unifiedPort = (
   records: readonly UnifiedCatalogRecordV1[],
-): Pick<UnifiedCatalogStorePort, "loadActiveUnified"> => ({
-  loadActiveUnified: async () => ({
-    descriptor: {
+): Pick<UnifiedCatalogStorePort, "queryActiveUnified"> => ({
+  queryActiveUnified: async (query) => {
+    const descriptor = {
       schemaVersion: 1,
       snapshotId: "unified-1",
       sourceImportSha256: "a".repeat(64),
@@ -165,10 +166,42 @@ const unifiedPort = (
       differenceCount: records.reduce((count, record) => count + record.differenceKinds.length, 0),
       catalogSha256: "b".repeat(64),
       differencesSha256: "c".repeat(64),
-    },
-    records,
-    differences: [],
-  }),
+    } as const;
+    const groupCounts = new Map<string, { label: string; count: number }>();
+    const tagCounts = new Map<string, number>();
+    const verificationCounts = { unverified: 0, verified: 0, difference: 0, cloudMissing: 0 };
+    const differenceGroupKeys = new Set<string>();
+    const differenceKindCounts = { "cloud-added": 0, "cloud-missing": 0, renamed: 0, moved: 0 };
+    for (const record of records) {
+      verificationCounts[record.verificationStatus] += 1;
+      if (record.verificationStatus === "difference") differenceGroupKeys.add(record.topLevelGroupId);
+      const group = groupCounts.get(record.topLevelGroupId);
+      groupCounts.set(record.topLevelGroupId, {
+        label: group?.label ?? (record.hierarchyTags[0]?.slice("folder/".length) ?? "Root items"),
+        count: (group?.count ?? 0) + 1,
+      });
+      for (const tag of record.hierarchyTags) tagCounts.set(tag, (tagCounts.get(tag) ?? 0) + 1);
+      for (const kind of record.differenceKinds) {
+        differenceKindCounts[kind] += 1;
+        if (kind === "cloud-missing") verificationCounts.cloudMissing += 1;
+      }
+    }
+    return {
+      descriptor,
+      aggregate: {
+        verificationCounts,
+        differenceGroupKeys: [...differenceGroupKeys],
+        groups: [...groupCounts].map(([groupKey, value]) => ({ groupKey, ...value })),
+        hierarchyTags: [...tagCounts].map(([tag, count]) => ({
+          tag,
+          label: tag.slice("folder/".length),
+          count,
+        })),
+        differenceKindCounts,
+      },
+      page: new UnifiedCatalogSearchService(records).query(query),
+    };
+  },
 });
 
 describe("CloudCatalogRuntimeService", () => {
@@ -412,23 +445,27 @@ describe("CloudCatalogRuntimeService", () => {
     );
     await runtime.initialize();
 
-    runtime.setVerificationStatuses(["unverified"]);
-    expect(runtime.snapshot()).toMatchObject({ total: 1, verificationStatuses: ["unverified"] });
-    runtime.setVerificationStatuses(["difference"]);
-    expect(runtime.snapshot().total).toBe(0);
-    runtime.setIncludeCloudMissing(true);
-    runtime.setDifferenceKinds(["cloud-missing"]);
-    runtime.setHierarchyTag("folder/Science");
-    expect(runtime.snapshot()).toMatchObject({
-      total: 1,
-      includeCloudMissing: true,
-      differenceKinds: ["cloud-missing"],
-      hierarchyTag: "folder/Science",
-    });
-
     await runtime.copyFilename(candidateId);
     await expect(runtime.copyCloudPath(candidateId)).rejects.toThrow("catalog-record-unavailable");
     await runtime.copyCloudPath("baidu:2");
+
+    runtime.setVerificationStatuses(["unverified"]);
+    await vi.waitFor(() => {
+      expect(runtime.snapshot()).toMatchObject({ total: 1, verificationStatuses: ["unverified"] });
+    });
+    runtime.setVerificationStatuses(["difference"]);
+    await vi.waitFor(() => { expect(runtime.snapshot().total).toBe(0); });
+    runtime.setIncludeCloudMissing(true);
+    runtime.setDifferenceKinds(["cloud-missing"]);
+    runtime.setHierarchyTag("folder/Science");
+    await vi.waitFor(() => {
+      expect(runtime.snapshot()).toMatchObject({
+        total: 1,
+        includeCloudMissing: true,
+        differenceKinds: ["cloud-missing"],
+        hierarchyTag: "folder/Science",
+      });
+    });
     expect(actionPort.copied).toEqual(["Unverified.pdf", "/Library/Science/Verified.pdf"]);
   });
 });

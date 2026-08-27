@@ -48,6 +48,7 @@ describe("large catalog verification integration", () => {
         maxDepth: 2,
       },
     });
+    await new UnifiedCatalogProjectionService(adapter, { now: () => 1 }).rebuild();
     const requests: Array<Readonly<{ path: string; start: number }>> = [];
     const entry: BaiduListEntry = {
       fsId: "7",
@@ -68,7 +69,6 @@ describe("large catalog verification integration", () => {
       source,
       store: adapter,
       reconcile: new CatalogReconciliationService(),
-      project: new UnifiedCatalogProjectionService(adapter, { now: () => 200 }),
       now: () => 100,
     });
 

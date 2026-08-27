@@ -9,6 +9,7 @@ import {
   type ActiveCatalogOverlay,
   type CandidateCatalogDescriptor,
   type CatalogDifferenceRecordV1,
+  type CatalogReconciliationResult,
   type TxtCandidateRecordV1,
   type UnifiedCatalogDescriptor,
   type UnifiedCatalogRecordV1,
@@ -104,6 +105,7 @@ class ProjectionStore implements UnifiedCatalogStorePort {
   async loadActiveCandidateDescriptor() {
     return candidateDescriptor(this.candidates.length);
   }
+  async loadActiveCandidateSummary() { return null; }
   async loadActiveCandidateGroups(groupKeys: readonly string[]) {
     const selected = new Set(groupKeys);
     return {
@@ -114,7 +116,10 @@ class ProjectionStore implements UnifiedCatalogStorePort {
   async loadActiveCandidates() {
     return { descriptor: candidateDescriptor(this.candidates.length), records: this.candidates };
   }
+  async loadActiveOverlayDescriptors() { return this.overlays.map((value) => value.descriptor); }
   async loadActiveOverlays(): Promise<readonly ActiveCatalogOverlay[]> { return this.overlays; }
+  async loadActiveUnifiedSummary() { return null; }
+  async queryActiveUnified() { return null; }
   async writeUnifiedSnapshot(input: Readonly<{
     sourceImportSha256: string;
     records: readonly UnifiedCatalogRecordV1[];
@@ -135,6 +140,9 @@ class ProjectionStore implements UnifiedCatalogStorePort {
     return descriptor;
   }
   async loadActiveUnified() { return this.activeUnified; }
+  async writeUnifiedGroupSnapshot(input: CatalogReconciliationResult) {
+    return this.writeUnifiedSnapshot(input);
+  }
 }
 
 const overlay = (input: Readonly<{

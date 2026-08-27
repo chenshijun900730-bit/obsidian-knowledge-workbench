@@ -70,6 +70,70 @@ const validateEnumFilter = <T extends string>(
   return decoded;
 };
 
+export const createUnifiedCatalogSearchPredicate = (
+  query: UnifiedCatalogSearchQuery,
+): ((record: UnifiedCatalogRecordV1) => boolean) => {
+  const filters = validateQuery(query);
+  const text = normalizeSearchText(query.text);
+  const exactIsbn = /^(?:\d{13}|\d{9}[\dXx])$/u.test(text)
+    ? text.toLocaleUpperCase("en-US")
+    : undefined;
+  return (record) => {
+    if (!filters.includeCloudMissing && !record.visibleByDefault) return false;
+    if (filters.statuses !== undefined && !filters.statuses.includes(record.verificationStatus)) return false;
+    if (
+      filters.differenceKinds !== undefined
+      && !filters.differenceKinds.some((kind) => record.differenceKinds.includes(kind))
+    ) return false;
+    if (filters.topLevelGroupId !== undefined && record.topLevelGroupId !== filters.topLevelGroupId) return false;
+    if (filters.hierarchyTag !== undefined && !record.hierarchyTags.includes(filters.hierarchyTag)) return false;
+    if (text.length === 0) return true;
+    const searchableText = normalizeSearchText([
+      record.filename,
+      record.title,
+      record.relativePath,
+      ...(record.cloudPath === null ? [] : [record.cloudPath]),
+      ...record.hierarchyTags,
+    ].join("\u0000"));
+    return searchableText.includes(text)
+      || (exactIsbn !== undefined && record.isbnCandidates.includes(exactIsbn));
+  };
+};
+
+const validateQuery = (query: UnifiedCatalogSearchQuery): Readonly<{
+  statuses?: readonly CatalogVerificationStatus[];
+  differenceKinds?: readonly CatalogDifferenceKind[];
+  topLevelGroupId?: string;
+  hierarchyTag?: string;
+  includeCloudMissing: boolean;
+}> => {
+  if (
+    typeof query.text !== "string"
+    || !Number.isSafeInteger(query.offset)
+    || query.offset < 0
+    || !Number.isSafeInteger(query.limit)
+    || query.limit < 1
+    || query.limit > 50
+    || (query.includeCloudMissing !== undefined && typeof query.includeCloudMissing !== "boolean")
+  ) return invalidQuery();
+  const statuses = validateEnumFilter(query.statuses, STATUS_VALUES);
+  const differenceKinds = validateEnumFilter(query.differenceKinds, DIFFERENCE_VALUES);
+  const topLevelGroupId = query.topLevelGroupId;
+  if (topLevelGroupId !== undefined && !GROUP_PATTERN.test(topLevelGroupId)) return invalidQuery();
+  const hierarchyTag = query.hierarchyTag?.normalize("NFC");
+  if (
+    hierarchyTag !== undefined
+    && (!hierarchyTag.startsWith("folder/") || hierarchyTag.length <= "folder/".length)
+  ) return invalidQuery();
+  return {
+    ...(statuses === undefined ? {} : { statuses }),
+    ...(differenceKinds === undefined ? {} : { differenceKinds }),
+    ...(topLevelGroupId === undefined ? {} : { topLevelGroupId }),
+    ...(hierarchyTag === undefined ? {} : { hierarchyTag }),
+    includeCloudMissing: query.includeCloudMissing ?? false,
+  };
+};
+
 export class UnifiedCatalogSearchService {
   readonly #records: readonly UnifiedCatalogRecordV1[];
   #searchableText: readonly string[] | null = null;
@@ -79,7 +143,7 @@ export class UnifiedCatalogSearchService {
   }
 
   query(query: UnifiedCatalogSearchQuery): UnifiedCatalogSearchPage {
-    const filters = this.#validateQuery(query);
+    const filters = validateQuery(query);
     const text = normalizeSearchText(query.text);
     const exactIsbn = /^(?:\d{13}|\d{9}[\dXx])$/u.test(text)
       ? text.toLocaleUpperCase("en-US")
@@ -126,37 +190,4 @@ export class UnifiedCatalogSearchService {
     return this.#searchableText;
   }
 
-  #validateQuery(query: UnifiedCatalogSearchQuery): Readonly<{
-    statuses?: readonly CatalogVerificationStatus[];
-    differenceKinds?: readonly CatalogDifferenceKind[];
-    topLevelGroupId?: string;
-    hierarchyTag?: string;
-    includeCloudMissing: boolean;
-  }> {
-    if (
-      typeof query.text !== "string"
-      || !Number.isSafeInteger(query.offset)
-      || query.offset < 0
-      || !Number.isSafeInteger(query.limit)
-      || query.limit < 1
-      || query.limit > 50
-      || (query.includeCloudMissing !== undefined && typeof query.includeCloudMissing !== "boolean")
-    ) return invalidQuery();
-    const statuses = validateEnumFilter(query.statuses, STATUS_VALUES);
-    const differenceKinds = validateEnumFilter(query.differenceKinds, DIFFERENCE_VALUES);
-    const topLevelGroupId = query.topLevelGroupId;
-    if (topLevelGroupId !== undefined && !GROUP_PATTERN.test(topLevelGroupId)) return invalidQuery();
-    const hierarchyTag = query.hierarchyTag?.normalize("NFC");
-    if (
-      hierarchyTag !== undefined
-      && (!hierarchyTag.startsWith("folder/") || hierarchyTag.length <= "folder/".length)
-    ) return invalidQuery();
-    return {
-      ...(statuses === undefined ? {} : { statuses }),
-      ...(differenceKinds === undefined ? {} : { differenceKinds }),
-      ...(topLevelGroupId === undefined ? {} : { topLevelGroupId }),
-      ...(hierarchyTag === undefined ? {} : { hierarchyTag }),
-      includeCloudMissing: query.includeCloudMissing ?? false,
-    };
-  }
 }

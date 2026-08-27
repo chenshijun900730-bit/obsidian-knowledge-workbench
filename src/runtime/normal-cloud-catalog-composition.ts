@@ -136,7 +136,6 @@ export const createNormalCloudCatalogRuntime = (
     source: baiduSource,
     store: hybridStore,
     reconcile: reconciliation,
-    project: projection,
     now,
   });
   const hybrid = new HybridCatalogRuntimeService({

@@ -23,7 +23,6 @@ import {
   type LargeCatalogVerificationSummary,
   type LargeVerificationProgressEvent,
 } from "./large-catalog-verification-progress";
-import type { UnifiedCatalogProjectionService } from "./unified-catalog-projection-service";
 
 export type {
   LargeCatalogVerificationSummary,
@@ -59,7 +58,6 @@ export interface LargeCatalogVerificationDependencies {
   readonly source: BaiduCatalogSourcePort;
   readonly store: HybridCatalogStorePort;
   readonly reconcile: Pick<CatalogReconciliationService, "reconcile">;
-  readonly project: Pick<UnifiedCatalogProjectionService, "rebuild">;
   readonly now?: () => number;
 }
 
@@ -142,7 +140,6 @@ export class LargeCatalogVerificationService {
   readonly #source: BaiduCatalogSourcePort;
   readonly #store: HybridCatalogStorePort;
   readonly #reconcile: Pick<CatalogReconciliationService, "reconcile">;
-  readonly #project: Pick<UnifiedCatalogProjectionService, "rebuild">;
   readonly #now: () => number;
   #active = false;
 
@@ -150,7 +147,6 @@ export class LargeCatalogVerificationService {
     this.#source = dependencies.source;
     this.#store = dependencies.store;
     this.#reconcile = dependencies.reconcile;
-    this.#project = dependencies.project;
     this.#now = dependencies.now ?? Date.now;
   }
 
@@ -698,7 +694,7 @@ export class LargeCatalogVerificationService {
     });
     await this.#store.writeCatalogOverlay(result);
     try {
-      await this.#project.rebuild();
+      await this.#store.writeUnifiedGroupSnapshot(result);
     } catch (error) {
       await this.#store.restoreCatalogOverlayActivation({
         topLevelGroupId: group.groupKey,

@@ -69,6 +69,30 @@ class MemoryHybridCatalogStore implements CandidateCatalogStorePort {
     return this.active?.descriptor ?? null;
   }
 
+  async loadActiveCandidateSummary() {
+    if (this.active === null) return null;
+    const groups = new Map<string, { label: string; rootRelativePath: string; pdfCount: number }>();
+    for (const record of this.active.records) {
+      const rootRelativePath = record.topLevelGroupId === "txt-root-items"
+        ? ""
+        : record.relativePath.split("/")[0] ?? "";
+      const prior = groups.get(record.topLevelGroupId);
+      groups.set(record.topLevelGroupId, {
+        label: prior?.label ?? (rootRelativePath || "Root items"),
+        rootRelativePath,
+        pdfCount: (prior?.pdfCount ?? 0) + 1,
+      });
+    }
+    return {
+      descriptor: this.active.descriptor,
+      groups: [...groups].map(([groupKey, value]) => ({
+        groupKey,
+        ...value,
+        mode: groupKey === "txt-root-items" ? "direct-files-only" as const : "recursive" as const,
+      })),
+    };
+  }
+
   async loadActiveCandidateGroups(groupKeys: readonly string[]): Promise<Readonly<{
     descriptor: CandidateCatalogDescriptor;
     records: readonly TxtCandidateRecordV1[];

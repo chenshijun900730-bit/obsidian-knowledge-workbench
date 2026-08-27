@@ -32,11 +32,18 @@ import { isbnCandidatesFromFilename } from "../catalog/catalog-codec";
 import { normalizeCloudAbsolutePath } from "../catalog/catalog-path";
 import type { CloudCatalogRecord } from "../catalog/catalog-types";
 import type {
+  ActiveCandidateCatalogSummary,
+  ActiveUnifiedCatalogQueryResult,
+  ActiveUnifiedCatalogSummary,
   CandidateImportWriter,
   HybridCatalogActivationSnapshot,
   HybridCatalogStorePort,
   LargeCatalogPageIdentity,
 } from "../catalog/hybrid-catalog-ports";
+import {
+  createUnifiedCatalogSearchPredicate,
+  type UnifiedCatalogSearchQuery,
+} from "../catalog/unified-catalog-search-service";
 import {
   CATALOG_TXT_IMPORT_BUDGET,
   MAX_UNIFIED_CATALOG_PDF_COUNT,
@@ -65,6 +72,17 @@ const HASH_PATTERN = /^[a-f0-9]{64}$/u;
 const GROUP_PATTERN = /^(?:txt-root-items|group:[a-f0-9]{64})$/u;
 const CANDIDATE_GROUP_FIELD_PATTERN = /"topLevelGroupId":"(txt-root-items|group:[a-f0-9]{64})"/u;
 const CATALOG_ID_PATTERN = /^(?:txt:[a-f0-9]{64}|baidu:(?:0|[1-9]\d*))$/u;
+
+const firstRelativeSegment = (value: string): string => value.split("/")[0] ?? "";
+const candidateGroupLabel = (record: TxtCandidateRecordV1): string => (
+  record.topLevelGroupId === "txt-root-items" ? "Root items" : firstRelativeSegment(record.relativePath)
+);
+const unifiedGroupLabel = (record: UnifiedCatalogRecordV1): string => {
+  if (record.topLevelGroupId === "txt-root-items") return "Root items";
+  const topTag = record.hierarchyTags[0];
+  if (topTag?.startsWith("folder/") === true) return topTag.slice("folder/".length);
+  return firstRelativeSegment(record.relativePath) || record.topLevelGroupId;
+};
 
 export interface HybridAtomicRenamePort {
   rename(source: string, destination: string): Promise<void>;
@@ -586,6 +604,19 @@ export class LocalHybridCatalogAdapter implements HybridCatalogStorePort {
     return active === null ? null : cloneDescriptor(active.descriptor);
   }
 
+  async loadActiveCandidateSummary(): Promise<ActiveCandidateCatalogSummary | null> {
+    const active = await this.#loadActiveCandidateReference();
+    if (active === null) return null;
+    return {
+      descriptor: cloneDescriptor(active.descriptor),
+      groups: await this.#summarizeCandidateGroups(
+        active.candidatesPath,
+        active.descriptor.pdfCount,
+        active.descriptor.candidateSha256,
+      ),
+    };
+  }
+
   async loadActiveCandidateGroups(groupKeys: readonly string[]): Promise<Readonly<{
     descriptor: CandidateCatalogDescriptor;
     records: readonly TxtCandidateRecordV1[];
@@ -1066,6 +1097,35 @@ export class LocalHybridCatalogAdapter implements HybridCatalogStorePort {
     }
   }
 
+  async loadActiveOverlayDescriptors(): Promise<readonly CatalogOverlayDescriptor[]> {
+    await this.#ensureOverlayLayout();
+    const references = await this.#readActiveOverlayReferences();
+    const activeCandidate = await this.loadActiveCandidateDescriptor();
+    if (activeCandidate === null) return [];
+    const descriptors: CatalogOverlayDescriptor[] = [];
+    for (const reference of references) {
+      if (reference.sourceImportSha256 !== activeCandidate.sourceSha256) continue;
+      const directory = this.#contained(join(this.#overlaysRoot, reference.overlayId));
+      await this.#requirePrivateDirectory(directory);
+      const descriptorRaw = (await this.#readPrivateFile(
+        join(directory, "descriptor.json"),
+        64 * 1024,
+      )).toString("utf8");
+      if (!descriptorRaw.endsWith("\n") || sha256(descriptorRaw) !== reference.descriptorSha256) {
+        throw corrupt();
+      }
+      const descriptor = decodeCatalogOverlayDescriptor(descriptorRaw.slice(0, -1));
+      if (
+        descriptorRaw !== `${encodeCatalogOverlayDescriptor(descriptor)}\n`
+        || descriptor.overlayId !== reference.overlayId
+        || descriptor.sourceImportSha256 !== reference.sourceImportSha256
+        || descriptor.topLevelGroupId !== reference.topLevelGroupId
+      ) throw corrupt();
+      descriptors.push(cloneOverlayDescriptor(descriptor));
+    }
+    return descriptors;
+  }
+
   async loadActiveOverlays(): Promise<readonly ActiveCatalogOverlay[]> {
     await this.#ensureOverlayLayout();
     const references = await this.#readActiveOverlayReferences();
@@ -1436,10 +1496,163 @@ export class LocalHybridCatalogAdapter implements HybridCatalogStorePort {
     }
   }
 
-  async loadActiveUnified(): Promise<Readonly<{
+  async writeUnifiedGroupSnapshot(
+    input: CatalogReconciliationResult & Readonly<{ signal?: AbortSignal }>,
+  ): Promise<UnifiedCatalogDescriptor> {
+    const assertNotAborted = (): void => {
+      if (input.signal?.aborted === true) throw corrupt();
+    };
+    assertNotAborted();
+    await this.#ensureUnifiedLayout();
+    const candidate = await this.loadActiveCandidateDescriptor();
+    const active = await this.#loadActiveUnifiedReference();
+    if (
+      candidate === null
+      || active === null
+      || !GROUP_PATTERN.test(input.topLevelGroupId)
+      || !HASH_PATTERN.test(input.sourceImportSha256)
+      || candidate.sourceSha256 !== input.sourceImportSha256
+      || active.descriptor.sourceImportSha256 !== input.sourceImportSha256
+      || !Number.isSafeInteger(input.completedAt)
+      || input.completedAt < 0
+      || input.records.length > MAX_UNIFIED_CATALOG_PDF_COUNT
+      || input.differences.length > MAX_DIFFERENCE_COUNT
+    ) throw corrupt();
+    const records = input.records.map((record) => (
+      decodeUnifiedCatalogRecord(encodeUnifiedCatalogRecordLine(record).slice(0, -1))
+    ));
+    const recordIds = new Set<string>();
+    for (let index = 0; index < records.length; index += 1) {
+      const record = records[index]!;
+      if (record.topLevelGroupId !== input.topLevelGroupId || recordIds.has(record.catalogId)) {
+        throw corrupt();
+      }
+      recordIds.add(record.catalogId);
+      const prior = records[index - 1];
+      if (prior !== undefined && this.#compareUnified(prior, record) >= 0) throw corrupt();
+    }
+    const differences = input.differences.map((difference) => (
+      decodeCatalogDifferenceRecord(encodeCatalogDifferenceRecordLine(difference).slice(0, -1))
+    ));
+    const differenceKeys = new Set<string>();
+    for (let index = 0; index < differences.length; index += 1) {
+      const difference = differences[index]!;
+      const key = `${difference.catalogId}\u0000${difference.kind}`;
+      if (
+        difference.topLevelGroupId !== input.topLevelGroupId
+        || !recordIds.has(difference.catalogId)
+        || differenceKeys.has(key)
+      ) throw corrupt();
+      differenceKeys.add(key);
+      const prior = differences[index - 1];
+      if (prior !== undefined && this.#compareDifference(prior, difference) >= 0) throw corrupt();
+    }
+    let snapshotId: string;
+    try {
+      snapshotId = safeImportId(this.createUnifiedSnapshotId());
+    } catch {
+      throw corrupt();
+    }
+    const stagingDirectory = this.#contained(join(this.#unifiedRoot, `.staging-${snapshotId}`));
+    const finalDirectory = this.#contained(join(this.#unifiedRoot, snapshotId));
+    let promotedToFinal = false;
+    try {
+      await mkdir(stagingDirectory, { mode: DIRECTORY_MODE });
+      await this.#requirePrivateDirectory(stagingDirectory);
+      const catalog = await this.#mergeCanonicalGroupFile({
+        sourcePath: active.catalogPath,
+        destinationPath: join(stagingDirectory, "catalog.ndjson"),
+        expectedCount: active.descriptor.recordCount,
+        expectedSha256: active.descriptor.catalogSha256,
+        maximumCount: MAX_UNIFIED_CATALOG_PDF_COUNT,
+        maximumBytes: MAX_UNIFIED_BYTES,
+        groupKey: input.topLevelGroupId,
+        replacements: records,
+        decode: decodeUnifiedCatalogRecord,
+        encode: encodeUnifiedCatalogRecordLine,
+        compare: (left, right) => this.#compareUnified(left, right),
+        groupOf: (record) => record.topLevelGroupId,
+        signal: input.signal,
+      });
+      assertNotAborted();
+      const difference = await this.#mergeCanonicalGroupFile({
+        sourcePath: active.differencesPath,
+        destinationPath: join(stagingDirectory, "differences.ndjson"),
+        expectedCount: active.descriptor.differenceCount,
+        expectedSha256: active.descriptor.differencesSha256,
+        maximumCount: MAX_DIFFERENCE_COUNT,
+        maximumBytes: MAX_UNIFIED_BYTES,
+        groupKey: input.topLevelGroupId,
+        replacements: differences,
+        decode: decodeCatalogDifferenceRecord,
+        encode: encodeCatalogDifferenceRecordLine,
+        compare: (left, right) => this.#compareDifference(left, right),
+        groupOf: (record) => record.topLevelGroupId,
+        signal: input.signal,
+      });
+      assertNotAborted();
+      const descriptor = decodeUnifiedCatalogDescriptor(JSON.stringify({
+        schemaVersion: 1,
+        snapshotId,
+        sourceImportSha256: input.sourceImportSha256,
+        completedAt: input.completedAt,
+        recordCount: catalog.count,
+        differenceCount: difference.count,
+        catalogSha256: catalog.sha256,
+        differencesSha256: difference.sha256,
+      }));
+      const descriptorRaw = `${JSON.stringify(descriptor)}\n`;
+      await this.#writeAtomic(join(stagingDirectory, "descriptor.json"), descriptorRaw);
+      await this.#scanUnifiedRecords(
+        join(stagingDirectory, "catalog.ndjson"),
+        descriptor.recordCount,
+        descriptor.catalogSha256,
+      );
+      await this.#verifyDifferences(
+        join(stagingDirectory, "differences.ndjson"),
+        descriptor.differenceCount,
+        descriptor.differencesSha256,
+      );
+      assertNotAborted();
+      await this.renames.rename(stagingDirectory, finalDirectory);
+      promotedToFinal = true;
+      await this.#requirePrivateDirectory(finalDirectory);
+      const nextActive: ActiveUnifiedManifestV2 = {
+        schemaVersion: 2,
+        snapshotId,
+        sourceImportSha256: descriptor.sourceImportSha256,
+        candidateImportId: candidate.importId,
+        descriptorSha256: sha256(descriptorRaw),
+        recordCount: descriptor.recordCount,
+        differenceCount: descriptor.differenceCount,
+      };
+      const priorActiveRaw = (await this.#readPrivateFile(
+        this.#activeUnifiedPath,
+        64 * 1024,
+      )).toString("utf8");
+      assertNotAborted();
+      await this.#writeAtomic(this.#activeUnifiedPath, `${JSON.stringify(nextActive)}\n`);
+      if (input.signal?.aborted === true) {
+        await this.#writeAtomic(this.#activeUnifiedPath, priorActiveRaw);
+        throw corrupt();
+      }
+      return cloneUnifiedDescriptor(descriptor);
+    } catch (error) {
+      try {
+        await rm(stagingDirectory, { recursive: true, force: true });
+        if (promotedToFinal) await rm(finalDirectory, { recursive: true, force: true });
+      } catch {
+        // Preserve the fixed snapshot failure.
+      }
+      if (error instanceof HybridCatalogError) throw error;
+      throw corrupt();
+    }
+  }
+
+  async #loadActiveUnifiedReference(): Promise<Readonly<{
     descriptor: UnifiedCatalogDescriptor;
-    records: readonly UnifiedCatalogRecordV1[];
-    differences: readonly CatalogDifferenceRecordV1[];
+    catalogPath: string;
+    differencesPath: string;
   }> | null> {
     await this.#ensureUnifiedLayout();
     try {
@@ -1481,20 +1694,73 @@ export class LocalHybridCatalogAdapter implements HybridCatalogStorePort {
       || descriptor.recordCount !== active.recordCount
       || descriptor.differenceCount !== active.differenceCount
     ) throw corrupt();
+    return {
+      descriptor: cloneUnifiedDescriptor(descriptor),
+      catalogPath: join(snapshotDirectory, "catalog.ndjson"),
+      differencesPath: join(snapshotDirectory, "differences.ndjson"),
+    };
+  }
+
+  async loadActiveUnifiedSummary(): Promise<ActiveUnifiedCatalogSummary | null> {
+    const active = await this.#loadActiveUnifiedReference();
+    if (active === null) return null;
+    const scanned = await this.#scanUnifiedRecords(
+      active.catalogPath,
+      active.descriptor.recordCount,
+      active.descriptor.catalogSha256,
+    );
+    await this.#verifyDifferenceFile(
+      active.differencesPath,
+      active.descriptor.differenceCount,
+      active.descriptor.differencesSha256,
+    );
+    return {
+      descriptor: cloneUnifiedDescriptor(active.descriptor),
+      aggregate: scanned.aggregate,
+    };
+  }
+
+  async queryActiveUnified(
+    query: UnifiedCatalogSearchQuery,
+    signal?: AbortSignal,
+  ): Promise<ActiveUnifiedCatalogQueryResult | null> {
+    const active = await this.#loadActiveUnifiedReference();
+    if (active === null) return null;
+    const scanned = await this.#scanUnifiedRecords(
+      active.catalogPath,
+      active.descriptor.recordCount,
+      active.descriptor.catalogSha256,
+      query,
+      signal,
+    );
+    return {
+      descriptor: cloneUnifiedDescriptor(active.descriptor),
+      aggregate: scanned.aggregate,
+      page: scanned.page!,
+    };
+  }
+
+  async loadActiveUnified(): Promise<Readonly<{
+    descriptor: UnifiedCatalogDescriptor;
+    records: readonly UnifiedCatalogRecordV1[];
+    differences: readonly CatalogDifferenceRecordV1[];
+  }> | null> {
+    const active = await this.#loadActiveUnifiedReference();
+    if (active === null) return null;
     const records = await this.#verifyUnifiedRecords(
-      join(snapshotDirectory, "catalog.ndjson"),
-      descriptor.recordCount,
-      descriptor.catalogSha256,
+      active.catalogPath,
+      active.descriptor.recordCount,
+      active.descriptor.catalogSha256,
     );
     const differences = await this.#verifyDifferences(
-      join(snapshotDirectory, "differences.ndjson"),
-      descriptor.differenceCount,
-      descriptor.differencesSha256,
+      active.differencesPath,
+      active.descriptor.differenceCount,
+      active.descriptor.differencesSha256,
     );
     const recordIds = new Set(records.map((record) => record.catalogId));
     if (differences.some((difference) => !recordIds.has(difference.catalogId))) throw corrupt();
     return {
-      descriptor: cloneUnifiedDescriptor(descriptor),
+      descriptor: cloneUnifiedDescriptor(active.descriptor),
       records: records.map(cloneUnifiedRecord),
       differences: differences.map(cloneDifference),
     };
@@ -2034,6 +2300,102 @@ export class LocalHybridCatalogAdapter implements HybridCatalogStorePort {
     await this.#verifyCandidateGroups(path, expectedCount, expectedSha256, new Set());
   }
 
+  async #summarizeCandidateGroups(
+    path: string,
+    expectedCount: number,
+    expectedSha256: string,
+  ): Promise<ActiveCandidateCatalogSummary["groups"]> {
+    if (
+      !Number.isSafeInteger(expectedCount)
+      || expectedCount < 1
+      || !HASH_PATTERN.test(expectedSha256)
+    ) throw corrupt();
+    const contained = this.#contained(path);
+    const groups = new Map<string, {
+      label: string;
+      rootRelativePath: string;
+      pdfCount: number;
+      mode: "recursive" | "direct-files-only";
+    }>();
+    let count = 0;
+    let handle: FileHandle | undefined;
+    const hasher = createHash("sha256");
+    const decoder = new StringDecoder("utf8");
+    let carry = "";
+    const consume = (line: string): void => {
+      if (line.length === 0) throw corrupt();
+      const record = decodeTxtCandidateRecord(line);
+      if (`${line}\n` !== encodeTxtCandidateRecordLine(record)) throw corrupt();
+      const rootRelativePath = record.topLevelGroupId === "txt-root-items"
+        ? ""
+        : firstRelativeSegment(record.relativePath);
+      if (
+        !GROUP_PATTERN.test(record.topLevelGroupId)
+        || (record.topLevelGroupId === "txt-root-items" && record.relativePath.includes("/"))
+        || (record.topLevelGroupId !== "txt-root-items" && rootRelativePath.length === 0)
+      ) throw corrupt();
+      const prior = groups.get(record.topLevelGroupId);
+      if (prior !== undefined && prior.rootRelativePath !== rootRelativePath) throw corrupt();
+      groups.set(record.topLevelGroupId, {
+        label: prior?.label ?? candidateGroupLabel(record),
+        rootRelativePath,
+        pdfCount: (prior?.pdfCount ?? 0) + 1,
+        mode: record.topLevelGroupId === "txt-root-items" ? "direct-files-only" : "recursive",
+      });
+      count += 1;
+      if (count > expectedCount) throw corrupt();
+    };
+    try {
+      const initial = await lstat(contained);
+      if (
+        !initial.isFile()
+        || initial.isSymbolicLink()
+        || (initial.mode & 0o777) !== FILE_MODE
+        || initial.size < 1
+        || initial.size > MAX_CANDIDATE_BYTES
+      ) throw corrupt();
+      handle = await open(contained, constants.O_RDONLY | constants.O_NOFOLLOW);
+      const opened = await handle.stat();
+      if (!sameFile(initial, opened)) throw corrupt();
+      const chunk = Buffer.allocUnsafe(64 * 1024);
+      while (true) {
+        const { bytesRead } = await handle.read(chunk, 0, chunk.length, null);
+        if (bytesRead === 0) break;
+        const bytes = chunk.subarray(0, bytesRead);
+        hasher.update(bytes);
+        const text = carry + decoder.write(bytes);
+        let offset = 0;
+        while (true) {
+          const end = text.indexOf("\n", offset);
+          if (end < 0) break;
+          consume(text.slice(offset, end));
+          offset = end + 1;
+        }
+        carry = text.slice(offset);
+      }
+      carry += decoder.end();
+      if (carry.length !== 0 || count !== expectedCount || hasher.digest("hex") !== expectedSha256) {
+        throw corrupt();
+      }
+      const completed = await handle.stat();
+      const completedPath = await lstat(contained);
+      if (!sameFile(initial, completed) || !sameFile(initial, completedPath)) throw corrupt();
+    } catch {
+      throw corrupt();
+    } finally {
+      if (handle !== undefined) {
+        try { await handle.close(); } catch { /* Fixed read-only cleanup. */ }
+      }
+    }
+    return [...groups.entries()].map(([groupKey, group]) => ({ groupKey, ...group })).sort((left, right) => {
+      if (left.groupKey === "txt-root-items" && right.groupKey !== "txt-root-items") return -1;
+      if (right.groupKey === "txt-root-items" && left.groupKey !== "txt-root-items") return 1;
+      if (left.label < right.label) return -1;
+      if (left.label > right.label) return 1;
+      return left.groupKey.localeCompare(right.groupKey, "en-US");
+    });
+  }
+
   async #verifyCandidateGroups(
     path: string,
     expectedCount: number,
@@ -2133,6 +2495,298 @@ export class LocalHybridCatalogAdapter implements HybridCatalogStorePort {
     return 0;
   }
 
+  async #mergeCanonicalGroupFile<T>(input: Readonly<{
+    sourcePath: string;
+    destinationPath: string;
+    expectedCount: number;
+    expectedSha256: string;
+    maximumCount: number;
+    maximumBytes: number;
+    groupKey: string;
+    replacements: readonly T[];
+    decode: (raw: string) => T;
+    encode: (record: T) => string;
+    compare: (left: T, right: T) => number;
+    groupOf: (record: T) => string;
+    signal?: AbortSignal;
+  }>): Promise<Readonly<{ count: number; sha256: string }>> {
+    if (
+      !Number.isSafeInteger(input.expectedCount)
+      || input.expectedCount < 0
+      || input.expectedCount > input.maximumCount
+      || !HASH_PATTERN.test(input.expectedSha256)
+      || !GROUP_PATTERN.test(input.groupKey)
+    ) throw corrupt();
+    const sourcePath = this.#contained(input.sourcePath);
+    const destinationPath = this.#contained(input.destinationPath);
+    let source: FileHandle | undefined;
+    let destination: FileHandle | undefined;
+    const sourceHasher = createHash("sha256");
+    const outputHasher = createHash("sha256");
+    const decoder = new StringDecoder("utf8");
+    let carry = "";
+    let sourceCount = 0;
+    let outputCount = 0;
+    let outputBytes = 0;
+    let replacementIndex = 0;
+    let priorSource: T | undefined;
+    let priorOutput: T | undefined;
+    let pending = "";
+    const assertNotAborted = (): void => {
+      if (input.signal?.aborted === true) throw corrupt();
+    };
+    const emit = (record: T): void => {
+      if (priorOutput !== undefined && input.compare(priorOutput, record) >= 0) throw corrupt();
+      const line = input.encode(record);
+      const decoded = input.decode(line.slice(0, -1));
+      if (line !== input.encode(decoded)) throw corrupt();
+      priorOutput = decoded;
+      pending += line;
+      outputHasher.update(line);
+      outputBytes += Buffer.byteLength(line, "utf8");
+      outputCount += 1;
+      if (outputCount > input.maximumCount || outputBytes > input.maximumBytes) throw corrupt();
+    };
+    const mergeBefore = (record: T): void => {
+      while (replacementIndex < input.replacements.length) {
+        const replacement = input.replacements[replacementIndex]!;
+        const compared = input.compare(replacement, record);
+        if (compared > 0) break;
+        if (compared === 0) throw corrupt();
+        emit(replacement);
+        replacementIndex += 1;
+      }
+    };
+    const consume = (line: string): void => {
+      assertNotAborted();
+      if (line.length === 0) throw corrupt();
+      const record = input.decode(line);
+      if (
+        `${line}\n` !== input.encode(record)
+        || (priorSource !== undefined && input.compare(priorSource, record) >= 0)
+      ) throw corrupt();
+      priorSource = record;
+      sourceCount += 1;
+      if (sourceCount > input.expectedCount) throw corrupt();
+      if (input.groupOf(record) === input.groupKey) return;
+      mergeBefore(record);
+      emit(record);
+    };
+    const flush = async (): Promise<void> => {
+      if (pending.length === 0) return;
+      await destination!.write(pending);
+      pending = "";
+    };
+    try {
+      assertNotAborted();
+      const initial = await lstat(sourcePath);
+      if (
+        !initial.isFile()
+        || initial.isSymbolicLink()
+        || (initial.mode & 0o777) !== FILE_MODE
+        || initial.size < (input.expectedCount === 0 ? 0 : 1)
+        || initial.size > input.maximumBytes
+      ) throw corrupt();
+      source = await open(sourcePath, constants.O_RDONLY | constants.O_NOFOLLOW);
+      destination = await open(destinationPath, "wx", FILE_MODE);
+      await chmod(destinationPath, FILE_MODE);
+      const opened = await source.stat();
+      if (!sameFile(initial, opened)) throw corrupt();
+      const chunk = Buffer.allocUnsafe(64 * 1024);
+      while (true) {
+        assertNotAborted();
+        const { bytesRead } = await source.read(chunk, 0, chunk.length, null);
+        if (bytesRead === 0) break;
+        const bytes = chunk.subarray(0, bytesRead);
+        sourceHasher.update(bytes);
+        const text = carry + decoder.write(bytes);
+        let offset = 0;
+        while (true) {
+          const end = text.indexOf("\n", offset);
+          if (end < 0) break;
+          consume(text.slice(offset, end));
+          offset = end + 1;
+        }
+        carry = text.slice(offset);
+        await flush();
+      }
+      carry += decoder.end();
+      if (
+        carry.length !== 0
+        || sourceCount !== input.expectedCount
+        || sourceHasher.digest("hex") !== input.expectedSha256
+      ) throw corrupt();
+      while (replacementIndex < input.replacements.length) {
+        emit(input.replacements[replacementIndex]!);
+        replacementIndex += 1;
+      }
+      await flush();
+      const completed = await source.stat();
+      const completedPath = await lstat(sourcePath);
+      if (!sameFile(initial, completed) || !sameFile(initial, completedPath)) throw corrupt();
+      await destination.sync();
+      assertNotAborted();
+      return { count: outputCount, sha256: outputHasher.digest("hex") };
+    } catch (error) {
+      if (error instanceof HybridCatalogError) throw error;
+      throw corrupt();
+    } finally {
+      if (source !== undefined) {
+        try { await source.close(); } catch { /* Fixed read-only cleanup. */ }
+      }
+      if (destination !== undefined) {
+        try { await destination.close(); } catch { /* Fixed write cleanup. */ }
+      }
+    }
+  }
+
+  async #scanUnifiedRecords(
+    path: string,
+    expectedCount: number,
+    expectedSha256: string,
+    query?: UnifiedCatalogSearchQuery,
+    signal?: AbortSignal,
+  ): Promise<Readonly<{
+    aggregate: ActiveUnifiedCatalogSummary["aggregate"];
+    page?: ActiveUnifiedCatalogQueryResult["page"];
+  }>> {
+    if (
+      !Number.isSafeInteger(expectedCount)
+      || expectedCount < 0
+      || expectedCount > MAX_UNIFIED_CATALOG_PDF_COUNT
+      || !HASH_PATTERN.test(expectedSha256)
+    ) throw corrupt();
+    const predicate = query === undefined ? undefined : createUnifiedCatalogSearchPredicate(query);
+    const contained = this.#contained(path);
+    const counts = { unverified: 0, verified: 0, difference: 0, cloudMissing: 0 };
+    const differenceKindCounts = { "cloud-added": 0, "cloud-missing": 0, renamed: 0, moved: 0 };
+    const differenceGroupKeys = new Set<string>();
+    const groups = new Map<string, { label: string; count: number }>();
+    const tags = new Map<string, { label: string; count: number }>();
+    const pageRecords: UnifiedCatalogRecordV1[] = [];
+    let matchCount = 0;
+    let count = 0;
+    let prior: UnifiedCatalogRecordV1 | undefined;
+    let handle: FileHandle | undefined;
+    const hasher = createHash("sha256");
+    const decoder = new StringDecoder("utf8");
+    let carry = "";
+    const assertNotAborted = (): void => {
+      if (signal?.aborted === true) {
+        const error = new Error("catalog-query-aborted");
+        error.name = "AbortError";
+        throw error;
+      }
+    };
+    const consume = (line: string): void => {
+      assertNotAborted();
+      if (line.length === 0) throw corrupt();
+      const record = decodeUnifiedCatalogRecord(line);
+      if (
+        `${line}\n` !== encodeUnifiedCatalogRecordLine(record)
+        || (prior !== undefined && this.#compareUnified(prior, record) >= 0)
+      ) throw corrupt();
+      prior = record;
+      count += 1;
+      if (count > expectedCount) throw corrupt();
+      counts[record.verificationStatus] += 1;
+      if (record.verificationStatus === "difference") differenceGroupKeys.add(record.topLevelGroupId);
+      for (const kind of record.differenceKinds) {
+        differenceKindCounts[kind] += 1;
+        if (kind === "cloud-missing") counts.cloudMissing += 1;
+      }
+      const group = groups.get(record.topLevelGroupId);
+      groups.set(record.topLevelGroupId, {
+        label: group?.label ?? unifiedGroupLabel(record),
+        count: (group?.count ?? 0) + 1,
+      });
+      for (const tag of record.hierarchyTags) {
+        const existing = tags.get(tag);
+        tags.set(tag, {
+          label: tag.startsWith("folder/") ? tag.slice("folder/".length) : tag,
+          count: (existing?.count ?? 0) + 1,
+        });
+      }
+      if (query !== undefined && predicate?.(record) === true) {
+        if (matchCount >= query.offset && pageRecords.length < query.limit) {
+          pageRecords.push(cloneUnifiedRecord(record));
+        }
+        matchCount += 1;
+      }
+    };
+    try {
+      assertNotAborted();
+      const initial = await lstat(contained);
+      if (
+        !initial.isFile()
+        || initial.isSymbolicLink()
+        || (initial.mode & 0o777) !== FILE_MODE
+        || initial.size < (expectedCount === 0 ? 0 : 1)
+        || initial.size > MAX_UNIFIED_BYTES
+      ) throw corrupt();
+      handle = await open(contained, constants.O_RDONLY | constants.O_NOFOLLOW);
+      const opened = await handle.stat();
+      if (!sameFile(initial, opened)) throw corrupt();
+      const chunk = Buffer.allocUnsafe(64 * 1024);
+      while (true) {
+        assertNotAborted();
+        const { bytesRead } = await handle.read(chunk, 0, chunk.length, null);
+        if (bytesRead === 0) break;
+        const bytes = chunk.subarray(0, bytesRead);
+        hasher.update(bytes);
+        const text = carry + decoder.write(bytes);
+        let offset = 0;
+        while (true) {
+          const end = text.indexOf("\n", offset);
+          if (end < 0) break;
+          consume(text.slice(offset, end));
+          offset = end + 1;
+        }
+        carry = text.slice(offset);
+      }
+      carry += decoder.end();
+      if (carry.length !== 0 || count !== expectedCount || hasher.digest("hex") !== expectedSha256) {
+        throw corrupt();
+      }
+      const completed = await handle.stat();
+      const completedPath = await lstat(contained);
+      if (!sameFile(initial, completed) || !sameFile(initial, completedPath)) throw corrupt();
+    } catch (error) {
+      if (error instanceof Error && error.name === "AbortError") throw error;
+      throw corrupt();
+    } finally {
+      if (handle !== undefined) {
+        try { await handle.close(); } catch { /* Fixed read-only cleanup. */ }
+      }
+    }
+    const fixedOptionCompare = (
+      left: Readonly<{ label: string }>,
+      right: Readonly<{ label: string }>,
+    ): number => left.label < right.label ? -1 : left.label > right.label ? 1 : 0;
+    const aggregate: ActiveUnifiedCatalogSummary["aggregate"] = {
+      verificationCounts: counts,
+      differenceGroupKeys: [...differenceGroupKeys].sort(),
+      groups: [...groups.entries()]
+        .map(([groupKey, group]) => ({ groupKey, ...group }))
+        .sort(fixedOptionCompare),
+      hierarchyTags: [...tags.entries()]
+        .map(([tag, value]) => ({ tag, ...value }))
+        .sort(fixedOptionCompare),
+      differenceKindCounts,
+    };
+    return {
+      aggregate,
+      ...(query === undefined ? {} : {
+        page: {
+          items: pageRecords,
+          total: matchCount,
+          offset: query.offset,
+          limit: query.limit,
+        },
+      }),
+    };
+  }
+
   async #verifyUnifiedRecords(
     path: string,
     expectedCount: number,
@@ -2206,6 +2860,79 @@ export class LocalHybridCatalogAdapter implements HybridCatalogStorePort {
       differences.push(decoded);
     }
     return differences;
+  }
+
+  async #verifyDifferenceFile(
+    path: string,
+    expectedCount: number,
+    expectedSha256: string,
+  ): Promise<void> {
+    if (
+      !Number.isSafeInteger(expectedCount)
+      || expectedCount < 0
+      || expectedCount > MAX_DIFFERENCE_COUNT
+      || !HASH_PATTERN.test(expectedSha256)
+    ) throw corrupt();
+    const contained = this.#contained(path);
+    let count = 0;
+    let prior: CatalogDifferenceRecordV1 | undefined;
+    let handle: FileHandle | undefined;
+    const hasher = createHash("sha256");
+    const decoder = new StringDecoder("utf8");
+    let carry = "";
+    const consume = (line: string): void => {
+      if (line.length === 0) throw corrupt();
+      const decoded = decodeCatalogDifferenceRecord(line);
+      if (
+        `${line}\n` !== encodeCatalogDifferenceRecordLine(decoded)
+        || (prior !== undefined && this.#compareDifference(prior, decoded) >= 0)
+      ) throw corrupt();
+      prior = decoded;
+      count += 1;
+      if (count > expectedCount) throw corrupt();
+    };
+    try {
+      const initial = await lstat(contained);
+      if (
+        !initial.isFile()
+        || initial.isSymbolicLink()
+        || (initial.mode & 0o777) !== FILE_MODE
+        || initial.size < (expectedCount === 0 ? 0 : 1)
+        || initial.size > MAX_UNIFIED_BYTES
+      ) throw corrupt();
+      handle = await open(contained, constants.O_RDONLY | constants.O_NOFOLLOW);
+      const opened = await handle.stat();
+      if (!sameFile(initial, opened)) throw corrupt();
+      const chunk = Buffer.allocUnsafe(64 * 1024);
+      while (true) {
+        const { bytesRead } = await handle.read(chunk, 0, chunk.length, null);
+        if (bytesRead === 0) break;
+        const bytes = chunk.subarray(0, bytesRead);
+        hasher.update(bytes);
+        const text = carry + decoder.write(bytes);
+        let offset = 0;
+        while (true) {
+          const end = text.indexOf("\n", offset);
+          if (end < 0) break;
+          consume(text.slice(offset, end));
+          offset = end + 1;
+        }
+        carry = text.slice(offset);
+      }
+      carry += decoder.end();
+      if (carry.length !== 0 || count !== expectedCount || hasher.digest("hex") !== expectedSha256) {
+        throw corrupt();
+      }
+      const completed = await handle.stat();
+      const completedPath = await lstat(contained);
+      if (!sameFile(initial, completed) || !sameFile(initial, completedPath)) throw corrupt();
+    } catch {
+      throw corrupt();
+    } finally {
+      if (handle !== undefined) {
+        try { await handle.close(); } catch { /* Fixed read-only cleanup. */ }
+      }
+    }
   }
 
   async #verifySupersededCatalogIds(

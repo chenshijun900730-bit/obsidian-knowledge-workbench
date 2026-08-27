@@ -182,6 +182,25 @@ describe("LocalHybridCatalogAdapter", () => {
       descriptor,
       records: [second],
     });
+    await expect(adapter.loadActiveCandidateSummary()).resolves.toEqual({
+      descriptor,
+      groups: [
+        {
+          groupKey: second.topLevelGroupId,
+          label: "Other",
+          rootRelativePath: "Other",
+          pdfCount: 1,
+          mode: "recursive",
+        },
+        {
+          groupKey: first.topLevelGroupId,
+          label: "Synthetic",
+          rootRelativePath: "Synthetic",
+          pdfCount: 1,
+          mode: "recursive",
+        },
+      ],
+    });
   });
 
   it("makes commit idempotent and rejects append after completion", async () => {
@@ -400,6 +419,61 @@ describe("LocalHybridCatalogAdapter", () => {
     expect((await stat(join(directory, "catalog.ndjson"))).mode & 0o777).toBe(0o600);
     expect((await stat(join(directory, "differences.ndjson"))).mode & 0o777).toBe(0o600);
     expect((await stat(join(directory, "descriptor.json"))).mode & 0o777).toBe(0o600);
+  });
+
+  it("streams unified summaries, bounded queries, and one-group replacement", async () => {
+    const root = await temporaryRoot();
+    let ordinal = 0;
+    const adapter = new LocalHybridCatalogAdapter(root, undefined, () => `unified-${++ordinal}`);
+    const first = candidate();
+    const second: TxtCandidateRecordV1 = {
+      ...candidate("B.pdf"),
+      relativePath: "Other/B.pdf",
+      parentRelativePath: "Other",
+      topLevelGroupId: `group:${"d".repeat(64)}`,
+      hierarchyTags: ["folder/Other"],
+    };
+    await commit(adapter, "import-stream", [first, second]);
+    const firstUnified = verifiedRecord(first, "1");
+    const secondUnified = verifiedRecord(second, "2");
+    await adapter.writeUnifiedSnapshot({
+      sourceImportSha256: HASH_A,
+      records: [secondUnified, firstUnified],
+      differences: [],
+      completedAt: 200,
+    });
+
+    await expect(adapter.queryActiveUnified({
+      text: "B.pdf",
+      offset: 0,
+      limit: 50,
+    })).resolves.toMatchObject({
+      aggregate: {
+        verificationCounts: { verified: 2, unverified: 0, difference: 0, cloudMissing: 0 },
+      },
+      page: { total: 1, items: [secondUnified] },
+    });
+
+    const replacement: UnifiedCatalogRecordV1 = {
+      ...firstUnified,
+      catalogId: "baidu:7",
+      fsId: "7",
+      cloudPath: "/Library/Synthetic/A.pdf",
+    };
+    await adapter.writeUnifiedGroupSnapshot({
+      sourceImportSha256: HASH_A,
+      topLevelGroupId: first.topLevelGroupId,
+      completedAt: 300,
+      records: [replacement],
+      differences: [],
+      supersededCatalogIds: [firstUnified.catalogId],
+    });
+
+    expect(await adapter.loadActiveUnified()).toMatchObject({
+      descriptor: { snapshotId: "unified-2", recordCount: 2 },
+      records: [secondUnified, replacement],
+      differences: [],
+    });
   });
 
   it("keeps the prior unified snapshot active when final manifest replacement fails", async () => {
