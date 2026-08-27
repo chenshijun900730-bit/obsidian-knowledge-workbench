@@ -296,6 +296,7 @@ class FixtureStore {
   setSettingsForTest(settings: PluginSettings): void { this.settingsValue = detached(settings); }
   operational(): OperationalState { return detached(this.operationalValue); }
   activeIndex(): { builtAt: number; records: readonly DocumentRecord[] } | null { return detached(this.active); }
+  hasActiveIndex(): boolean { return this.active !== null; }
   promoteForTest(): void { this.active = { builtAt: 100, records: detached(this.records) }; }
 
   async saveSettings(settings: PluginSettings): Promise<void> {

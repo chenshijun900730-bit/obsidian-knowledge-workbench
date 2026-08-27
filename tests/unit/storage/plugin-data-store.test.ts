@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { PLUGIN_DATA_SCHEMA_VERSION } from "../../../src/constants";
 import type { PluginDataPort } from "../../../src/core/ports";
 import { extractDocumentRecord } from "../../../src/indexing/markdown-record-extractor";
+import { MAX_INDEX_HEADINGS, MAX_INDEX_TOKENS } from "../../../src/indexing/index-record-limits";
 import {
   NORMAL_RUNTIME_POLICY,
   READ_ONLY_ACCEPTANCE_POLICY,
@@ -729,6 +730,48 @@ describe("PluginDataStore", () => {
 
     expect(store.activeIndex()).toEqual({ builtAt: 11, records: [record] });
     expect(store.staging()).toEqual({ scanId: "valid-scan", completedPaths: [record.path], records: [record] });
+  });
+
+  it("compacts oversized legacy search fields once and persists the bounded index", async () => {
+    const base = await extractDocumentRecord({
+      path: "notes/legacy-large.md",
+      basename: "legacy-large",
+      mtime: 12,
+      size: 24,
+      content: "Legacy searchable body",
+      frontmatter: {},
+      headings: ["Legacy"],
+      outgoingLinks: [],
+    });
+    const record = {
+      ...base,
+      headings: Array.from({ length: MAX_INDEX_HEADINGS + 5 }, (_, index) => `Heading ${index}`),
+      tokens: Array.from({ length: MAX_INDEX_TOKENS + 7 }, (_, index) => `token-${index}`),
+    };
+    const port = new MemoryPluginDataPort({
+      schemaVersion: PLUGIN_DATA_SCHEMA_VERSION,
+      settings: {},
+      activeIndex: { builtAt: 12, records: [record] },
+      staging: { scanId: "legacy-scan", completedPaths: [record.path], records: [record] },
+    });
+    const store = new PluginDataStore(port);
+
+    await store.load();
+
+    expect(store.hasActiveIndex()).toBe(true);
+    expect(store.activeIndex()?.records[0]?.headings).toEqual(record.headings.slice(0, MAX_INDEX_HEADINGS));
+    expect(store.activeIndex()?.records[0]?.tokens).toEqual(record.tokens.slice(0, MAX_INDEX_TOKENS));
+    expect(store.staging()?.records[0]?.headings).toHaveLength(MAX_INDEX_HEADINGS);
+    expect(store.staging()?.records[0]?.tokens).toHaveLength(MAX_INDEX_TOKENS);
+    expect(port.saveCalls).toHaveLength(1);
+    const saved = port.saveCalls[0] as {
+      readonly activeIndex: { readonly records: readonly { readonly headings: readonly string[]; readonly tokens: readonly string[] }[] };
+      readonly staging: { readonly records: readonly { readonly headings: readonly string[]; readonly tokens: readonly string[] }[] };
+    };
+    expect(saved.activeIndex.records[0]?.headings).toHaveLength(MAX_INDEX_HEADINGS);
+    expect(saved.activeIndex.records[0]?.tokens).toHaveLength(MAX_INDEX_TOKENS);
+    expect(saved.staging.records[0]?.headings).toHaveLength(MAX_INDEX_HEADINGS);
+    expect(saved.staging.records[0]?.tokens).toHaveLength(MAX_INDEX_TOKENS);
   });
 
   it.each(["planned", "executing", "rolling-back"])(

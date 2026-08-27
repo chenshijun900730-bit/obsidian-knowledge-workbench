@@ -4,6 +4,7 @@ import type { PluginDataPort } from "../core/ports";
 import { OWNED_FIELDS, type DocumentKind, type DocumentRecord, type OwnedFieldValue } from "../core/types";
 import { effectiveSettings, type RuntimeSafetyPolicy } from "../runtime/safety-policy";
 import { isWorkbenchLocale } from "../i18n/workbench-i18n";
+import { MAX_INDEX_HEADINGS, MAX_INDEX_TOKENS } from "../indexing/index-record-limits";
 import type {
   ActiveIndex,
   FolderRule,
@@ -87,9 +88,9 @@ const decodeFolderRules = (value: unknown): FolderRule[] => {
   });
 };
 
-const decodeStringList = (value: unknown): string[] | null => {
+const decodeStringList = (value: unknown, limit = Number.POSITIVE_INFINITY): string[] | null => {
   if (!Array.isArray(value) || !value.every((item): item is string => typeof item === "string")) return null;
-  return [...value];
+  return value.slice(0, limit);
 };
 
 const decodeSettings = (value: unknown): PluginSettings => {
@@ -162,12 +163,12 @@ const decodeRelationFields = (value: unknown): Record<string, OwnedFieldValue> |
 const decodeDocumentRecord = (value: unknown): DocumentRecord | null => {
   if (!isObject(value)) return null;
   const aliases = decodeStringList(value.aliases);
-  const headings = decodeStringList(value.headings);
+  const headings = decodeStringList(value.headings, MAX_INDEX_HEADINGS);
   const tags = decodeStringList(value.tags);
   const ownedFields = decodeOwnedFields(value.ownedFields);
   const relationFields = decodeRelationFields(value.relationFields);
   const outgoingLinks = decodeStringList(value.outgoingLinks);
-  const tokens = decodeStringList(value.tokens);
+  const tokens = decodeStringList(value.tokens, MAX_INDEX_TOKENS);
   if (
     typeof value.id !== "string"
     || typeof value.path !== "string"
@@ -288,6 +289,20 @@ const decodeData = (value: unknown): PluginData => {
   };
 };
 
+const recordNeedsSearchFieldCompaction = (value: unknown): boolean => isObject(value) && (
+  (Array.isArray(value.headings) && value.headings.length > MAX_INDEX_HEADINGS)
+  || (Array.isArray(value.tokens) && value.tokens.length > MAX_INDEX_TOKENS)
+);
+
+const indexNeedsSearchFieldCompaction = (value: unknown): boolean => isObject(value)
+  && Array.isArray(value.records)
+  && value.records.some(recordNeedsSearchFieldCompaction);
+
+const dataNeedsSearchFieldCompaction = (value: unknown): boolean => isObject(value) && (
+  indexNeedsSearchFieldCompaction(value.activeIndex)
+  || indexNeedsSearchFieldCompaction(value.staging)
+);
+
 const isJournalId = (value: unknown, id: string): value is { readonly id: string } => isObject(value) && typeof value.id === "string" && value.id === id;
 const removeKey = <T>(record: Readonly<Record<string, T>>, key: string): Record<string, T> => Object.fromEntries(
   Object.entries(record).filter(([entryKey]) => entryKey !== key),
@@ -301,11 +316,18 @@ export class PluginDataStore {
 
   constructor(private readonly port: PluginDataPort) {}
 
+  private async loadCompacted(): Promise<void> {
+    const persisted = await this.port.load();
+    const decoded = decodeData(persisted);
+    if (dataNeedsSearchFieldCompaction(persisted)) await this.port.save(clone(decoded));
+    this.data = decoded;
+    this.loaded = true;
+    this.poison = null;
+  }
+
   async load(): Promise<void> {
     try {
-      this.data = decodeData(await this.port.load());
-      this.loaded = true;
-      this.poison = null;
+      await this.loadCompacted();
     } catch (cause) {
       this.loaded = false;
       const detail = cause instanceof Error ? cause.message : String(cause);
@@ -317,9 +339,7 @@ export class PluginDataStore {
   async reload(): Promise<void> {
     const operation = this.tail.catch(() => undefined).then(async () => {
       try {
-        this.data = decodeData(await this.port.load());
-        this.loaded = true;
-        this.poison = null;
+        await this.loadCompacted();
       } catch (cause) {
         this.loaded = false;
         const detail = cause instanceof Error ? cause.message : String(cause);
@@ -351,6 +371,14 @@ export class PluginDataStore {
 
   activeIndex(): ActiveIndex | null {
     return clone(this.data.activeIndex);
+  }
+
+  hasActiveIndex(): boolean {
+    return this.data.activeIndex !== null;
+  }
+
+  forEachActiveIndexRecord(visitor: (record: DocumentRecord) => void): void {
+    for (const record of this.data.activeIndex?.records ?? []) visitor(record);
   }
 
   staging(): ScanCheckpoint | null {

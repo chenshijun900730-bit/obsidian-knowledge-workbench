@@ -487,7 +487,7 @@ export class WorkbenchController {
     if (this.scanPromise !== null) return this.scanPromise;
     const controller = new AbortController();
     const lifecycleEpoch = this.lifecycleEpoch;
-    const hadActiveIndex = this.dependencies.store.activeIndex() !== null;
+    const hadActiveIndex = this.dependencies.store.hasActiveIndex();
     this.scanController = controller;
     this.model = {
       ...this.model,
@@ -1194,7 +1194,7 @@ export class WorkbenchController {
     if (this.disposed) return;
     const lifecycleEpoch = this.lifecycleEpoch;
     const generation = ++this.exclusionGeneration;
-    const hadActiveIndex = this.dependencies.store.activeIndex() !== null;
+    const hadActiveIndex = this.dependencies.store.hasActiveIndex();
     this.cancelScan();
     await this.scanPromise;
     if (!this.ownsExclusion(lifecycleEpoch, generation)) return;

@@ -31,7 +31,7 @@ class IndexedCoordinator {
     if (this.controller !== null) throw new Error("Index scan already running");
     const controller = new AbortController();
     this.controller = controller;
-    const hadActiveIndex = this.store.activeIndex() !== null;
+    const hadActiveIndex = this.store.hasActiveIndex();
     await this.queue.pauseAutoFlush();
     try {
       await this.index.buildInitial(controller.signal, onProgress);

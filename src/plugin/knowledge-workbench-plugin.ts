@@ -300,7 +300,7 @@ export function createKnowledgeWorkbenchPluginClass(runtime: RuntimeComposition)
         auditRecovery: () => recoveryAudit.auditInFlight(),
         refreshHistory: () => controller.refreshHistory(),
         initializeIndex: () => initializeIndexForLayout({
-          hasActiveIndex: () => store.activeIndex() !== null,
+          hasActiveIndex: () => store.hasActiveIndex(),
           startInitialScan: () => controller.startInitialScan(),
           reconcileInventory: () => index.reconcileInventory(),
           resumeAndFlush: () => queue.resumeAndFlush(),
