@@ -461,6 +461,10 @@ git status --short
 
 Expected: new 20,000-row bounds tests and the existing map scroll-to-final-result regression PASS.
 
+## Tasks 6–8 atomic execution note
+
+Tasks 6, 7, and 8 change one public picker return type across the Modal, controller, workbench field, settings field, and final confirmation. Implement their RED/GREEN steps in order, but do not commit after Task 6 or Task 7: an intermediate string/structured dual contract would violate the approved one-time migration and fail the full TypeScript gate. Commit the complete vertical slice once after Task 8 focused tests and full typechecking pass. This sequencing correction changes no product behavior or safety boundary.
+
 ## Task 6: Add the hierarchical browser view and picker state machine
 
 **Files:**
@@ -528,7 +532,7 @@ Keep manual entry and local fuzzy search in the existing advanced/local area. Ne
 
 Add matching keys for: recent view, browse-root disclosure, breadcrumb root, current path, enter, highlight, select folder, select category, actual verification parent, loading, complete, incomplete, empty, continue, retry, cancel, checked/found progress, request/cursor/time details, every fixed stop reason, root-not-selectable, conflict, stale directory, and browser unavailable. Verify both locales have identical keys and placeholder names.
 
-- [ ] **Step 6: Run focused UI tests and commit Task 6**
+- [ ] **Step 6: Run focused UI tests and retain the green Task 6 slice**
 
 ```bash
 npx vitest run \
@@ -542,11 +546,11 @@ git add \
   tests/ui/cloud-directory-browser-view.test.ts \
   tests/ui/cloud-directory-picker.test.ts \
   tests/unit/i18n/workbench-directory-picker-i18n.test.ts
-git commit -m "feat(目录): 增加逐层文件夹浏览界面"
+git diff --cached --check
 git status --short
 ```
 
-Expected: UI tests PASS with zero-request local flows, once-per-runtime root consent, exact one-layer actions, bounded DOM, and late-result protection.
+Expected: UI tests PASS with zero-request local flows, once-per-runtime root consent, exact one-layer actions, bounded DOM, and late-result protection. Keep these files staged but do not commit until Tasks 7 and 8 finish the interface migration.
 
 ## Task 7: Apply structured selection in the workbench without starting verification
 
@@ -605,7 +609,7 @@ Add optional `directorySelection` to the verification page model and an `onDirec
 
 Add Chinese/English labels for “选择的文件夹”, “实际核验父目录”, and “本次核验分类”. Keep long normalized paths wrapping and expose both paths to assistive technology.
 
-- [ ] **Step 5: Verify and commit Task 7**
+- [ ] **Step 5: Verify Task 7 and retain the green workbench slice**
 
 ```bash
 npx vitest run \
@@ -625,11 +629,11 @@ git add \
   tests/ui/verification-page.test.ts \
   tests/ui/workbench-view.test.ts \
   tests/unit/i18n/workbench-i18n.test.ts
-git commit -m "feat(核验): 应用分类目录选择结果"
+git diff --cached --check
 git status --short
 ```
 
-Expected: all focused tests PASS and selecting any folder leaves scan/verification call counts at zero.
+Expected: all focused tests PASS and selecting any folder leaves scan/verification call counts at zero. Keep the Task 6–7 files staged; do not commit until settings and final confirmation migrate in Task 8.
 
 ## Task 8: Integrate scan settings, verification settings, and final confirmation
 
@@ -673,21 +677,37 @@ npx vitest run \
 
 Expected: PASS; category choice narrows to one group, scan choice cannot become category, and neither host starts a cloud action during selection.
 
-- [ ] **Step 5: Commit Task 8**
+- [ ] **Step 5: Typecheck and commit the complete Tasks 6–8 vertical slice**
 
 ```bash
 git add \
+  src/ui/cloud-directory-browser-view.ts \
+  src/ui/cloud-directory-picker.ts \
+  src/ui/cloud-directory-field.ts \
+  src/ui/workbench-controller.ts \
+  src/ui/verification-page.ts \
+  src/ui/workbench-view.ts \
   src/ui/settings-sections.ts \
   src/ui/catalog-large-scan-confirmation-modal.ts \
+  src/i18n/workbench-directory-picker-i18n.ts \
   src/i18n/workbench-i18n.ts \
+  tests/ui/cloud-directory-browser-view.test.ts \
+  tests/ui/cloud-directory-picker.test.ts \
+  tests/ui/cloud-directory-field.test.ts \
+  tests/ui/workbench-controller.test.ts \
+  tests/ui/verification-page.test.ts \
+  tests/ui/workbench-view.test.ts \
   tests/ui/settings-sections.test.ts \
   tests/ui/catalog-large-scan-confirmation-modal.test.ts \
+  tests/unit/i18n/workbench-directory-picker-i18n.test.ts \
   tests/unit/i18n/workbench-i18n.test.ts
-git commit -m "feat(设置): 接入结构化目录选择"
+npx tsc -noEmit -skipLibCheck
+git diff --cached --check
+git commit -m "feat(目录): 接入逐层浏览与结构化选择"
 git status --short
 ```
 
-Expected: only the 11 pre-existing untracked research files remain.
+Expected: the one commit contains the complete picker-to-confirmation migration and all Tasks 6–8 tests. Only the 11 pre-existing untracked research files remain.
 
 ## Task 9: Close accessibility, responsive layout, and renderer-pressure gates
 
@@ -841,7 +861,7 @@ Expected: the commit contains only the named files. The 11 unrelated research Ma
 
 ## Final implementation handoff checklist
 
-- [ ] All ten task commits exist with the specified Chinese commit-message format.
+- [ ] All ten task stages have test evidence; Tasks 6–8 share one atomic commit so no broken dual interface exists between commits.
 - [ ] Full serial Vitest, lint, normal build, acceptance build, catalog performance, and workbench performance commands passed with recorded exit codes.
 - [ ] Local open/search/cache flows and selection itself are proven zero-request.
 - [ ] Root consent is shared for one plugin session and reset by identity/lifecycle clearing.
