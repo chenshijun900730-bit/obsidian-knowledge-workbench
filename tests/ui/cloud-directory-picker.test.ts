@@ -319,7 +319,7 @@ describe("cloud directory picker", () => {
     await expect(second.result).resolves.toBeNull();
   });
 
-  it("loads only an explicitly entered non-root path and prevents overlapping or late completion", async () => {
+  it("loads only an explicitly entered non-root path, cancels on first Escape, and closes on second", async () => {
     let resolveLoad!: (round: CloudDirectoryBrowseRound) => void;
     const browser = new FakeBrowser();
     browser.load = async (input) => new Promise((resolve) => {
@@ -347,6 +347,16 @@ describe("cloud directory picker", () => {
       bubbles: true,
     }));
     expect(browser.signals[0]?.aborted).toBe(true);
+    let settled = false;
+    void fixture.result.then(() => { settled = true; });
+    await flush();
+    expect(settled).toBe(false);
+    expect(fixture.surface.contentEl.textContent).toContain("已取消");
+
+    fixture.surface.contentEl.dispatchEvent(new KeyboardEvent("keydown", {
+      key: "Escape",
+      bubbles: true,
+    }));
     resolveLoad({
       path: "/Synthetic/Explicit",
       status: "complete",
@@ -394,6 +404,105 @@ describe("cloud directory picker", () => {
     });
     expect(browser.loads).toEqual([]);
     expect(fixture.surface.contentEl.textContent).not.toContain("private");
+  });
+
+  it("uses arrows to highlight browser rows, Enter only to enter, and an explicit button to select", async () => {
+    const opener = document.createElementNS(
+      "http://www.w3.org/1999/xhtml",
+      "button",
+    ) as HTMLButtonElement;
+    document.body.append(opener);
+    opener.focus();
+    const browser = new FakeBrowser();
+    browser.layers.set("/Synthetic/Parent", browserLayer("/Synthetic/Parent", ["甲", "乙"]));
+    browser.layers.set(
+      "/Synthetic/Parent/乙",
+      browserLayer("/Synthetic/Parent/乙", ["最终目录"]),
+    );
+    const candidates = new FakeCandidates([exact("/Synthetic/Parent")]);
+    const fixture = pickerFixture(candidates, undefined, "zh-CN", { browser });
+    const query = fixture.surface.contentEl.querySelector<HTMLInputElement>(
+      '[data-directory-query="true"]',
+    )!;
+    fixture.surface.contentEl.querySelector<HTMLButtonElement>(
+      '[data-action="browse-candidate-directory"]',
+    )!.click();
+
+    expect(fixture.surface.contentEl.querySelector(
+      '.knowledge-workbench__directory-browser-row[data-directory-path="/Synthetic/Parent/甲"]',
+    )?.getAttribute("aria-selected")).toBe("true");
+    query.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
+    expect(fixture.surface.contentEl.querySelector(
+      '.knowledge-workbench__directory-browser-row[data-directory-path="/Synthetic/Parent/乙"]',
+    )?.getAttribute("aria-selected")).toBe("true");
+
+    query.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    expect(fixture.surface.contentEl.textContent).toContain("当前路径：/Synthetic/Parent/乙");
+    expect(candidates.rememberCalls).toEqual([]);
+    let settled = false;
+    void fixture.result.then(() => { settled = true; });
+    await flush();
+    expect(settled).toBe(false);
+
+    fixture.surface.contentEl.querySelector<HTMLButtonElement>(
+      '[data-action="select-highlighted-directory"]',
+    )!.click();
+    await expect(fixture.result).resolves.toEqual({
+      kind: "directory",
+      selectedPath: "/Synthetic/Parent/乙/最终目录",
+      effectiveRoot: "/Synthetic/Parent/乙/最终目录",
+    });
+    expect(document.activeElement).toBe(opener);
+  });
+
+  it("uses Backspace only from an empty search to return to a loaded ancestor", async () => {
+    const browser = new FakeBrowser();
+    browser.layers.set("/Synthetic/Parent", browserLayer("/Synthetic/Parent", ["Child"]));
+    browser.layers.set("/Synthetic/Parent/Child", browserLayer("/Synthetic/Parent/Child", ["Leaf"]));
+    const fixture = pickerFixture(
+      new FakeCandidates([exact("/Synthetic/Parent")]),
+      undefined,
+      "zh-CN",
+      { browser },
+    );
+    const query = fixture.surface.contentEl.querySelector<HTMLInputElement>(
+      '[data-directory-query="true"]',
+    )!;
+    fixture.surface.contentEl.querySelector<HTMLButtonElement>(
+      '[data-action="browse-candidate-directory"]',
+    )!.click();
+    fixture.surface.contentEl.querySelector<HTMLButtonElement>(
+      '[data-action="enter-directory"]',
+    )!.click();
+    expect(fixture.surface.contentEl.textContent).toContain("当前路径：/Synthetic/Parent/Child");
+
+    const emptyBackspace = new KeyboardEvent("keydown", {
+      key: "Backspace",
+      bubbles: true,
+      cancelable: true,
+    });
+    query.dispatchEvent(emptyBackspace);
+    expect(emptyBackspace.defaultPrevented).toBe(true);
+    expect(fixture.surface.contentEl.textContent).toContain("当前路径：/Synthetic/Parent");
+
+    query.value = "Child";
+    query.dispatchEvent(new Event("input", { bubbles: true }));
+    fixture.surface.contentEl.querySelector<HTMLButtonElement>(
+      '[data-action="enter-directory"]',
+    )!.click();
+    const editingBackspace = new KeyboardEvent("keydown", {
+      key: "Backspace",
+      bubbles: true,
+      cancelable: true,
+    });
+    query.dispatchEvent(editingBackspace);
+    expect(editingBackspace.defaultPrevented).toBe(false);
+    expect(fixture.surface.contentEl.textContent).toContain("当前路径：/Synthetic/Parent/Child");
+    fixture.surface.contentEl.querySelector<HTMLButtonElement>(
+      '[data-action="cancel-directory-picker"]',
+    )!.click();
+    await expect(fixture.result).resolves.toBeNull();
+    expect(browser.loads).toEqual([]);
   });
 
   it("opens blank with autofocus and renders merged exact paths, hints, and conflicts locally", async () => {
@@ -885,11 +994,84 @@ describe("cloud directory picker", () => {
     expect(surface.closeCalls).toBe(1);
   });
 
+  it("keeps 20,000 folders bounded through scroll, filter, enter, back, rerender, and dispose", async () => {
+    const parent = "/Pressure";
+    const finalName = "Folder-19999";
+    const finalPath = `${parent}/${finalName}`;
+    const browser = new FakeBrowser();
+    browser.layers.set(parent, browserLayer(
+      parent,
+      Array.from({ length: 20_000 }, (_, index) => (
+        `Folder-${String(index).padStart(5, "0")}`
+      )),
+    ));
+    browser.layers.set(finalPath, browserLayer(finalPath, ["叶子目录"]));
+    const fixture = pickerFixture(
+      new FakeCandidates([exact(parent)]),
+      undefined,
+      "zh-CN",
+      { browser },
+    );
+    const query = fixture.surface.contentEl.querySelector<HTMLInputElement>(
+      '[data-directory-query="true"]',
+    )!;
+    fixture.surface.contentEl.querySelector<HTMLButtonElement>(
+      '[data-action="browse-candidate-directory"]',
+    )!.click();
+
+    let list = fixture.surface.contentEl.querySelector<HTMLUListElement>(
+      '[data-directory-browser-list="true"]',
+    )!;
+    expect(list.dataset.totalRows).toBe("20000");
+    expect(list.children.length).toBeLessThanOrEqual(102);
+    list.scrollTop = 20_000 * 44;
+    list.dispatchEvent(new Event("scroll"));
+    expect(list.textContent).toContain(finalName);
+    expect(list.children.length).toBeLessThanOrEqual(102);
+
+    for (let cycle = 0; cycle < 2; cycle += 1) {
+      query.value = finalName;
+      query.dispatchEvent(new Event("input", { bubbles: true }));
+      list = fixture.surface.contentEl.querySelector<HTMLUListElement>(
+        '[data-directory-browser-list="true"]',
+      )!;
+      expect(list.dataset.totalRows).toBe("1");
+      expect(list.textContent).toContain(finalName);
+      expect(list.children.length).toBeLessThanOrEqual(102);
+
+      query.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+      expect(fixture.surface.contentEl.textContent).toContain(`当前路径：${finalPath}`);
+      query.value = "";
+      query.dispatchEvent(new Event("input", { bubbles: true }));
+      query.dispatchEvent(new KeyboardEvent("keydown", {
+        key: "Backspace",
+        bubbles: true,
+        cancelable: true,
+      }));
+      expect(fixture.surface.contentEl.textContent).toContain(`当前路径：${parent}`);
+      list = fixture.surface.contentEl.querySelector<HTMLUListElement>(
+        '[data-directory-browser-list="true"]',
+      )!;
+      expect(list.dataset.totalRows).toBe("20000");
+      expect(list.children.length).toBeLessThanOrEqual(102);
+    }
+
+    const staleEnter = list.querySelector<HTMLButtonElement>('[data-action="enter-directory"]')!;
+    fixture.picker.dispose();
+    await expect(fixture.result).resolves.toBeNull();
+    staleEnter.click();
+    expect(browser.loads).toEqual([]);
+    expect(fixture.surface.contentEl.textContent).toBe("");
+  });
+
   it("keeps 320-pixel long paths usable with native Obsidian tokens", async () => {
     const css = await readFile("styles.css", "utf8");
 
     expect(css).toMatch(/\.knowledge-workbench__directory-picker-path\s*\{[^}]*overflow-wrap:\s*anywhere;/u);
     expect(css).toMatch(/@media\s*\(max-width:\s*360px\)[\s\S]*\.knowledge-workbench__directory-picker-actions/u);
+    expect(css).toMatch(/\.knowledge-workbench__directory-browser-path\s*\{[^}]*overflow-wrap:\s*anywhere;/u);
+    expect(css).toMatch(/\.knowledge-workbench__directory-browser-row\s*\{[^}]*height:\s*44px;/u);
+    expect(css).toMatch(/@media\s*\(max-width:\s*640px\)[\s\S]*\.knowledge-workbench__directory-browser-actions/u);
     expect(css).toContain("var(--background-secondary)");
     expect(css).toContain("var(--interactive-accent)");
     expect(css).not.toMatch(/knowledge-workbench__directory-picker[^}]*font-family/iu);

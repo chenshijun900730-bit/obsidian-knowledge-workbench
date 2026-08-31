@@ -12,6 +12,7 @@ describe("workbench directory picker i18n", () => {
     const samples = [
       ["directoryPicker.browser.rootDisclosure.title", [], "根目录", "root"],
       ["directoryPicker.browser.currentPath", ["path"], "当前路径", "Current path"],
+      ["directoryPicker.browser.details.title", [], "运行详情", "Run details"],
       ["directoryPicker.browser.progress.checked", ["checked", "maximum"], "已检查", "Checked"],
       ["directoryPicker.browser.progress.cumulativeChecked", ["checked"], "累计已检查", "Cumulative"],
       ["directoryPicker.browser.progress.requests", ["round", "cumulative"], "列表请求", "List requests"],

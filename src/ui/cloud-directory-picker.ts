@@ -226,6 +226,11 @@ export function createCloudDirectoryPickerModalClass(
     private browserPath: string | null = null;
     private browserLayer: CloudDirectoryLayerSnapshot | null = null;
     private browserHighlightedPath: string | null = null;
+    private readonly browserHighlightsByLayer = new Map<string, string>();
+    private readonly browserLoadedPaths = new Set<string>();
+    private browserVisibleSource: CloudDirectoryLayerSnapshot["directories"] | null = null;
+    private browserVisibleQuery = "";
+    private browserVisibleDirectories: CloudDirectoryLayerSnapshot["directories"] = [];
     private browserActivity: "idle" | "running" | "complete" | "incomplete" | "canceled" | "error" = "idle";
     private browserRound: Readonly<{
       checkedEntryCount: number;
@@ -296,10 +301,7 @@ export function createCloudDirectoryPickerModalClass(
       this.contentEl.replaceChildren();
       this.contentEl.classList.add("knowledge-workbench__directory-picker");
       this.contentEl.addEventListener("keydown", (event) => {
-        if (event.key !== "Escape") return;
-        event.preventDefault();
-        if (this.phase === "settling") return;
-        this.finish(null);
+        this.handleSurfaceKeyboard(event, generation);
       }, { signal });
 
       const safety = doc.createElement("p");
@@ -480,6 +482,7 @@ export function createCloudDirectoryPickerModalClass(
       }, { signal });
       const keyboard = (event: KeyboardEvent): void => {
         if (!this.isCurrent(generation) || this.phase === "settling") return;
+        if (this.browserPath !== null) return;
         const exacts = this.currentExactCandidates();
         if (event.key === "ArrowDown" || event.key === "ArrowUp") {
           event.preventDefault();
@@ -545,6 +548,58 @@ export function createCloudDirectoryPickerModalClass(
       this.cleanup();
     }
 
+    private handleSurfaceKeyboard(event: KeyboardEvent, generation: number): void {
+      if (!this.isCurrent(generation) || this.phase === "settling" || event.isComposing) return;
+      if (event.key === "Escape") {
+        event.preventDefault();
+        if (this.browserController !== null && !this.browserController.signal.aborted) {
+          this.cancelBrowser(generation);
+          return;
+        }
+        if (this.lookupController !== null && !this.lookupController.signal.aborted) {
+          this.invalidateLookup(true);
+          this.renderLocal(generation);
+          return;
+        }
+        this.finish(null);
+        return;
+      }
+      if (
+        this.browserPath === null
+        || this.browserController !== null
+        || event.altKey
+        || event.ctrlKey
+        || event.metaKey
+      ) return;
+      const target = event.target as Element | null;
+      const browserList = target?.closest('[data-directory-browser-list="true"]') ?? null;
+      const isBrowserNavigationTarget = target === this.ui?.query || browserList !== null;
+      if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+        if (!isBrowserNavigationTarget) return;
+        event.preventDefault();
+        this.moveBrowserHighlight(event.key === "ArrowDown" ? 1 : -1, generation);
+        return;
+      }
+      if (event.key === "Enter") {
+        if (!isBrowserNavigationTarget || target?.closest("button") === target) return;
+        const highlightedPath = this.browserHighlightedPath;
+        if (highlightedPath === null) return;
+        event.preventDefault();
+        this.enterBrowserPath(highlightedPath, generation);
+        return;
+      }
+      if (
+        event.key === "Backspace"
+        && target === this.ui?.query
+        && this.ui.query.value.length === 0
+      ) {
+        const ancestor = this.closestLoadedBrowserAncestor(this.browserPath);
+        if (ancestor === null) return;
+        event.preventDefault();
+        this.enterBrowserPath(ancestor, generation);
+      }
+    }
+
     dispose(): void {
       if (this.disposed) return;
       if (this.phase === "settling") {
@@ -587,6 +642,99 @@ export function createCloudDirectoryPickerModalClass(
       return this.currentRanked().filter((ranked): ranked is RankedExactCandidate => (
         ranked.candidate.kind === "exact"
       ));
+    }
+
+    private currentBrowserDirectories(): CloudDirectoryLayerSnapshot["directories"] {
+      const source = this.browserLayer?.directories ?? null;
+      const normalizedQuery = this.query.normalize("NFC").trim().toLocaleLowerCase();
+      if (source === null) {
+        if (this.browserVisibleSource !== null || this.browserVisibleDirectories.length > 0) {
+          this.browserVisibleDirectories = [];
+        }
+        this.browserVisibleSource = null;
+        this.browserVisibleQuery = normalizedQuery;
+        return this.browserVisibleDirectories;
+      }
+      if (normalizedQuery.length === 0) {
+        this.browserVisibleSource = source;
+        this.browserVisibleQuery = normalizedQuery;
+        this.browserVisibleDirectories = source;
+        return source;
+      }
+      if (
+        this.browserVisibleSource === source
+        && this.browserVisibleQuery === normalizedQuery
+      ) return this.browserVisibleDirectories;
+      this.browserVisibleSource = source;
+      this.browserVisibleQuery = normalizedQuery;
+      this.browserVisibleDirectories = source.filter((directory) => (
+        directory.filename.normalize("NFC").toLocaleLowerCase().includes(normalizedQuery)
+        || directory.path.normalize("NFC").toLocaleLowerCase().includes(normalizedQuery)
+      ));
+      return this.browserVisibleDirectories;
+    }
+
+    private reconcileBrowserHighlight(
+      directories: CloudDirectoryLayerSnapshot["directories"],
+    ): void {
+      const path = this.browserPath;
+      if (path === null) return;
+      const remembered = this.browserHighlightsByLayer.get(path)
+        ?? this.browserHighlightedPath;
+      const next = remembered !== null
+        && directories.some((directory) => directory.path === remembered)
+        ? remembered
+        : directories[0]?.path ?? null;
+      this.browserHighlightedPath = next;
+      if (next === null) this.browserHighlightsByLayer.delete(path);
+      else this.browserHighlightsByLayer.set(path, next);
+    }
+
+    private moveBrowserHighlight(delta: -1 | 1, generation: number): void {
+      if (!this.isCurrent(generation) || this.browserPath === null) return;
+      const directories = this.currentBrowserDirectories();
+      if (directories.length === 0) return;
+      this.reconcileBrowserHighlight(directories);
+      const currentIndex = this.browserHighlightedPath === null
+        ? -1
+        : directories.findIndex((directory) => directory.path === this.browserHighlightedPath);
+      const origin = currentIndex < 0 ? (delta > 0 ? -1 : 0) : currentIndex;
+      const next = directories[(origin + delta + directories.length) % directories.length]!;
+      this.browserHighlightedPath = next.path;
+      this.browserHighlightsByLayer.set(this.browserPath, next.path);
+      this.renderBrowser(generation);
+    }
+
+    private closestLoadedBrowserAncestor(path: string): string | null {
+      let current = path;
+      while (current !== "/") {
+        const separator = current.lastIndexOf("/");
+        current = separator <= 0 ? "/" : current.slice(0, separator);
+        if (this.browserLoadedPaths.has(current)) return current;
+      }
+      return null;
+    }
+
+    private adoptBrowserSnapshot(
+      snapshot: CloudDirectoryLayerSnapshot | null,
+    ): CloudDirectoryLayerSnapshot | null {
+      if (snapshot === null) return null;
+      const current = this.browserLayer;
+      if (
+        current === null
+        || current.path !== snapshot.path
+        || current.directories.length !== snapshot.directories.length
+      ) return snapshot;
+      for (let index = 0; index < current.directories.length; index += 1) {
+        const previous = current.directories[index]!;
+        const next = snapshot.directories[index]!;
+        if (
+          previous.fsId !== next.fsId
+          || previous.path !== next.path
+          || previous.filename !== next.filename
+        ) return snapshot;
+      }
+      return { ...snapshot, directories: current.directories };
     }
 
     private renderLocal(generation: number): void {
@@ -907,8 +1055,12 @@ export function createCloudDirectoryPickerModalClass(
         return;
       }
       this.rootDisclosureVisible = false;
+      if (this.browserPath === null) {
+        this.query = "";
+        if (this.ui !== null) this.ui.query.value = "";
+      }
       this.browserPath = path;
-      this.browserHighlightedPath = null;
+      this.browserHighlightedPath = this.browserHighlightsByLayer.get(path) ?? null;
       this.browserRound = null;
       this.browserFixedError = null;
       let snapshot: CloudDirectoryLayerSnapshot | null;
@@ -918,8 +1070,9 @@ export function createCloudDirectoryPickerModalClass(
         this.setBrowserError("browser-unavailable", generation);
         return;
       }
-      this.browserLayer = snapshot;
+      this.browserLayer = this.adoptBrowserSnapshot(snapshot);
       if (snapshot !== null) {
+        this.browserLoadedPaths.add(path);
         this.browserGeneration += 1;
         this.browserActivity = snapshot.complete
           ? "complete"
@@ -947,7 +1100,8 @@ export function createCloudDirectoryPickerModalClass(
         return;
       }
       this.browserPath = path;
-      this.browserLayer = baseline;
+      this.browserLayer = this.adoptBrowserSnapshot(baseline);
+      if (baseline !== null) this.browserLoadedPaths.add(path);
       this.browserRoundBaseline = {
         checked: baseline?.cumulativeCheckedEntryCount ?? 0,
         requests: baseline?.cumulativeListRequestCount ?? 0,
@@ -964,7 +1118,8 @@ export function createCloudDirectoryPickerModalClass(
       void browser.loadLayer({ path, start }, controller.signal).then((round) => {
         if (!this.isBrowserCurrent(generation, operationGeneration, controller)) return;
         const snapshot = browser.snapshot(path);
-        this.browserLayer = snapshot;
+        this.browserLayer = this.adoptBrowserSnapshot(snapshot);
+        if (snapshot !== null) this.browserLoadedPaths.add(path);
         this.browserRound = {
           checkedEntryCount: round.checkedEntryCount,
           listRequestCount: round.listRequestCount,
@@ -992,7 +1147,8 @@ export function createCloudDirectoryPickerModalClass(
       if (browser === undefined || !this.isCurrent(generation) || this.browserPath !== path) return;
       try {
         const snapshot = browser.snapshot(path);
-        this.browserLayer = snapshot;
+        this.browserLayer = this.adoptBrowserSnapshot(snapshot);
+        if (snapshot !== null) this.browserLoadedPaths.add(path);
         if (this.browserActivity === "running" && this.browserRoundBaseline !== null) {
           this.browserRound = {
             checkedEntryCount: Math.max(
@@ -1017,11 +1173,14 @@ export function createCloudDirectoryPickerModalClass(
       if (!this.isCurrent(generation) || this.browserPath === null || this.purpose === null) return;
       const ui = this.ui;
       if (ui === null) return;
+      const visibleDirectories = this.currentBrowserDirectories();
+      this.reconcileBrowserHighlight(visibleDirectories);
       const browserState = {
         currentPath: this.browserPath,
         ancestors: this.browserAncestors(this.browserPath, ui.i18n),
         purpose: this.purpose,
         layer: this.browserLayer,
+        visibleDirectories,
         highlightedPath: this.browserHighlightedPath,
         activity: this.browserActivity,
         round: this.browserRound,
@@ -1031,7 +1190,9 @@ export function createCloudDirectoryPickerModalClass(
         onEnter: (path: string) => this.enterBrowserPath(path, generation),
         onHighlight: (path: string) => {
           if (!this.isCurrent(generation) || this.browserController !== null) return;
+          if (!this.currentBrowserDirectories().some((directory) => directory.path === path)) return;
           this.browserHighlightedPath = path;
+          if (this.browserPath !== null) this.browserHighlightsByLayer.set(this.browserPath, path);
           this.renderBrowser(generation);
         },
         onSelect: (selection: CloudDirectorySelection) => {
@@ -1319,6 +1480,11 @@ export function createCloudDirectoryPickerModalClass(
       this.browserPath = null;
       this.browserLayer = null;
       this.browserHighlightedPath = null;
+      this.browserHighlightsByLayer.clear();
+      this.browserLoadedPaths.clear();
+      this.browserVisibleSource = null;
+      this.browserVisibleQuery = "";
+      this.browserVisibleDirectories = [];
       this.browserActivity = "idle";
       this.browserRound = null;
       this.browserFixedError = null;
