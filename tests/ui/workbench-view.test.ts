@@ -356,6 +356,55 @@ describe("workbench", () => {
     root.remove();
   });
 
+  it("keeps the advanced verification-root editor open across controller input rerenders", async () => {
+    class ItemViewSurface {
+      readonly contentEl = createTestDiv();
+    }
+    const fixture = controllerFixture();
+    fixture.controller.selectTab("verification");
+    const ConcreteWorkbenchView = createWorkbenchViewClass(
+      ItemViewSurface as unknown as ItemViewConstructor,
+      NORMAL_RUNTIME_POLICY,
+    );
+    const view = new ConcreteWorkbenchView({} as WorkspaceLeaf, fixture.controller);
+    document.body.append(view.contentEl);
+    await view.onOpen();
+
+    const firstDetails = view.contentEl.querySelector<HTMLDetailsElement>(
+      'details[data-cloud-directory-advanced="true"]',
+    )!;
+    firstDetails.open = true;
+    const first = view.contentEl.querySelector<HTMLInputElement>(
+      '[data-verification-root="true"]',
+    )!;
+    first.focus();
+    first.value = "/S";
+    first.setSelectionRange(2, 2, "none");
+    first.dispatchEvent(new Event("input", { bubbles: true }));
+
+    const secondDetails = view.contentEl.querySelector<HTMLDetailsElement>(
+      'details[data-cloud-directory-advanced="true"]',
+    )!;
+    const second = view.contentEl.querySelector<HTMLInputElement>(
+      '[data-verification-root="true"]',
+    )!;
+    expect(secondDetails.open).toBe(true);
+    expect(document.activeElement).toBe(second);
+    expect([second.selectionStart, second.selectionEnd]).toEqual([2, 2]);
+
+    second.value = "/Science";
+    second.setSelectionRange(8, 8, "none");
+    second.dispatchEvent(new Event("input", { bubbles: true }));
+    expect(view.contentEl.querySelector<HTMLDetailsElement>(
+      'details[data-cloud-directory-advanced="true"]',
+    )?.open).toBe(true);
+    expect(fixture.controller.snapshot().verificationRoot).toBe("/Science");
+
+    await view.onClose();
+    view.contentEl.remove();
+    fixture.controller.dispose();
+  });
+
   it("preserves verification details and focus while a new segment resets its quota", () => {
     const root = createTestDiv();
     document.body.append(root);

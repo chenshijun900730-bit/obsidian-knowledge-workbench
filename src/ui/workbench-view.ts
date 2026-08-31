@@ -264,6 +264,9 @@ export function renderWorkbench(
   const verificationRunDetailsOpen = root.querySelector<HTMLDetailsElement>(
     "details[data-verification-run-details]",
   )?.open ?? false;
+  const verificationDirectoryAdvancedOpen = root.querySelector<HTMLDetailsElement>(
+    "details[data-cloud-directory-advanced]",
+  )?.open ?? false;
   disposeVerificationPage(root);
   root.replaceChildren();
   root.classList.add("knowledge-workbench");
@@ -350,6 +353,12 @@ export function renderWorkbench(
   }
   if (!readOnlyAcceptance && model.aiSuggestion !== undefined) {
     renderAiSuggestion(panel, model.aiSuggestion.text, i18n);
+  }
+  if (verificationDirectoryAdvancedOpen) {
+    const advanced = root.querySelector<HTMLDetailsElement>(
+      "details[data-cloud-directory-advanced]",
+    );
+    if (advanced !== null) advanced.open = true;
   }
   if (focusKey !== undefined) {
     const target = Array.from(root.querySelectorAll<HTMLElement>("[data-focus-key]"))
