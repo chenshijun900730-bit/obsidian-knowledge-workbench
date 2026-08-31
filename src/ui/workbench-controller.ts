@@ -40,6 +40,11 @@ import type { HybridCatalogViewModel } from "../catalog/hybrid-catalog-runtime";
 import type { CatalogTxtImportConfirmationPresenter } from "./catalog-txt-import-confirmation-modal";
 import type { CatalogLargeScanConfirmationPresenter } from "./catalog-large-scan-confirmation-modal";
 import type { CloudDirectoryPickerPresenter } from "./cloud-directory-picker";
+import {
+  validateCloudDirectorySelection,
+  type CloudDirectoryPickerPurpose,
+  type CloudDirectorySelection,
+} from "../catalog/cloud-directory-selection";
 import type {
   CatalogDifferenceKind,
   CatalogVerificationStatus,
@@ -115,14 +120,33 @@ const RECOVERY_LOCK_MESSAGE = "Recovery required; organization writes are locked
 const PROJECTION_REFRESH_ERROR = "Workbench projection refresh failed";
 const PROJECTION_QUIET_DELAY_MS = 50;
 const PROJECTION_MAX_WAIT_MS = 500;
+const verificationPickerPurpose = (
+  groups: readonly Readonly<{
+    groupKey: string;
+    rootRelativePath: string;
+    label: string;
+  }>[],
+): Extract<CloudDirectoryPickerPurpose, { kind: "verification" }> => ({
+  kind: "verification",
+  groups: groups
+    .filter((group) => group.groupKey !== "txt-root-items")
+    .map((group) => ({
+      groupKey: group.groupKey,
+      rootRelativePath: group.rootRelativePath,
+      label: group.label,
+    })),
+});
 const isSelectedCategoryRoot = (
   cloudRoot: string,
-  groups: readonly Readonly<{ groupKey: string; label: string }>[],
+  groups: readonly Readonly<{
+    groupKey: string;
+    rootRelativePath: string;
+  }>[],
 ): boolean => {
   const rootLeaf = cloudRoot.slice(cloudRoot.lastIndexOf("/") + 1);
   return groups.some((group) => (
     group.groupKey !== "txt-root-items"
-    && group.label.normalize("NFC") === rootLeaf
+    && group.rootRelativePath.normalize("NFC") === rootLeaf
   ));
 };
 const defaultProjectionScheduler: WorkbenchProjectionScheduler = {
@@ -358,7 +382,10 @@ export class WorkbenchController {
     if (
       this.disposed
       || this.lockedVerificationRoot !== null
-      || value === this.model.verificationRoot
+      || (
+        value === this.model.verificationRoot
+        && this.model.verificationDirectorySelection === undefined
+      )
     ) return;
     const runtimeMessageCode = this.dependencies.catalog.hybrid?.snapshot().messageCode;
     if (runtimeMessageCode === "hybrid-cloud-root-mismatch") {
@@ -366,6 +393,7 @@ export class WorkbenchController {
     }
     const {
       verificationActionMessageCode: _verificationActionMessageCode,
+      verificationDirectorySelection: _verificationDirectorySelection,
       hybridCatalog,
       ...current
     } = this.model;
@@ -376,6 +404,36 @@ export class WorkbenchController {
       ...current,
       ...(visibleHybrid === undefined ? {} : { hybridCatalog: visibleHybrid }),
       verificationRoot: value,
+    };
+    this.emit();
+  }
+
+  applyCatalogRootSelection(selection: CloudDirectorySelection): void {
+    if (this.disposed || this.lockedVerificationRoot !== null) return;
+    const activeGroups = this.dependencies.catalog.hybrid?.snapshot().active?.groups;
+    if (activeGroups === undefined) throw new Error("catalog-unavailable");
+    let validated: CloudDirectorySelection;
+    try {
+      validated = validateCloudDirectorySelection(
+        selection,
+        verificationPickerPurpose(activeGroups),
+      );
+    } catch {
+      throw new RangeError("cloud-directory-selection-invalid");
+    }
+    const availableKeys = new Set(activeGroups.map((group) => group.groupKey));
+    const selectedVerificationGroupKeys = validated.kind === "category"
+      ? [validated.groupKey]
+      : this.model.selectedVerificationGroupKeys.filter((groupKey) => availableKeys.has(groupKey));
+    const {
+      verificationActionMessageCode: _verificationActionMessageCode,
+      ...current
+    } = this.model;
+    this.model = {
+      ...current,
+      verificationRoot: validated.effectiveRoot,
+      verificationDirectorySelection: clone(validated),
+      selectedVerificationGroupKeys,
     };
     this.emit();
   }
@@ -391,7 +449,15 @@ export class WorkbenchController {
       if (selected.size >= LARGE_CATALOG_RUN_BUDGET.maxSelectedTopLevelGroups) return;
       selected.add(groupKey);
     }
-    this.model = { ...this.model, selectedVerificationGroupKeys: [...selected] };
+    if (this.model.verificationDirectorySelection?.kind === "category") {
+      const {
+        verificationDirectorySelection: _verificationDirectorySelection,
+        ...current
+      } = this.model;
+      this.model = { ...current, selectedVerificationGroupKeys: [...selected] };
+    } else {
+      this.model = { ...this.model, selectedVerificationGroupKeys: [...selected] };
+    }
     this.emit();
   }
 
@@ -414,7 +480,7 @@ export class WorkbenchController {
       await this.requestLargeCatalogVerification(normalized, groupKeys, () => {
         lockedForAttempt = !alreadyLocked;
         this.lockVerificationRoot(normalized);
-      });
+      }, this.model.verificationDirectorySelection);
       this.clearVerificationActionMessage();
     } catch (error) {
       const after = this.dependencies.catalog.hybrid?.snapshot();
@@ -650,21 +716,35 @@ export class WorkbenchController {
     return normalizeCatalogScanRoot(rootPath);
   }
 
-  async chooseCatalogRoot(initialRoot: string): Promise<string | null> {
+  async chooseCatalogRoot(input: Readonly<{
+    initialRoot: string;
+    purpose: CloudDirectoryPickerPurpose;
+  }>): Promise<CloudDirectorySelection | null> {
     if (this.disposed) return null;
-    const trimmed = initialRoot.trim();
+    const trimmed = input.initialRoot.trim();
     const initialPath = trimmed.length === 0
       ? null
       : this.validateCatalogScanRoot(trimmed);
     const picker = this.dependencies.catalogDirectoryPicker;
     if (picker === undefined) throw new Error("catalog-unavailable");
-    return picker.request({
+    const purpose = clone(input.purpose);
+    const selection = await picker.request({
       initialPath,
+      purpose,
       candidates: this.cloudDirectoryCandidates,
+      ...(this.dependencies.catalog.directoryBrowser === undefined
+        ? {}
+        : { browser: this.dependencies.catalog.directoryBrowser }),
       ...(this.dependencies.catalog.directoryLocator === undefined
         ? {}
         : { locator: this.dependencies.catalog.directoryLocator }),
     });
+    if (selection === null || this.disposed) return null;
+    try {
+      return validateCloudDirectorySelection(selection, purpose);
+    } catch {
+      throw new RangeError("cloud-directory-selection-invalid");
+    }
   }
 
   async requestCatalogScan(rootPath: string, onConfirmed?: () => void): Promise<void> {
@@ -718,6 +798,7 @@ export class WorkbenchController {
     rootPath: string,
     groupKeys: readonly string[],
     onConfirmed?: () => void,
+    directorySelection?: CloudDirectorySelection,
   ): Promise<void> {
     if (this.disposed) return;
     const normalized = this.validateCatalogScanRoot(rootPath);
@@ -731,7 +812,12 @@ export class WorkbenchController {
     const groups = groupKeys.map((groupKey) => {
       const group = groupsByKey.get(groupKey);
       if (group === undefined) throw new Error("catalog-unavailable");
-      return { groupKey, label: group.label, pdfCount: group.pdfCount };
+      return {
+        groupKey,
+        rootRelativePath: group.rootRelativePath,
+        label: group.label,
+        pdfCount: group.pdfCount,
+      };
     });
     if (isSelectedCategoryRoot(normalized, groups)) {
       throw new Error("invalid-large-catalog-root");
@@ -740,6 +826,7 @@ export class WorkbenchController {
       kind: "start",
       cloudRoot: normalized,
       groups,
+      ...(directorySelection === undefined ? {} : { directorySelection }),
     });
     if (this.disposed || !confirmed) return;
     onConfirmed?.();
@@ -763,16 +850,14 @@ export class WorkbenchController {
     ) throw new Error("catalog-unavailable");
     const active = hybrid.snapshot().active;
     if (active === undefined) throw new Error("catalog-unavailable");
-    const groupsByKey = new Map(active.groups.map((group) => [group.groupKey, group]));
-    const groups = groupKeys.map((groupKey) => {
-      const group = groupsByKey.get(groupKey);
-      if (group === undefined) throw new Error("catalog-unavailable");
-      return { groupKey, label: group.label, pdfCount: group.pdfCount };
-    });
+    const activeGroupKeys = new Set(active.groups.map((group) => group.groupKey));
+    if (groupKeys.some((groupKey) => !activeGroupKeys.has(groupKey))) {
+      throw new Error("catalog-unavailable");
+    }
     const confirmed = await confirmation.request({
       kind: "resume",
       cloudRoot: normalized,
-      groups,
+      groups: [],
     });
     if (this.disposed || !confirmed) return;
     onConfirmed?.();
@@ -1288,10 +1373,22 @@ export class WorkbenchController {
     );
     const selectedVerificationGroupKeys = this.model.selectedVerificationGroupKeys
       .filter((groupKey) => availableGroupKeys.has(groupKey));
+    let verificationDirectorySelection = this.model.verificationDirectorySelection;
+    if (verificationDirectorySelection?.kind === "category") {
+      try {
+        verificationDirectorySelection = validateCloudDirectorySelection(
+          verificationDirectorySelection,
+          verificationPickerPurpose(hybridCatalog?.active?.groups ?? []),
+        );
+      } catch {
+        verificationDirectorySelection = undefined;
+      }
+    }
     const {
       catalogConnection: _catalogConnection,
       hybridCatalog: _hybridCatalog,
       verificationActionMessageCode,
+      verificationDirectorySelection: _verificationDirectorySelection,
       ...current
     } = this.model;
     this.model = {
@@ -1302,6 +1399,7 @@ export class WorkbenchController {
       ...(verificationCapabilityAvailable && verificationActionMessageCode !== undefined
         ? { verificationActionMessageCode }
         : {}),
+      ...(verificationDirectorySelection === undefined ? {} : { verificationDirectorySelection }),
       verificationRootLocked: this.lockedVerificationRoot !== null,
       selectedVerificationGroupKeys,
       selectedCatalogId: catalogPageContains(catalog, this.model.selectedCatalogId)

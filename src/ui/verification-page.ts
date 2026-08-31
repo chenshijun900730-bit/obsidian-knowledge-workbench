@@ -14,6 +14,7 @@ import {
   createCloudDirectoryField,
 } from "./cloud-directory-field";
 import { renderVerificationProgress } from "./verification-progress";
+import type { CloudDirectorySelection } from "../catalog/cloud-directory-selection";
 
 export { connectionCanVerify } from "./verification-connection-semantics";
 
@@ -23,12 +24,14 @@ export interface VerificationPageActions {
   readonly onStart: () => Promise<void>;
   readonly onResume: () => Promise<void>;
   readonly onCancel: () => void;
-  readonly onBrowseRoot?: () => Promise<string | null>;
+  readonly onBrowseRoot?: () => Promise<CloudDirectorySelection | null>;
+  readonly onDirectorySelection: (selection: CloudDirectorySelection) => void;
 }
 
 export interface VerificationPageModel {
   readonly i18n: WorkbenchI18n;
   readonly rootPath: string;
+  readonly directorySelection?: CloudDirectorySelection;
   readonly rootLocked: boolean;
   readonly selectedGroupKeys: readonly string[];
   readonly actionMessageCode?: VerificationActionMessageCode;
@@ -208,10 +211,18 @@ export function renderVerificationPage(
   };
   const directoryField = createCloudDirectoryField(doc, i18n, {
     path: rootPathDraft,
+    selection: model.directorySelection,
     disabled: busy,
     locked: model.rootLocked,
   }, {
     onChoose: actions.onBrowseRoot ?? (async () => null),
+    onSelection: (selection) => {
+      rootPathDraft = selection.effectiveRoot;
+      actions.onDirectorySelection(selection);
+      queueMicrotask(() => {
+        if (!disposed) recomputeActions();
+      });
+    },
     onManualChange: (value) => {
       rootPathDraft = value;
       actions.onRootChange(value);

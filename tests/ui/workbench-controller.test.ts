@@ -13,6 +13,10 @@ import type { CloudDirectoryDiscoveryRuntime } from "../../src/catalog/cloud-dir
 import type { CloudDirectoryBrowserRuntime } from "../../src/catalog/cloud-directory-browser";
 import type { CloudDirectoryLocatorRuntime } from "../../src/catalog/cloud-directory-locator";
 import type {
+  CloudDirectoryPickerPurpose,
+  CloudDirectorySelection,
+} from "../../src/catalog/cloud-directory-selection";
+import type {
   CloudDirectoryPickerPresenter,
   CloudDirectoryPickerRequest,
 } from "../../src/ui/cloud-directory-picker";
@@ -22,6 +26,14 @@ const INACTIVE_AUTO_RESUME = {
   autoSegmentIndex: 0,
   autoSegmentLimit: LARGE_CATALOG_AUTO_CHAIN_MAX_SEGMENTS,
 };
+
+const directorySelection = (path: string): CloudDirectorySelection => ({
+  kind: "directory",
+  selectedPath: path,
+  effectiveRoot: path,
+});
+
+const scanPurpose: CloudDirectoryPickerPurpose = { kind: "scan" };
 
 describe("WorkbenchController cloud catalog filters", () => {
   it("opens the picker with a blank initial path and still rejects invalid nonblank paths", async () => {
@@ -56,18 +68,20 @@ describe("WorkbenchController cloud catalog filters", () => {
     internals.dependencies.catalogDirectoryPicker = {
       async request(input) {
         pickerCalls.push(input.initialPath);
-        return "/Synthetic/Chosen";
+        return directorySelection("/Synthetic/Chosen");
       },
     };
 
-    await expect(fixture.controller.chooseCatalogRoot("   "))
-      .resolves.toBe("/Synthetic/Chosen");
+    await expect(fixture.controller.chooseCatalogRoot({ initialRoot: "   ", purpose: scanPurpose }))
+      .resolves.toEqual(directorySelection("/Synthetic/Chosen"));
     for (const invalid of ["/", "Synthetic", "/Synthetic//Child"]) {
-      await expect(fixture.controller.chooseCatalogRoot(invalid))
+      await expect(fixture.controller.chooseCatalogRoot({ initialRoot: invalid, purpose: scanPurpose }))
         .rejects.toThrow("invalid-scan-root");
     }
-    await expect(fixture.controller.chooseCatalogRoot("/Synthetic/e\u0301"))
-      .resolves.toBe("/Synthetic/Chosen");
+    await expect(fixture.controller.chooseCatalogRoot({
+      initialRoot: "/Synthetic/e\u0301",
+      purpose: scanPurpose,
+    })).resolves.toEqual(directorySelection("/Synthetic/Chosen"));
 
     expect(pickerCalls).toEqual([null, "/Synthetic/é"]);
     expect(searchQueries).toEqual([]);
@@ -108,6 +122,7 @@ describe("WorkbenchController cloud catalog filters", () => {
         coveredCandidatePdfCount: 0,
         groups: [{
           groupKey: "group:science",
+          rootRelativePath: "Science",
           label: "Science",
           pdfCount: 1,
           mode: "recursive",
@@ -145,10 +160,10 @@ describe("WorkbenchController cloud catalog filters", () => {
       readonly dependencies: { catalogDirectoryPicker?: CloudDirectoryPickerPresenter };
     };
     internals.dependencies.catalogDirectoryPicker = {
-      request: async (input) => { request = input; return "/Recent/Literature"; },
+      request: async (input) => { request = input; return directorySelection("/Recent/Literature"); },
     };
 
-    await fixture.controller.chooseCatalogRoot("");
+    await fixture.controller.chooseCatalogRoot({ initialRoot: "", purpose: scanPurpose });
     expect(request?.locator).toBe(locator);
     expect(request?.candidates.snapshot()).toEqual([
       expect.objectContaining({ source: "recent", path: "/Recent/Literature" }),
@@ -270,11 +285,11 @@ describe("WorkbenchController cloud catalog filters", () => {
       readonly dependencies: { catalogDirectoryPicker?: CloudDirectoryPickerPresenter };
     };
     internals.dependencies.catalogDirectoryPicker = {
-      request: async (input) => { request = input; return "/Manual/Choice"; },
+      request: async (input) => { request = input; return directorySelection("/Manual/Choice"); },
     };
 
-    await expect(fixture.controller.chooseCatalogRoot(""))
-      .resolves.toBe("/Manual/Choice");
+    await expect(fixture.controller.chooseCatalogRoot({ initialRoot: "", purpose: scanPurpose }))
+      .resolves.toEqual(directorySelection("/Manual/Choice"));
 
     expect(request).not.toHaveProperty("locator");
     expect(request?.candidates.snapshot()).toEqual([]);
@@ -413,11 +428,107 @@ describe("WorkbenchController verification page state", () => {
   const groupKey = `group:${"b".repeat(64)}`;
   const group = {
     groupKey,
+    rootRelativePath: "Literature",
     label: "Literature",
     pdfCount: 12,
     mode: "recursive" as const,
     verificationStatus: "unverified" as const,
   };
+
+  it("applies one validated category selection without starting or resuming verification", async () => {
+    const secondKey = `group:${"d".repeat(64)}`;
+    const hybrid = new FakeHybridCatalogRuntime({
+      status: "ready",
+      active: {
+        importedAt: 1,
+        pdfCount: 20,
+        unverifiedCount: 20,
+        verifiedCount: 0,
+        differenceCount: 0,
+        cloudMissingCount: 0,
+        groupCount: 2,
+        verifiedGroupCount: 0,
+        coveredCandidatePdfCount: 0,
+        groups: [group, {
+          groupKey: secondKey,
+          rootRelativePath: "Science",
+          label: "Science",
+          pdfCount: 8,
+          mode: "recursive",
+          verificationStatus: "unverified",
+        }],
+      },
+    });
+    const fixture = controllerFixture({
+      catalog: new FakeCloudCatalogRuntime({}, undefined, hybrid),
+    });
+    fixture.controller.toggleVerificationGroup(secondKey);
+    const selection: CloudDirectorySelection = {
+      kind: "category",
+      selectedPath: "/科学文库/Literature",
+      effectiveRoot: "/科学文库",
+      groupKey,
+    };
+
+    fixture.controller.applyCatalogRootSelection(selection);
+
+    expect(fixture.controller.snapshot()).toMatchObject({
+      verificationRoot: "/科学文库",
+      verificationDirectorySelection: selection,
+      selectedVerificationGroupKeys: [groupKey],
+    });
+    expect(hybrid.startInputs).toEqual([]);
+    expect(hybrid.resumeInputs).toEqual([]);
+
+    fixture.controller.toggleVerificationGroup(secondKey);
+    expect(fixture.controller.snapshot()).toMatchObject({
+      verificationRoot: "/科学文库",
+      selectedVerificationGroupKeys: [groupKey, secondKey],
+    });
+    expect(fixture.controller.snapshot().verificationDirectorySelection).toBeUndefined();
+    fixture.controller.toggleVerificationGroup(secondKey);
+
+    fixture.controller.setVerificationRoot("/手工父目录");
+    expect(fixture.controller.snapshot()).toMatchObject({
+      verificationRoot: "/手工父目录",
+      selectedVerificationGroupKeys: [groupKey],
+    });
+    expect(fixture.controller.snapshot().verificationDirectorySelection).toBeUndefined();
+    fixture.controller.dispose();
+  });
+
+  it("keeps legal groups for a directory selection and rejects an inactive category", async () => {
+    const hybrid = new FakeHybridCatalogRuntime({
+      status: "ready",
+      active: {
+        importedAt: 1,
+        pdfCount: 12,
+        unverifiedCount: 12,
+        verifiedCount: 0,
+        differenceCount: 0,
+        cloudMissingCount: 0,
+        groupCount: 1,
+        verifiedGroupCount: 0,
+        coveredCandidatePdfCount: 0,
+        groups: [group],
+      },
+    });
+    const fixture = controllerFixture({
+      catalog: new FakeCloudCatalogRuntime({}, undefined, hybrid),
+    });
+    fixture.controller.toggleVerificationGroup(groupKey);
+    fixture.controller.applyCatalogRootSelection(directorySelection("/科学文库"));
+    expect(fixture.controller.snapshot().selectedVerificationGroupKeys).toEqual([groupKey]);
+
+    expect(() => fixture.controller.applyCatalogRootSelection({
+      kind: "category",
+      selectedPath: "/科学文库/Missing",
+      effectiveRoot: "/科学文库",
+      groupKey: `group:${"e".repeat(64)}`,
+    })).toThrow("cloud-directory-selection-invalid");
+    expect(hybrid.startInputs).toEqual([]);
+    fixture.controller.dispose();
+  });
 
   it("keeps detached runtime snapshots and drops selections no longer in the active catalog", () => {
     const connection = new FakeCloudCatalogConnectionRuntime({ status: "authorized" });

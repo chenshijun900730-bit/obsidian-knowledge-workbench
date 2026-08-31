@@ -23,6 +23,11 @@ import {
 } from "./cloud-directory-field";
 import { connectionCanVerify } from "./verification-connection-semantics";
 import { normalizeCatalogScanRoot } from "../catalog/catalog-path";
+import {
+  validateCloudDirectorySelection,
+  type CloudDirectoryPickerPurpose,
+  type CloudDirectorySelection,
+} from "../catalog/cloud-directory-selection";
 
 export interface SettingsController {
   settings(): PluginSettings;
@@ -42,7 +47,10 @@ export interface SettingsController {
   cancelCatalogAuthorization?(): void;
   revokeCatalog?(): Promise<void>;
   validateCatalogScanRoot?(rootPath: string): string;
-  chooseCatalogRoot?(initialRoot: string): Promise<string | null>;
+  chooseCatalogRoot?(input: Readonly<{
+    initialRoot: string;
+    purpose: CloudDirectoryPickerPurpose;
+  }>): Promise<CloudDirectorySelection | null>;
   requestCatalogScan?(rootPath: string, onConfirmed?: () => void): Promise<void>;
   cancelCatalogScan?(): void;
   hybridCatalog?(): HybridCatalogViewModel | undefined;
@@ -53,6 +61,7 @@ export interface SettingsController {
     rootPath: string,
     groupKeys: readonly string[],
     onConfirmed?: () => void,
+    directorySelection?: CloudDirectorySelection,
   ): Promise<void>;
   requestResumeLargeCatalogVerification?(
     rootPath: string,
@@ -182,10 +191,12 @@ export function createSettingsSectionsSurface(
     private readonly largeCatalogSelectedGroupKeys = new Set<string>();
     private readonly expandedSections = new Set<CollapsibleSettingsSection>();
     private largeCatalogVerificationRoot = "";
+    private largeCatalogDirectorySelection: CloudDirectorySelection | undefined;
     private catalogAppKeyDraft = "";
     private catalogSecretKeyDraft = "";
     private catalogAuthorizationCodeDraft = "";
     private catalogScanRootDraft = "";
+    private catalogScanDirectorySelection: CloudDirectorySelection | undefined;
     private catalogTxtPathDraft = "";
     private sessionAiSecretDraft = "";
     private liveStatus: HTMLElement | null = null;
@@ -716,12 +727,27 @@ export function createSettingsSectionsSurface(
         let recomputeScanActions = (): void => undefined;
         const scanDirectoryField = createCloudDirectoryField(doc, i18n, {
           path: this.catalogScanRootDraft,
+          selection: this.catalogScanDirectorySelection,
           disabled: scanBusy,
           locked: false,
         }, {
-          onChoose: () => controller.chooseCatalogRoot?.(this.catalogScanRootDraft)
-            ?? Promise.resolve(null),
+          onChoose: async () => {
+            const selection = await (controller.chooseCatalogRoot?.({
+              initialRoot: this.catalogScanRootDraft,
+              purpose: { kind: "scan" },
+            }) ?? Promise.resolve(null));
+            return selection?.kind === "directory" ? selection : null;
+          },
+          onSelection: (selection) => {
+            if (selection.kind !== "directory") return;
+            this.catalogScanDirectorySelection = structuredClone(selection);
+            this.catalogScanRootDraft = selection.effectiveRoot;
+            queueMicrotask(() => {
+              if (isCurrent()) recomputeScanActions();
+            });
+          },
           onManualChange: (value) => {
+            this.catalogScanDirectorySelection = undefined;
             this.catalogScanRootDraft = value;
             recomputeScanActions();
           },
@@ -752,6 +778,7 @@ export function createSettingsSectionsSurface(
             () => requestCatalogScan(this.catalogScanRootDraft, () => {
               if (!isCurrent()) return;
               this.catalogScanRootDraft = "";
+              this.catalogScanDirectorySelection = undefined;
               scanDirectoryField.setPath("");
               recomputeScanActions();
             }),
@@ -948,14 +975,64 @@ export function createSettingsSectionsSurface(
         let verificationActionPending = false;
         const validateVerificationRoot = controller.validateCatalogScanRoot?.bind(controller)
           ?? normalizeCatalogScanRoot;
+        const currentVerificationPurpose = (): Extract<
+          CloudDirectoryPickerPurpose,
+          { kind: "verification" }
+        > => ({
+          kind: "verification",
+          groups: (controller.hybridCatalog?.()?.active?.groups ?? [])
+            .filter((group) => group.groupKey !== "txt-root-items")
+            .map((group) => ({
+              groupKey: group.groupKey,
+              rootRelativePath: group.rootRelativePath,
+              label: group.label,
+            })),
+        });
         const verificationDirectoryField = createCloudDirectoryField(doc, i18n, {
           path: this.largeCatalogVerificationRoot,
+          selection: this.largeCatalogDirectorySelection,
           disabled: verificationBusy,
           locked: false,
         }, {
-          onChoose: () => controller.chooseCatalogRoot?.(this.largeCatalogVerificationRoot)
-            ?? Promise.resolve(null),
+          onChoose: async () => {
+            const purpose = currentVerificationPurpose();
+            const selection = await (controller.chooseCatalogRoot?.({
+              initialRoot: this.largeCatalogVerificationRoot,
+              purpose: structuredClone(purpose),
+            }) ?? Promise.resolve(null));
+            return selection === null
+              ? null
+              : validateCloudDirectorySelection(selection, purpose);
+          },
+          onSelection: (selection) => {
+            const validated = validateCloudDirectorySelection(
+              selection,
+              currentVerificationPurpose(),
+            );
+            this.largeCatalogDirectorySelection = structuredClone(validated);
+            this.largeCatalogVerificationRoot = validated.effectiveRoot;
+            const availableKeys = new Set(
+              controller.hybridCatalog?.()?.active?.groups.map((group) => group.groupKey) ?? [],
+            );
+            if (validated.kind === "category") {
+              selectedGroupKeys.clear();
+              selectedGroupKeys.add(validated.groupKey);
+            } else {
+              for (const key of [...selectedGroupKeys]) {
+                if (!availableKeys.has(key)) selectedGroupKeys.delete(key);
+              }
+            }
+            for (const choice of Array.from(groupChoices.querySelectorAll<HTMLInputElement>(
+              "input[data-catalog-group-key]",
+            ))) {
+              choice.checked = selectedGroupKeys.has(choice.dataset.catalogGroupKey ?? "");
+            }
+            queueMicrotask(() => {
+              if (isCurrent()) recomputeLargeVerificationActions();
+            });
+          },
           onManualChange: (value) => {
+            this.largeCatalogDirectorySelection = undefined;
             this.largeCatalogVerificationRoot = value;
             recomputeLargeVerificationActions();
           },
@@ -993,7 +1070,7 @@ export function createSettingsSectionsSurface(
           const selectedGroupIsRoot = (controller.hybridCatalog?.()?.active?.groups ?? []).some((group) => (
             group.groupKey !== "txt-root-items"
             && selectedGroupKeys.has(group.groupKey)
-            && group.label.normalize("NFC") === rootLeaf
+            && group.rootRelativePath.normalize("NFC") === rootLeaf
           ));
           if (selectedGroupIsRoot) {
             verificationActionPending = false;
@@ -1010,9 +1087,11 @@ export function createSettingsSectionsSurface(
               () => {
                 if (!isCurrent()) return;
                 this.largeCatalogVerificationRoot = "";
+                this.largeCatalogDirectorySelection = undefined;
                 verificationDirectoryField.setPath("");
                 recomputeLargeVerificationActions();
               },
+              this.largeCatalogDirectorySelection,
             ),
             verificationActions,
             undefined,
@@ -1035,6 +1114,7 @@ export function createSettingsSectionsSurface(
             () => requestResumeLargeCatalogVerification(rootPath, groupKeys, () => {
               if (!isCurrent()) return;
               this.largeCatalogVerificationRoot = "";
+              this.largeCatalogDirectorySelection = undefined;
               verificationDirectoryField.setPath("");
               recomputeLargeVerificationActions();
             }),
@@ -1098,6 +1178,17 @@ export function createSettingsSectionsSurface(
           for (const key of [...selectedGroupKeys]) {
             if (!availableKeys.has(key)) selectedGroupKeys.delete(key);
           }
+          if (this.largeCatalogDirectorySelection?.kind === "category") {
+            try {
+              this.largeCatalogDirectorySelection = validateCloudDirectorySelection(
+                this.largeCatalogDirectorySelection,
+                currentVerificationPurpose(),
+              );
+            } catch {
+              this.largeCatalogDirectorySelection = undefined;
+              verificationDirectoryField.setPath(this.largeCatalogVerificationRoot);
+            }
+          }
           groupChoices.replaceChildren();
           for (const group of current?.active?.groups ?? []) {
             const row = doc.createElement("label");
@@ -1120,6 +1211,10 @@ export function createSettingsSectionsSurface(
                 selectedGroupKeys.add(group.groupKey);
               } else {
                 selectedGroupKeys.delete(group.groupKey);
+              }
+              if (this.largeCatalogDirectorySelection?.kind === "category") {
+                this.largeCatalogDirectorySelection = undefined;
+                verificationDirectoryField.setPath(this.largeCatalogVerificationRoot);
               }
               recomputeLargeVerificationActions();
             });
@@ -1148,7 +1243,7 @@ export function createSettingsSectionsSurface(
               .some((group) => (
                 group.groupKey !== "txt-root-items"
                 && selectedGroupKeys.has(group.groupKey)
-                && group.label.normalize("NFC") === rootLeaf
+                && group.rootRelativePath.normalize("NFC") === rootLeaf
               ));
             const connectionReady = connectionCanVerify(connectionNow)
               && connectionNow?.messageCode === undefined;
@@ -1324,9 +1419,11 @@ export function createSettingsSectionsSurface(
       this.catalogSecretKeyDraft = "";
       this.catalogAuthorizationCodeDraft = "";
       this.catalogScanRootDraft = "";
+      this.catalogScanDirectorySelection = undefined;
       this.catalogTxtPathDraft = "";
       this.sessionAiSecretDraft = "";
       this.largeCatalogVerificationRoot = "";
+      this.largeCatalogDirectorySelection = undefined;
       this.largeCatalogSelectedGroupKeys.clear();
       this.secretComponent = null;
       this.liveStatus = null;

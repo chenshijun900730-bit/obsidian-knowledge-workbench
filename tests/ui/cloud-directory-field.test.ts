@@ -3,6 +3,13 @@ import { readFile } from "node:fs/promises";
 import { describe, expect, it, vi } from "vitest";
 import { createWorkbenchI18n } from "../../src/i18n/workbench-i18n";
 import { createCloudDirectoryField } from "../../src/ui/cloud-directory-field";
+import type { CloudDirectorySelection } from "../../src/catalog/cloud-directory-selection";
+
+const directorySelection = (path: string): CloudDirectorySelection => ({
+  kind: "directory",
+  selectedPath: path,
+  effectiveRoot: path,
+});
 
 const validRoot = (value: string): string => {
   const normalized = value.normalize("NFC");
@@ -20,13 +27,15 @@ const flush = async (): Promise<void> => {
 describe("cloud directory field", () => {
   it("renders an empty current card and fills it only after an explicit choice", async () => {
     const onManualChange = vi.fn();
-    const onChoose = vi.fn(async () => "/Synthetic/Library/Science");
+    const onChoose = vi.fn(async () => directorySelection("/Synthetic/Library/Science"));
+    const onSelection = vi.fn();
     const field = createCloudDirectoryField(document, createWorkbenchI18n("zh-CN"), {
       path: "",
       disabled: false,
       locked: false,
     }, {
       onChoose,
+      onSelection,
       onManualChange,
       onValidate: validRoot,
     });
@@ -42,7 +51,8 @@ describe("cloud directory field", () => {
     await flush();
 
     expect(onChoose).toHaveBeenCalledOnce();
-    expect(onManualChange).toHaveBeenCalledWith("/Synthetic/Library/Science");
+    expect(onManualChange).not.toHaveBeenCalled();
+    expect(onSelection).toHaveBeenCalledWith(directorySelection("/Synthetic/Library/Science"));
     expect(field.root.querySelector('[data-cloud-directory-name="true"]')?.textContent)
       .toBe("Science");
     expect(field.root.querySelector('[data-cloud-directory-path="true"]')?.textContent)
@@ -59,6 +69,7 @@ describe("cloud directory field", () => {
       locked: false,
     }, {
       onChoose: async () => null,
+      onSelection: vi.fn(),
       onManualChange,
       onValidate: validRoot,
     });
@@ -79,6 +90,7 @@ describe("cloud directory field", () => {
       locked: false,
     }, {
       onChoose: async () => null,
+      onSelection: vi.fn(),
       onManualChange,
       onValidate: validRoot,
     });
@@ -98,12 +110,12 @@ describe("cloud directory field", () => {
     [{ disabled: true, locked: false }, "disabled"],
     [{ disabled: false, locked: true }, "locked"],
   ] as const)("disables choosing and manual editing when %s", (state, _label) => {
-    const onChoose = vi.fn(async () => "/Synthetic/New");
+    const onChoose = vi.fn(async () => directorySelection("/Synthetic/New"));
     const onManualChange = vi.fn();
     const field = createCloudDirectoryField(document, createWorkbenchI18n("en"), {
       path: "/Synthetic/Existing",
       ...state,
-    }, { onChoose, onManualChange, onValidate: validRoot });
+    }, { onChoose, onSelection: vi.fn(), onManualChange, onValidate: validRoot });
 
     expect(field.chooseButton.disabled).toBe(true);
     expect(field.manualInput.disabled).toBe(true);
@@ -115,7 +127,7 @@ describe("cloud directory field", () => {
   });
 
   it("ignores a late chooser result after disposal", async () => {
-    let resolveChoice!: (value: string | null) => void;
+    let resolveChoice!: (value: CloudDirectorySelection | null) => void;
     const onManualChange = vi.fn();
     const field = createCloudDirectoryField(document, createWorkbenchI18n("en"), {
       path: "/Synthetic/Existing",
@@ -123,13 +135,14 @@ describe("cloud directory field", () => {
       locked: false,
     }, {
       onChoose: async () => new Promise((resolve) => { resolveChoice = resolve; }),
+      onSelection: vi.fn(),
       onManualChange,
       onValidate: validRoot,
     });
 
     field.chooseButton.click();
     field.dispose();
-    resolveChoice("/Synthetic/Late");
+    resolveChoice(directorySelection("/Synthetic/Late"));
     await flush();
 
     expect(onManualChange).not.toHaveBeenCalled();
@@ -137,7 +150,7 @@ describe("cloud directory field", () => {
   });
 
   it("invalidates an in-flight chooser when the host becomes busy and preserves the draft", async () => {
-    let resolveChoice!: (value: string | null) => void;
+    let resolveChoice!: (value: CloudDirectorySelection | null) => void;
     const onManualChange = vi.fn();
     const field = createCloudDirectoryField(document, createWorkbenchI18n("en"), {
       path: "/Synthetic/Existing",
@@ -145,13 +158,14 @@ describe("cloud directory field", () => {
       locked: false,
     }, {
       onChoose: async () => new Promise((resolve) => { resolveChoice = resolve; }),
+      onSelection: vi.fn(),
       onManualChange,
       onValidate: validRoot,
     });
 
     field.chooseButton.click();
     field.updateState({ disabled: true, locked: false });
-    resolveChoice("/Synthetic/Late");
+    resolveChoice(directorySelection("/Synthetic/Late"));
     await flush();
 
     expect(onManualChange).not.toHaveBeenCalled();
@@ -171,6 +185,7 @@ describe("cloud directory field", () => {
       locked: false,
     }, {
       onChoose: async () => { throw new Error("raw transport detail"); },
+      onSelection: vi.fn(),
       onManualChange,
       onValidate: validRoot,
     });
@@ -191,6 +206,7 @@ describe("cloud directory field", () => {
       locked: false,
     }, {
       onChoose: () => { throw new Error("synchronous private detail"); },
+      onSelection: vi.fn(),
       onManualChange: vi.fn(),
       onValidate: validRoot,
     });
@@ -204,7 +220,7 @@ describe("cloud directory field", () => {
   });
 
   it("invalidates an in-flight chooser when the host replaces the draft", async () => {
-    let resolveChoice!: (value: string | null) => void;
+    let resolveChoice!: (value: CloudDirectorySelection | null) => void;
     const onManualChange = vi.fn();
     const field = createCloudDirectoryField(document, createWorkbenchI18n("en"), {
       path: "/Synthetic/Existing",
@@ -212,13 +228,14 @@ describe("cloud directory field", () => {
       locked: false,
     }, {
       onChoose: async () => new Promise((resolve) => { resolveChoice = resolve; }),
+      onSelection: vi.fn(),
       onManualChange,
       onValidate: validRoot,
     });
 
     field.chooseButton.click();
     field.setPath("/Synthetic/HostReplacement");
-    resolveChoice("/Synthetic/Late");
+    resolveChoice(directorySelection("/Synthetic/Late"));
     await flush();
 
     expect(onManualChange).not.toHaveBeenCalled();
@@ -233,6 +250,7 @@ describe("cloud directory field", () => {
       locked: false,
     }, {
       onChoose: async () => null,
+      onSelection: vi.fn(),
       onManualChange: vi.fn(),
       onValidate: validRoot,
     });
@@ -261,6 +279,7 @@ describe("cloud directory field", () => {
       locked: false,
     }, {
       onChoose: async () => null,
+      onSelection: vi.fn(),
       onManualChange: vi.fn(),
       onValidate: validRoot,
     });
@@ -276,5 +295,92 @@ describe("cloud directory field", () => {
       /@container\s+knowledge-workbench\s*\(max-width:\s*22\.5rem\)[\s\S]*\.knowledge-workbench__directory-field-actions/u,
     );
     expect(css).toContain("var(--background-secondary)");
+  });
+
+  it("shows a category path and its actual parent without writing the category into the root input", async () => {
+    const groupKey = `group:${"c".repeat(64)}`;
+    const selection: CloudDirectorySelection = {
+      kind: "category",
+      selectedPath: "/科学文库/6-经济类",
+      effectiveRoot: "/科学文库",
+      groupKey,
+    };
+    const onSelection = vi.fn();
+    const onManualChange = vi.fn();
+    const field = createCloudDirectoryField(document, createWorkbenchI18n("zh-CN"), {
+      path: "/旧目录",
+      disabled: false,
+      locked: false,
+    }, {
+      onChoose: async () => selection,
+      onSelection,
+      onManualChange,
+      onValidate: validRoot,
+    });
+
+    field.chooseButton.click();
+    await flush();
+
+    expect(field.manualInput.value).toBe("/科学文库");
+    expect(field.root.textContent).toContain("选择的文件夹");
+    expect(field.root.textContent).toContain("/科学文库/6-经济类");
+    expect(field.root.textContent).toContain("实际核验父目录");
+    expect(field.root.textContent).toContain("/科学文库");
+    expect(onSelection).toHaveBeenCalledOnce();
+    expect(onManualChange).not.toHaveBeenCalled();
+
+    field.manualInput.value = "/手工父目录";
+    field.manualInput.dispatchEvent(new Event("input", { bubbles: true }));
+    expect(field.root.textContent).not.toContain("/科学文库/6-经济类");
+    expect(onManualChange).toHaveBeenCalledWith("/手工父目录");
+  });
+
+  it("keeps the prior draft when the host synchronously rejects a selection", async () => {
+    const field = createCloudDirectoryField(document, createWorkbenchI18n("zh-CN"), {
+      path: "/原目录",
+      disabled: false,
+      locked: false,
+    }, {
+      onChoose: async () => directorySelection("/未接受目录"),
+      onSelection: () => { throw new Error("private inactive group detail"); },
+      onManualChange: vi.fn(),
+      onValidate: validRoot,
+    });
+
+    field.chooseButton.click();
+    await flush();
+
+    expect(field.manualInput.value).toBe("/原目录");
+    expect(field.root.textContent).toContain("/原目录");
+    expect(field.root.textContent).not.toContain("/未接受目录");
+    expect(field.root.textContent).toContain("目录未改变");
+    expect(field.root.textContent).not.toContain("private inactive group detail");
+    expect(field.chooseButton.disabled).toBe(false);
+  });
+
+  it("ignores a chooser result after a newer manual edit", async () => {
+    let resolveChoice!: (value: CloudDirectorySelection | null) => void;
+    const onSelection = vi.fn();
+    const onManualChange = vi.fn();
+    const field = createCloudDirectoryField(document, createWorkbenchI18n("en"), {
+      path: "/Existing",
+      disabled: false,
+      locked: false,
+    }, {
+      onChoose: async () => new Promise((resolve) => { resolveChoice = resolve; }),
+      onSelection,
+      onManualChange,
+      onValidate: validRoot,
+    });
+
+    field.chooseButton.click();
+    field.manualInput.value = "/Manual-wins";
+    field.manualInput.dispatchEvent(new Event("input", { bubbles: true }));
+    resolveChoice(directorySelection("/Late"));
+    await flush();
+
+    expect(field.manualInput.value).toBe("/Manual-wins");
+    expect(onSelection).not.toHaveBeenCalled();
+    expect(onManualChange).toHaveBeenCalledWith("/Manual-wins");
   });
 });

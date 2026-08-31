@@ -283,6 +283,7 @@ describe("hybrid catalog settings", () => {
   };
   const group = (index: number) => ({
     groupKey: `group:${String(index).repeat(64)}`,
+    rootRelativePath: `Category ${index}`,
     label: `Category ${index}`,
     pdfCount: index + 1,
     mode: "recursive" as const,

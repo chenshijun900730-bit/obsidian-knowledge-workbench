@@ -1,13 +1,16 @@
 import type { WorkbenchI18n } from "../i18n/workbench-i18n";
+import type { CloudDirectorySelection } from "../catalog/cloud-directory-selection";
 
 export interface CloudDirectoryFieldModel {
   readonly path: string;
+  readonly selection?: CloudDirectorySelection;
   readonly disabled: boolean;
   readonly locked: boolean;
 }
 
 export interface CloudDirectoryFieldActions {
-  readonly onChoose: () => Promise<string | null>;
+  readonly onChoose: () => Promise<CloudDirectorySelection | null>;
+  readonly onSelection: (selection: CloudDirectorySelection) => void;
   readonly onManualChange: (value: string) => void;
   readonly onValidate: (value: string) => string;
 }
@@ -34,6 +37,9 @@ export function createCloudDirectoryField(
   const fieldOrdinal = ++fieldSequence;
   const eventController = new AbortController();
   let draft = model.path;
+  let directorySelection = model.selection === undefined
+    ? null
+    : structuredClone(model.selection);
   let disabled = model.disabled;
   let locked = model.locked;
   let disposed = false;
@@ -122,6 +128,31 @@ export function createCloudDirectoryField(
   };
   const valid = (): boolean => !disposed && normalized(draft).length > 0;
 
+  const safeSelection = (value: CloudDirectorySelection): CloudDirectorySelection | null => {
+    try {
+      const selectedPath = actions.onValidate(value.selectedPath);
+      const effectiveRoot = actions.onValidate(value.effectiveRoot);
+      if (value.kind === "directory") {
+        if (selectedPath !== effectiveRoot) return null;
+        return { kind: "directory", selectedPath, effectiveRoot };
+      }
+      if (
+        value.kind !== "category"
+        || typeof value.groupKey !== "string"
+        || value.groupKey.length === 0
+        || selectedPath === effectiveRoot
+      ) return null;
+      return {
+        kind: "category",
+        selectedPath,
+        effectiveRoot,
+        groupKey: value.groupKey,
+      };
+    } catch {
+      return null;
+    }
+  };
+
   const render = (message?: "failed"): void => {
     const safeDraft = normalized(draft);
     currentBody.replaceChildren();
@@ -143,6 +174,29 @@ export function createCloudDirectoryField(
       state.className = "knowledge-workbench__directory-field-state";
       state.textContent = i18n.t("directoryField.current.selectedSession");
       currentBody.append(name, path, state);
+      if (directorySelection !== null) {
+        const selectedPath = document.createElement("p");
+        selectedPath.className = "knowledge-workbench__directory-field-path";
+        selectedPath.dataset.cloudDirectorySelectedPath = "true";
+        selectedPath.textContent = i18n.t("directoryField.selection.selected", {
+          path: directorySelection.selectedPath,
+        });
+        currentBody.append(selectedPath);
+        if (directorySelection.kind === "category") {
+          const effectiveRoot = document.createElement("p");
+          effectiveRoot.className = "knowledge-workbench__directory-field-path";
+          effectiveRoot.dataset.cloudDirectoryEffectiveRoot = "true";
+          effectiveRoot.textContent = i18n.t("directoryField.selection.effectiveRoot", {
+            path: directorySelection.effectiveRoot,
+          });
+          const category = document.createElement("p");
+          category.dataset.cloudDirectoryCategory = directorySelection.groupKey;
+          category.textContent = i18n.t("directoryField.selection.category", {
+            category: directorySelection.groupKey,
+          });
+          currentBody.append(effectiveRoot, category);
+        }
+      }
     }
     const unavailable = disabled || locked;
     chooseButton.disabled = unavailable || choosePending;
@@ -172,7 +226,12 @@ export function createCloudDirectoryField(
 
   manualInput.addEventListener("input", () => {
     if (disposed || disabled || locked) return;
+    if (choosePending) {
+      chooseGeneration += 1;
+      choosePending = false;
+    }
     draft = manualInput.value;
+    directorySelection = null;
     actions.onManualChange(draft);
     render();
   }, { signal: eventController.signal });
@@ -192,7 +251,7 @@ export function createCloudDirectoryField(
     choosePending = true;
     render();
     let failed = false;
-    let choice: Promise<string | null>;
+    let choice: Promise<CloudDirectorySelection | null>;
     try {
       choice = actions.onChoose();
     } catch {
@@ -202,14 +261,20 @@ export function createCloudDirectoryField(
     }
     void choice.then((value) => {
       if (disposed || generation !== chooseGeneration || disabled || locked || value === null) return;
-      const safePath = normalized(value);
-      if (safePath.length === 0) {
+      const safeValue = safeSelection(value);
+      if (safeValue === null) {
         failed = true;
         return;
       }
-      draft = safePath;
-      manualInput.value = safePath;
-      actions.onManualChange(safePath);
+      try {
+        actions.onSelection(structuredClone(safeValue));
+      } catch {
+        failed = true;
+        return;
+      }
+      directorySelection = safeValue;
+      draft = safeValue.effectiveRoot;
+      manualInput.value = safeValue.effectiveRoot;
       if (!disposed && generation === chooseGeneration) render();
     }).catch(() => {
       failed = true;
@@ -232,6 +297,7 @@ export function createCloudDirectoryField(
         choosePending = false;
       }
       draft = path;
+      directorySelection = null;
       manualInput.value = path;
       render();
     },

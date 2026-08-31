@@ -36,6 +36,10 @@ import {
   type VerificationPageSurface,
 } from "./verification-page";
 import type { VerificationActionMessageCode } from "./catalog-message-presenter";
+import type {
+  CloudDirectoryPickerPurpose,
+  CloudDirectorySelection,
+} from "../catalog/cloud-directory-selection";
 
 export type { WorkbenchTab } from "./workbench-shell";
 export type { StartSection } from "./start-page";
@@ -59,6 +63,7 @@ export interface WorkbenchViewModel {
   readonly hybridCatalog?: HybridCatalogViewModel;
   readonly verificationRoot: string;
   readonly verificationRootLocked: boolean;
+  readonly verificationDirectorySelection?: CloudDirectorySelection;
   readonly verificationActionMessageCode?: VerificationActionMessageCode;
   readonly selectedVerificationGroupKeys: readonly string[];
   readonly selectedCatalogId: string | null;
@@ -119,7 +124,8 @@ export interface WorkbenchActions {
   readonly onStartSelectedVerification: () => Promise<void>;
   readonly onResumeSelectedVerification: () => Promise<void>;
   readonly onCancelSelectedVerification: () => void;
-  readonly onBrowseVerificationRoot?: () => Promise<string | null>;
+  readonly onBrowseVerificationRoot?: () => Promise<CloudDirectorySelection | null>;
+  readonly onApplyVerificationDirectorySelection?: (selection: CloudDirectorySelection) => void;
 }
 
 const PROGRESS_LABEL_KEYS = {
@@ -156,6 +162,19 @@ const STATUS_MESSAGE_KEYS: Readonly<Record<string, WorkbenchMessageKey>> = {
 };
 
 const verificationPageSurfaces = new WeakMap<HTMLElement, VerificationPageSurface>();
+
+const verificationPickerPurpose = (
+  model: WorkbenchViewModel,
+): Extract<CloudDirectoryPickerPurpose, { kind: "verification" }> => ({
+  kind: "verification",
+  groups: (model.hybridCatalog?.active?.groups ?? [])
+    .filter((group) => group.groupKey !== "txt-root-items")
+    .map((group) => ({
+      groupKey: group.groupKey,
+      rootRelativePath: group.rootRelativePath,
+      label: group.label,
+    })),
+});
 
 const disposeVerificationPage = (root: HTMLElement): void => {
   verificationPageSurfaces.get(root)?.dispose();
@@ -286,6 +305,7 @@ export function renderWorkbench(
     verificationPageSurfaces.set(root, renderVerificationPage(panel, {
       i18n,
       rootPath: model.verificationRoot,
+      directorySelection: model.verificationDirectorySelection,
       rootLocked: model.verificationRootLocked,
       actionMessageCode: model.verificationActionMessageCode,
       runDetailsOpen: verificationRunDetailsOpen,
@@ -298,6 +318,8 @@ export function renderWorkbench(
         onStart: surfaceActions.onStartSelectedVerification,
         onResume: surfaceActions.onResumeSelectedVerification,
         onCancel: surfaceActions.onCancelSelectedVerification,
+        onDirectorySelection: surfaceActions.onApplyVerificationDirectorySelection
+          ?? (() => undefined),
         ...(surfaceActions.onBrowseVerificationRoot === undefined ? {} : {
           onBrowseRoot: surfaceActions.onBrowseVerificationRoot,
         }),
@@ -371,7 +393,11 @@ export interface WorkbenchViewController {
   copyCatalogPath(catalogId: string): Promise<void>;
   openBaidu(): Promise<void>;
   setVerificationRoot(value: string): void;
-  chooseCatalogRoot?(initialRoot: string): Promise<string | null>;
+  chooseCatalogRoot?(input: Readonly<{
+    initialRoot: string;
+    purpose: CloudDirectoryPickerPurpose;
+  }>): Promise<CloudDirectorySelection | null>;
+  applyCatalogRootSelection?(selection: CloudDirectorySelection): void;
   toggleVerificationGroup(groupKey: string): void;
   startSelectedVerification(): Promise<void>;
   resumeSelectedVerification(): Promise<void>;
@@ -434,7 +460,11 @@ export function createWorkbenchViewClass(
       const chooseCatalogRoot = policy.mode === "normal"
         ? this.controller.chooseCatalogRoot?.bind(this.controller)
         : undefined;
-      renderWorkbench(this.contentEl, this.controller.snapshot(), {
+      const applyCatalogRootSelection = policy.mode === "normal"
+        ? this.controller.applyCatalogRootSelection?.bind(this.controller)
+        : undefined;
+      const snapshot = this.controller.snapshot();
+      renderWorkbench(this.contentEl, snapshot, {
         onSelectTab: (tab) => this.controller.selectTab(tab),
         onSelectStartSection: (section) => this.controller.selectStartSection(section),
         onSetLocale: (locale) => this.runAction("host.action.languageFailed", () => this.controller.setLocale(locale)),
@@ -485,9 +515,13 @@ export function createWorkbenchViewClass(
         onResumeSelectedVerification: () => this.controller.resumeSelectedVerification(),
         onCancelSelectedVerification: () => this.controller.cancelSelectedVerification(),
         ...(chooseCatalogRoot === undefined ? {} : {
-          onBrowseVerificationRoot: () => chooseCatalogRoot(
-            this.controller.snapshot().verificationRoot,
-          ),
+          onBrowseVerificationRoot: () => chooseCatalogRoot({
+            initialRoot: this.controller.snapshot().verificationRoot,
+            purpose: verificationPickerPurpose(this.controller.snapshot()),
+          }),
+        }),
+        ...(applyCatalogRootSelection === undefined ? {} : {
+          onApplyVerificationDirectorySelection: applyCatalogRootSelection,
         }),
       }, policy, this.settingsSurface);
     }

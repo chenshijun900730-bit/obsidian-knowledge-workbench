@@ -48,6 +48,8 @@ import {
   HybridCatalogError,
 } from "../../src/catalog/hybrid-catalog-types";
 import type { LargeCatalogBatchSummary } from "../../src/catalog/hybrid-catalog-runtime";
+import type { CloudDirectorySelection } from "../../src/catalog/cloud-directory-selection";
+import type { CloudDirectoryPickerPresenter } from "../../src/ui/cloud-directory-picker";
 
 const createTestDiv = (): HTMLDivElement => document.createElementNS(
   "http://www.w3.org/1999/xhtml",
@@ -220,9 +222,15 @@ describe("workbench", () => {
     const root = createTestDiv();
     const groupKey = `group:${"d".repeat(64)}`;
     const onSetVerificationRoot = vi.fn();
+    const onApplyVerificationDirectorySelection = vi.fn();
     const onStartSelectedVerification = vi.fn(async () => undefined);
     const onResumeSelectedVerification = vi.fn(async () => undefined);
-    const onBrowseVerificationRoot = vi.fn(async () => "/Synthetic/Science");
+    const selection: CloudDirectorySelection = {
+      kind: "directory",
+      selectedPath: "/Synthetic/Science",
+      effectiveRoot: "/Synthetic/Science",
+    };
+    const onBrowseVerificationRoot = vi.fn(async () => selection);
     const model = {
       ...populatedWorkbenchModel(),
       activeTab: "verification" as const,
@@ -243,6 +251,7 @@ describe("workbench", () => {
           coveredCandidatePdfCount: 0,
           groups: [{
             groupKey,
+            rootRelativePath: "Literature",
             label: "Literature",
             pdfCount: 1,
             mode: "recursive" as const,
@@ -256,6 +265,7 @@ describe("workbench", () => {
       onStartSelectedVerification,
       onResumeSelectedVerification,
       onBrowseVerificationRoot,
+      onApplyVerificationDirectorySelection,
     }));
 
     const choose = root.querySelector<HTMLButtonElement>(
@@ -267,13 +277,19 @@ describe("workbench", () => {
     await Promise.resolve();
 
     expect(onBrowseVerificationRoot).toHaveBeenCalledOnce();
-    expect(onSetVerificationRoot).toHaveBeenCalledWith("/Synthetic/Science");
+    expect(onApplyVerificationDirectorySelection).toHaveBeenCalledWith(selection);
+    expect(onSetVerificationRoot).not.toHaveBeenCalled();
     expect(onStartSelectedVerification).not.toHaveBeenCalled();
     expect(onResumeSelectedVerification).not.toHaveBeenCalled();
     expect(root.querySelector('[data-cloud-directory-current="true"]')?.textContent)
       .toContain("/Synthetic/Science");
 
-    renderWorkbench(root, { ...model, locale: "en", verificationRoot: "/Synthetic/Science" },
+    renderWorkbench(root, {
+      ...model,
+      locale: "en",
+      verificationRoot: "/Synthetic/Science",
+      verificationDirectorySelection: selection,
+    },
       noOpWorkbenchActions());
     expect(root.querySelector('[data-cloud-directory-current="true"]')?.textContent)
       .toContain("/Synthetic/Science");
@@ -283,7 +299,7 @@ describe("workbench", () => {
 
   it("disposes the prior verification field on rerender so a late choice cannot change the draft", async () => {
     const root = createTestDiv();
-    let resolveChoice!: (value: string | null) => void;
+    let resolveChoice!: (value: CloudDirectorySelection | null) => void;
     const onSetVerificationRoot = vi.fn();
     const model = {
       ...populatedWorkbenchModel(),
@@ -300,7 +316,11 @@ describe("workbench", () => {
     root.querySelector<HTMLButtonElement>('[data-action="browse-verification-root"]')?.click();
 
     renderWorkbench(root, { ...model, locale: "en" }, actions);
-    resolveChoice("/Synthetic/Late");
+    resolveChoice({
+      kind: "directory",
+      selectedPath: "/Synthetic/Late",
+      effectiveRoot: "/Synthetic/Late",
+    });
     await Promise.resolve();
     await Promise.resolve();
 
@@ -352,6 +372,7 @@ describe("workbench", () => {
       verifiedGroupCount: 7,
       groups: [{
         groupKey,
+        rootRelativePath: "Literature",
         label: "Literature",
         pdfCount: 252,
         mode: "recursive" as const,
@@ -444,10 +465,19 @@ describe("workbench", () => {
       hybridCatalog: { status: "ready" as const },
     };
     let actions = noOpWorkbenchActions();
+    const selection: CloudDirectorySelection = {
+      kind: "directory",
+      selectedPath: "/Synthetic/Chosen",
+      effectiveRoot: "/Synthetic/Chosen",
+    };
     actions = noOpWorkbenchActions({
-      onBrowseVerificationRoot: async () => "/Synthetic/Chosen",
-      onSetVerificationRoot: (value) => {
-        currentModel = { ...currentModel, verificationRoot: value };
+      onBrowseVerificationRoot: async () => selection,
+      onApplyVerificationDirectorySelection: (value) => {
+        currentModel = {
+          ...currentModel,
+          verificationRoot: value.effectiveRoot,
+          verificationDirectorySelection: value,
+        };
         renderWorkbench(root, currentModel, actions);
       },
     });
@@ -484,6 +514,7 @@ describe("workbench", () => {
       coveredCandidatePdfCount: 0,
       groups: [{
         groupKey,
+        rootRelativePath: "Science",
         label: "Science",
         pdfCount: 1,
         mode: "recursive" as const,
@@ -622,6 +653,7 @@ describe("workbench", () => {
       coveredCandidatePdfCount: 0,
       groups: [{
         groupKey,
+        rootRelativePath: "Science",
         label: "Science",
         pdfCount: 1,
         mode: "recursive" as const,
@@ -2085,6 +2117,98 @@ describe("workbench", () => {
     await instance.onOpen();
     expect(instance.contentEl.querySelector('[aria-label="今日"]')).not.toBeNull();
     await instance.onClose();
+  });
+
+  it("builds a detached verification purpose and applies a category draft without starting", async () => {
+    class ItemViewSurface {
+      readonly contentEl = createTestDiv();
+    }
+    const groupKey = `group:${"7".repeat(64)}`;
+    const hybrid = new FakeHybridCatalogRuntime({
+      status: "ready",
+      active: {
+        importedAt: 1,
+        pdfCount: 4,
+        unverifiedCount: 4,
+        verifiedCount: 0,
+        differenceCount: 0,
+        cloudMissingCount: 0,
+        groupCount: 1,
+        verifiedGroupCount: 0,
+        coveredCandidatePdfCount: 0,
+        groups: [{
+          groupKey,
+          rootRelativePath: "7-医学",
+          label: "医学",
+          pdfCount: 4,
+          mode: "recursive",
+          verificationStatus: "unverified",
+        }],
+      },
+    });
+    const fixture = controllerFixture({
+      catalog: new FakeCloudCatalogRuntime({}, undefined, hybrid),
+    });
+    const pickerRequest = vi.fn<CloudDirectoryPickerPresenter["request"]>(async (input) => ({
+      kind: "category",
+      selectedPath: "/科学文库/7-医学",
+      effectiveRoot: "/科学文库",
+      groupKey: input.purpose.kind === "verification"
+        ? input.purpose.groups[0]!.groupKey
+        : groupKey,
+    }));
+    const internals = fixture.controller as unknown as {
+      readonly dependencies: { catalogDirectoryPicker?: CloudDirectoryPickerPresenter };
+    };
+    internals.dependencies.catalogDirectoryPicker = { request: pickerRequest };
+    fixture.controller.selectTab("verification");
+    fixture.controller.setVerificationRoot("/科学文库");
+    const WorkbenchView = createWorkbenchViewClass(
+      ItemViewSurface as unknown as ItemViewConstructor,
+      NORMAL_RUNTIME_POLICY,
+    );
+    const view = new WorkbenchView({} as WorkspaceLeaf, fixture.controller);
+    await view.onOpen();
+
+    view.contentEl.querySelector<HTMLButtonElement>(
+      '[data-action="browse-verification-root"]',
+    )?.click();
+    await vi.waitFor(() => expect(pickerRequest).toHaveBeenCalledOnce());
+    await vi.waitFor(() => expect(fixture.controller.snapshot().verificationDirectorySelection)
+      .toMatchObject({ kind: "category", groupKey }));
+
+    const request = pickerRequest.mock.calls[0]![0];
+    expect(request.purpose).toEqual({
+      kind: "verification",
+      groups: [{ groupKey, rootRelativePath: "7-医学", label: "医学" }],
+    });
+    expect(fixture.controller.snapshot()).toMatchObject({
+      verificationRoot: "/科学文库",
+      selectedVerificationGroupKeys: [groupKey],
+    });
+    expect(hybrid.startInputs).toEqual([]);
+    expect(hybrid.resumeInputs).toEqual([]);
+
+    expect(view.contentEl.textContent).toContain("/科学文库/7-医学");
+    const categoryChoice = view.contentEl.querySelector<HTMLInputElement>(
+      `[data-group-key="${groupKey}"]`,
+    )!;
+    expect(categoryChoice.disabled).toBe(false);
+    categoryChoice.checked = false;
+    categoryChoice.dispatchEvent(new Event("change", { bubbles: true }));
+    await vi.waitFor(() => expect(
+      fixture.controller.snapshot().verificationDirectorySelection,
+    ).toBeUndefined());
+    expect(fixture.controller.snapshot()).toMatchObject({
+      verificationRoot: "/科学文库",
+      selectedVerificationGroupKeys: [],
+    });
+    expect(view.contentEl.textContent).not.toContain("/科学文库/7-医学");
+    expect(view.contentEl.querySelector<HTMLInputElement>(
+      '[data-verification-root="true"]',
+    )?.value).toBe("/科学文库");
+    await view.onClose();
+    fixture.controller.dispose();
   });
 
   it("surfaces pin persistence rejection in the concrete workbench status", async () => {

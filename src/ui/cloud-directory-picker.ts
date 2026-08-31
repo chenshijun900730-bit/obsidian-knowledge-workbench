@@ -12,20 +12,41 @@ import {
   type CloudDirectoryLocatorSummary,
   type CloudDirectoryLocatorStopReason,
 } from "../catalog/cloud-directory-locator";
-import { normalizeCatalogScanRoot } from "../catalog/catalog-path";
+import {
+  normalizeCatalogScanRoot,
+  normalizeCloudAbsolutePath,
+} from "../catalog/catalog-path";
+import type {
+  CloudDirectoryBrowserRuntime,
+  CloudDirectoryBrowseRound,
+  CloudDirectoryLayerSnapshot,
+} from "../catalog/cloud-directory-browser";
+import {
+  resolveCloudDirectorySelection,
+  validateCloudDirectorySelection,
+  type CloudDirectoryPickerPurpose,
+  type CloudDirectorySelection,
+} from "../catalog/cloud-directory-selection";
 import type {
   DirectoryPickerI18n,
   DirectoryPickerMessageKey,
 } from "../i18n/workbench-directory-picker-i18n";
+import {
+  createCloudDirectoryBrowserView,
+  type CloudDirectoryBrowserFixedError,
+  type CloudDirectoryBrowserViewSurface,
+} from "./cloud-directory-browser-view";
 
 export interface CloudDirectoryPickerRequest {
   readonly initialPath: string | null;
+  readonly purpose: CloudDirectoryPickerPurpose;
   readonly candidates: CloudDirectoryCandidateRuntime;
+  readonly browser?: CloudDirectoryBrowserRuntime;
   readonly locator?: CloudDirectoryLocatorRuntime;
 }
 
 export interface CloudDirectoryPickerPresenter {
-  request(input: CloudDirectoryPickerRequest): Promise<string | null>;
+  request(input: CloudDirectoryPickerRequest): Promise<CloudDirectorySelection | null>;
 }
 
 export type CloudDirectoryPickerModalConstructor = abstract new (app: App) => Modal;
@@ -45,6 +66,11 @@ interface PickerUi {
   readonly confirmation: HTMLElement;
   readonly confirmationQuery: HTMLElement;
   readonly locate: HTMLButtonElement;
+  readonly browseRoot: HTMLButtonElement;
+  readonly rootDisclosure: HTMLElement;
+  readonly rootDisclosureCancel: HTMLButtonElement;
+  readonly rootDisclosureConfirm: HTMLButtonElement;
+  readonly browserHost: HTMLElement;
   readonly clearRecent: HTMLButtonElement;
   readonly cancel: HTMLButtonElement;
   readonly use: HTMLButtonElement;
@@ -190,11 +216,30 @@ export function createCloudDirectoryPickerModalClass(
     private frozenLookupQuery: string | null = null;
     private lifecycleController: AbortController | null = null;
     private lookupController: AbortController | null = null;
+    private browserController: AbortController | null = null;
+    private browserGeneration = 0;
     private runtime: CloudDirectoryCandidateRuntime | null = null;
+    private purpose: CloudDirectoryPickerPurpose | null = null;
+    private browser: CloudDirectoryBrowserRuntime | undefined;
+    private browserUnsubscribe: (() => void) | null = null;
+    private browserSurface: CloudDirectoryBrowserViewSurface | null = null;
+    private browserPath: string | null = null;
+    private browserLayer: CloudDirectoryLayerSnapshot | null = null;
+    private browserHighlightedPath: string | null = null;
+    private browserActivity: "idle" | "running" | "complete" | "incomplete" | "canceled" | "error" = "idle";
+    private browserRound: Readonly<{
+      checkedEntryCount: number;
+      listRequestCount: number;
+      elapsedMs: number;
+      stopReason: CloudDirectoryBrowseRound["stopReason"] | null;
+    }> | null = null;
+    private browserFixedError: CloudDirectoryBrowserFixedError | null = null;
+    private browserRoundBaseline: Readonly<{ checked: number; requests: number }> | null = null;
+    private rootDisclosureVisible = false;
     private locator: CloudDirectoryLocatorRuntime | undefined;
     private ui: PickerUi | null = null;
-    private result: Promise<string | null> | null = null;
-    private settleResult: ((value: string | null) => void) | null = null;
+    private result: Promise<CloudDirectorySelection | null> | null = null;
+    private settleResult: ((value: CloudDirectorySelection | null) => void) | null = null;
     private settled = false;
     private disposed = false;
     private disposeAfterSettling = false;
@@ -210,13 +255,15 @@ export function createCloudDirectoryPickerModalClass(
       super(app);
     }
 
-    request(input: CloudDirectoryPickerRequest): Promise<string | null> {
+    request(input: CloudDirectoryPickerRequest): Promise<CloudDirectorySelection | null> {
       if (this.disposed) throw new Error("directory-picker-unavailable");
       if (this.result !== null) return this.result;
       const initialPath = input.initialPath === null
         ? null
         : normalizeCatalogScanRoot(input.initialPath);
       this.runtime = input.candidates;
+      this.purpose = structuredClone(input.purpose);
+      this.browser = input.browser;
       this.locator = input.locator;
       this.initialCandidate = initialPath === null ? null : {
         kind: "exact",
@@ -259,6 +306,9 @@ export function createCloudDirectoryPickerModalClass(
       safety.className = "knowledge-workbench__directory-picker-safety";
       safety.textContent = i18n.t("directoryPicker.safety");
 
+      const localTitle = doc.createElement("h3");
+      localTitle.textContent = i18n.t("directoryPicker.browser.recent.title");
+
       const queryLabel = doc.createElement("label");
       queryLabel.className = "knowledge-workbench__directory-picker-query";
       queryLabel.textContent = i18n.t("directoryPicker.query.label");
@@ -297,6 +347,11 @@ export function createCloudDirectoryPickerModalClass(
       locate.type = "button";
       locate.dataset.action = "locate-directory";
       locate.textContent = i18n.t("directoryPicker.lookup.action");
+
+      const browseRoot = doc.createElement("button");
+      browseRoot.type = "button";
+      browseRoot.dataset.action = "browse-directory-root";
+      browseRoot.textContent = i18n.t("directoryPicker.browser.browseRoot");
 
       const clearRecent = doc.createElement("button");
       clearRecent.type = "button";
@@ -341,7 +396,31 @@ export function createCloudDirectoryPickerModalClass(
 
       const tools = doc.createElement("div");
       tools.className = "knowledge-workbench__directory-picker-tools";
-      tools.append(locate, clearRecent);
+      tools.append(browseRoot, locate, clearRecent);
+
+      const rootDisclosure = doc.createElement("section");
+      rootDisclosure.className = "knowledge-workbench__directory-picker-confirmation";
+      rootDisclosure.dataset.directoryRootDisclosure = "true";
+      rootDisclosure.hidden = true;
+      const rootDisclosureTitle = doc.createElement("h3");
+      rootDisclosureTitle.textContent = i18n.t("directoryPicker.browser.rootDisclosure.title");
+      const rootDisclosureBody = doc.createElement("p");
+      rootDisclosureBody.textContent = i18n.t("directoryPicker.browser.rootDisclosure.body");
+      const rootDisclosureActions = doc.createElement("div");
+      rootDisclosureActions.className = "knowledge-workbench__directory-picker-actions";
+      const rootDisclosureCancel = doc.createElement("button");
+      rootDisclosureCancel.type = "button";
+      rootDisclosureCancel.dataset.action = "cancel-directory-root-disclosure";
+      rootDisclosureCancel.textContent = i18n.t("directoryPicker.browser.rootDisclosure.cancel");
+      const rootDisclosureConfirm = doc.createElement("button");
+      rootDisclosureConfirm.type = "button";
+      rootDisclosureConfirm.dataset.action = "confirm-directory-root-disclosure";
+      rootDisclosureConfirm.textContent = i18n.t("directoryPicker.browser.rootDisclosure.confirm");
+      rootDisclosureActions.append(rootDisclosureCancel, rootDisclosureConfirm);
+      rootDisclosure.append(rootDisclosureTitle, rootDisclosureBody, rootDisclosureActions);
+
+      const browserHost = doc.createElement("div");
+      browserHost.dataset.directoryBrowserHost = "true";
 
       const actions = doc.createElement("div");
       actions.className = "knowledge-workbench__directory-picker-actions";
@@ -365,6 +444,11 @@ export function createCloudDirectoryPickerModalClass(
         confirmation,
         confirmationQuery,
         locate,
+        browseRoot,
+        rootDisclosure,
+        rootDisclosureCancel,
+        rootDisclosureConfirm,
+        browserHost,
         clearRecent,
         cancel,
         use,
@@ -372,12 +456,15 @@ export function createCloudDirectoryPickerModalClass(
       };
       this.contentEl.append(
         safety,
+        localTitle,
         queryLabel,
         filters,
         results,
         selected,
         status,
         tools,
+        rootDisclosure,
+        browserHost,
         confirmation,
         actions,
       );
@@ -417,6 +504,15 @@ export function createCloudDirectoryPickerModalClass(
       query.addEventListener("keydown", keyboard, { signal });
       results.addEventListener("keydown", keyboard, { signal });
       locate.addEventListener("click", () => this.revealLookup(generation), { signal });
+      browseRoot.addEventListener("click", () => this.revealRootBrowser(generation), { signal });
+      rootDisclosureCancel.addEventListener("click", () => {
+        if (!this.isCurrent(generation)) return;
+        this.rootDisclosureVisible = false;
+        this.renderLocal(generation);
+      }, { signal });
+      rootDisclosureConfirm.addEventListener("click", () => {
+        this.confirmRootBrowser(generation);
+      }, { signal });
       cancelLocate.addEventListener("click", () => {
         if (!this.isCurrent(generation)) return;
         this.invalidateLookup(this.phase === "running");
@@ -436,6 +532,7 @@ export function createCloudDirectoryPickerModalClass(
       }, { signal });
 
       this.renderLocal(generation);
+      this.subscribeBrowser(generation);
       query.focus();
     }
 
@@ -552,7 +649,16 @@ export function createCloudDirectoryPickerModalClass(
           option.addEventListener("click", () => this.selectExact(path, generation), {
             signal: this.lifecycleController?.signal,
           });
-          ui.results.append(option);
+          const enter = ui.results.ownerDocument.createElement("button");
+          enter.type = "button";
+          enter.dataset.action = "browse-candidate-directory";
+          enter.dataset.directoryPath = path;
+          enter.textContent = ui.i18n.t("directoryPicker.browser.enter");
+          enter.disabled = this.browser === undefined || this.browserController !== null;
+          enter.addEventListener("click", () => this.enterBrowserPath(path, generation), {
+            signal: this.lifecycleController?.signal,
+          });
+          ui.results.append(option, enter);
           exactIndex += 1;
           continue;
         }
@@ -604,6 +710,7 @@ export function createCloudDirectoryPickerModalClass(
       ui.selected.append(selectedTitle, selectedValue);
 
       ui.confirmation.hidden = this.phase !== "confirm" && this.phase !== "running";
+      ui.rootDisclosure.hidden = !this.rootDisclosureVisible;
       ui.confirmationQuery.textContent = this.frozenLookupQuery === null
         ? ""
         : ui.i18n.t("directoryPicker.lookup.confirmation.query", {
@@ -613,6 +720,13 @@ export function createCloudDirectoryPickerModalClass(
         || this.query.trim().length === 0
         || this.phase === "running"
         || this.phase === "settling";
+      ui.browseRoot.disabled = this.browser === undefined
+        || this.browserController !== null
+        || this.phase === "running"
+        || this.phase === "settling";
+      ui.rootDisclosureCancel.disabled = this.browserController !== null;
+      ui.rootDisclosureConfirm.disabled = this.browser === undefined
+        || this.browserController !== null;
       ui.clearRecent.disabled = this.phase === "running" || this.phase === "settling";
       ui.cancel.disabled = this.phase === "settling";
       ui.use.disabled = this.selectedPath === null || this.phase !== "local";
@@ -620,6 +734,7 @@ export function createCloudDirectoryPickerModalClass(
       if (this.locator === undefined && (ui.status.textContent ?? "").length === 0) {
         ui.status.textContent = ui.i18n.t("directoryPicker.lookup.unavailable");
       }
+      if (this.browserPath !== null) this.renderBrowser(generation);
     }
 
     private appendIdentity(
@@ -723,6 +838,296 @@ export function createCloudDirectoryPickerModalClass(
       }
     }
 
+    private subscribeBrowser(generation: number): void {
+      this.browserUnsubscribe?.();
+      this.browserUnsubscribe = null;
+      const browser = this.browser;
+      if (browser === undefined) return;
+      try {
+        this.browserUnsubscribe = browser.subscribe((path) => {
+          if (!this.isCurrent(generation) || this.browserPath !== path) return;
+          this.refreshBrowserSnapshot(path, generation);
+        });
+      } catch {
+        if (this.ui !== null) {
+          this.ui.status.textContent = this.ui.i18n.t("directoryPicker.browser.unavailable");
+        }
+      }
+    }
+
+    private revealRootBrowser(generation: number): void {
+      if (!this.isCurrent(generation) || this.browser === undefined || this.browserController !== null) {
+        return;
+      }
+      try {
+        if (this.browser.rootAccessGranted()) {
+          this.enterBrowserPath("/", generation);
+          return;
+        }
+        this.rootDisclosureVisible = true;
+        this.renderLocal(generation);
+        this.ui?.rootDisclosureConfirm.focus({ preventScroll: true });
+      } catch {
+        if (this.ui !== null) {
+          this.ui.status.textContent = this.ui.i18n.t("directoryPicker.browser.unavailable");
+        }
+      }
+    }
+
+    private confirmRootBrowser(generation: number): void {
+      if (!this.isCurrent(generation) || this.browser === undefined || this.browserController !== null) {
+        return;
+      }
+      try {
+        this.browser.grantRootAccess();
+      } catch {
+        if (this.ui !== null) {
+          this.ui.status.textContent = this.ui.i18n.t("directoryPicker.browser.unavailable");
+        }
+        return;
+      }
+      this.rootDisclosureVisible = false;
+      this.enterBrowserPath("/", generation);
+    }
+
+    private enterBrowserPath(rawPath: string, generation: number): void {
+      if (!this.isCurrent(generation) || this.browser === undefined || this.browserController !== null) {
+        return;
+      }
+      let path: string;
+      try {
+        path = normalizeCloudAbsolutePath(rawPath);
+        if (path === "/" && !this.browser.rootAccessGranted()) {
+          this.rootDisclosureVisible = true;
+          this.renderLocal(generation);
+          return;
+        }
+      } catch {
+        this.setBrowserError("stale-directory", generation);
+        return;
+      }
+      this.rootDisclosureVisible = false;
+      this.browserPath = path;
+      this.browserHighlightedPath = null;
+      this.browserRound = null;
+      this.browserFixedError = null;
+      let snapshot: CloudDirectoryLayerSnapshot | null;
+      try {
+        snapshot = this.browser.snapshot(path);
+      } catch {
+        this.setBrowserError("browser-unavailable", generation);
+        return;
+      }
+      this.browserLayer = snapshot;
+      if (snapshot !== null) {
+        this.browserGeneration += 1;
+        this.browserActivity = snapshot.complete
+          ? "complete"
+          : snapshot.lastStopReason === "user-canceled" ? "canceled" : "incomplete";
+        this.renderLocal(generation);
+        return;
+      }
+      this.startBrowserLoad(path, 0, generation);
+    }
+
+    private startBrowserLoad(path: string, start: number, generation: number): void {
+      if (!this.isCurrent(generation) || this.browser === undefined || this.browserController !== null) {
+        return;
+      }
+      const browser = this.browser;
+      const controller = new AbortController();
+      const operationGeneration = ++this.browserGeneration;
+      this.browserController = controller;
+      let baseline: CloudDirectoryLayerSnapshot | null = null;
+      try {
+        baseline = browser.snapshot(path);
+      } catch {
+        this.browserController = null;
+        this.setBrowserError("browser-unavailable", generation);
+        return;
+      }
+      this.browserPath = path;
+      this.browserLayer = baseline;
+      this.browserRoundBaseline = {
+        checked: baseline?.cumulativeCheckedEntryCount ?? 0,
+        requests: baseline?.cumulativeListRequestCount ?? 0,
+      };
+      this.browserRound = {
+        checkedEntryCount: 0,
+        listRequestCount: 0,
+        elapsedMs: 0,
+        stopReason: null,
+      };
+      this.browserFixedError = null;
+      this.browserActivity = "running";
+      this.renderLocal(generation);
+      void browser.loadLayer({ path, start }, controller.signal).then((round) => {
+        if (!this.isBrowserCurrent(generation, operationGeneration, controller)) return;
+        const snapshot = browser.snapshot(path);
+        this.browserLayer = snapshot;
+        this.browserRound = {
+          checkedEntryCount: round.checkedEntryCount,
+          listRequestCount: round.listRequestCount,
+          elapsedMs: round.elapsedMs,
+          stopReason: round.stopReason,
+        };
+        this.browserActivity = round.status === "complete"
+          ? "complete"
+          : round.status === "canceled" ? "canceled" : "incomplete";
+        this.browserFixedError = null;
+      }).catch(() => {
+        if (!this.isBrowserCurrent(generation, operationGeneration, controller)) return;
+        this.browserActivity = "error";
+        this.browserFixedError = "load-failed";
+      }).finally(() => {
+        if (!this.ownsBrowserOperation(operationGeneration, controller)) return;
+        this.browserController = null;
+        this.browserRoundBaseline = null;
+        if (this.isCurrent(generation)) this.renderLocal(generation);
+      });
+    }
+
+    private refreshBrowserSnapshot(path: string, generation: number): void {
+      const browser = this.browser;
+      if (browser === undefined || !this.isCurrent(generation) || this.browserPath !== path) return;
+      try {
+        const snapshot = browser.snapshot(path);
+        this.browserLayer = snapshot;
+        if (this.browserActivity === "running" && this.browserRoundBaseline !== null) {
+          this.browserRound = {
+            checkedEntryCount: Math.max(
+              0,
+              (snapshot?.cumulativeCheckedEntryCount ?? 0) - this.browserRoundBaseline.checked,
+            ),
+            listRequestCount: Math.max(
+              0,
+              (snapshot?.cumulativeListRequestCount ?? 0) - this.browserRoundBaseline.requests,
+            ),
+            elapsedMs: 0,
+            stopReason: null,
+          };
+        }
+        this.renderBrowser(generation);
+      } catch {
+        this.setBrowserError("browser-unavailable", generation);
+      }
+    }
+
+    private renderBrowser(generation: number): void {
+      if (!this.isCurrent(generation) || this.browserPath === null || this.purpose === null) return;
+      const ui = this.ui;
+      if (ui === null) return;
+      const browserState = {
+        currentPath: this.browserPath,
+        ancestors: this.browserAncestors(this.browserPath, ui.i18n),
+        purpose: this.purpose,
+        layer: this.browserLayer,
+        highlightedPath: this.browserHighlightedPath,
+        activity: this.browserActivity,
+        round: this.browserRound,
+        fixedError: this.browserFixedError,
+      } as const;
+      const actions = {
+        onEnter: (path: string) => this.enterBrowserPath(path, generation),
+        onHighlight: (path: string) => {
+          if (!this.isCurrent(generation) || this.browserController !== null) return;
+          this.browserHighlightedPath = path;
+          this.renderBrowser(generation);
+        },
+        onSelect: (selection: CloudDirectorySelection) => {
+          void this.settleSelection(selection, generation);
+        },
+        onBreadcrumb: (path: string) => this.enterBrowserPath(path, generation),
+        onContinue: () => {
+          const nextStart = this.browserLayer?.nextStart;
+          if (nextStart !== null && nextStart !== undefined && this.browserPath !== null) {
+            this.startBrowserLoad(this.browserPath, nextStart, generation);
+          }
+        },
+        onRetry: () => {
+          if (this.browserPath === null) return;
+          this.startBrowserLoad(this.browserPath, this.browserLayer?.nextStart ?? 0, generation);
+        },
+        onCancel: () => this.cancelBrowser(generation),
+      };
+      if (this.browserSurface === null) {
+        this.browserSurface = createCloudDirectoryBrowserView(
+          ui.browserHost,
+          ui.i18n,
+          browserState,
+          actions,
+        );
+      } else this.browserSurface.update(browserState);
+    }
+
+    private browserAncestors(
+      path: string,
+      i18n: DirectoryPickerI18n,
+    ): readonly Readonly<{ path: string; label: string }>[] {
+      if (path === "/") {
+        return [{ path: "/", label: i18n.t("directoryPicker.browser.breadcrumbRoot") }];
+      }
+      const ancestors: Array<Readonly<{ path: string; label: string }>> = [{
+        path: "/",
+        label: i18n.t("directoryPicker.browser.breadcrumbRoot"),
+      }];
+      let current = "";
+      for (const segment of path.slice(1).split("/")) {
+        current += `/${segment}`;
+        ancestors.push({ path: current, label: segment });
+      }
+      return ancestors;
+    }
+
+    private cancelBrowser(generation: number): void {
+      if (!this.isCurrent(generation) || this.browserController === null) return;
+      this.browserController.abort();
+      this.browserActivity = "canceled";
+      this.browserRound = {
+        checkedEntryCount: this.browserRound?.checkedEntryCount ?? 0,
+        listRequestCount: this.browserRound?.listRequestCount ?? 0,
+        elapsedMs: this.browserRound?.elapsedMs ?? 0,
+        stopReason: "user-canceled",
+      };
+      this.renderBrowser(generation);
+    }
+
+    private setBrowserError(
+      error: CloudDirectoryBrowserFixedError,
+      generation: number,
+    ): void {
+      if (!this.isCurrent(generation)) return;
+      this.browserActivity = "error";
+      this.browserFixedError = error;
+      if (this.browserPath !== null) this.renderBrowser(generation);
+      else if (this.ui !== null) {
+        this.ui.status.textContent = this.ui.i18n.t(
+          error === "browser-unavailable"
+            ? "directoryPicker.browser.unavailable"
+            : "directoryPicker.browser.error.fixed",
+        );
+      }
+    }
+
+    private isBrowserCurrent(
+      generation: number,
+      browserGeneration: number,
+      controller: AbortController,
+    ): boolean {
+      return this.isCurrent(generation)
+        && this.ownsBrowserOperation(browserGeneration, controller)
+        && !controller.signal.aborted;
+    }
+
+    private ownsBrowserOperation(
+      browserGeneration: number,
+      controller: AbortController,
+    ): boolean {
+      return !this.disposed
+        && browserGeneration === this.browserGeneration
+        && this.browserController === controller;
+    }
+
     private async clearRecent(generation: number): Promise<void> {
       if (!this.isCurrent(generation) || this.phase !== "local") return;
       const runtime = this.runtime;
@@ -758,11 +1163,47 @@ export function createCloudDirectoryPickerModalClass(
         return;
       }
       const path = normalizeCatalogScanRoot(currentExact.candidate.path);
+      const purpose = this.purpose;
+      if (purpose === null) return;
+      let selection: CloudDirectorySelection;
+      try {
+        selection = resolveCloudDirectorySelection({
+          selectionKind: "directory",
+          purpose,
+          currentPath: path,
+          selectedPath: path,
+        });
+      } catch {
+        this.selectedPath = null;
+        this.renderLocal(generation);
+        return;
+      }
+      await this.settleSelection(selection, generation);
+    }
+
+    private async settleSelection(
+      value: CloudDirectorySelection,
+      generation: number,
+    ): Promise<void> {
+      if (!this.isCurrent(generation) || this.phase !== "local" || this.browserController !== null) {
+        return;
+      }
+      const runtime = this.runtime;
+      const purpose = this.purpose;
+      const ui = this.ui;
+      if (runtime === null || purpose === null || ui === null) return;
+      let selection: CloudDirectorySelection;
+      try {
+        selection = validateCloudDirectorySelection(value, purpose);
+      } catch {
+        this.showNotice(ui.i18n.t("directoryPicker.browser.stale"));
+        return;
+      }
       this.phase = "settling";
       this.renderLocal(generation);
       let saveFailed = false;
       try {
-        await runtime.remember(path);
+        await runtime.remember(selection.selectedPath);
       } catch {
         saveFailed = true;
       }
@@ -773,7 +1214,7 @@ export function createCloudDirectoryPickerModalClass(
       this.disposeAfterSettling = false;
       this.hostClosedWhileSettling = false;
       this.phase = "local";
-      this.resolve(path);
+      this.resolve(selection);
       if (hostClosedWhileSettling) this.cleanup();
       else this.close();
       if (disposeAfterSettling) this.disposed = true;
@@ -820,12 +1261,12 @@ export function createCloudDirectoryPickerModalClass(
       return `${this.optionIdPrefix}-${this.renderGeneration}-${index}`;
     }
 
-    private finish(value: string | null): void {
+    private finish(value: CloudDirectorySelection | null): void {
       this.resolve(value);
       this.close();
     }
 
-    private resolve(value: string | null): void {
+    private resolve(value: CloudDirectorySelection | null): void {
       if (this.settled) return;
       this.settled = true;
       this.settleResult?.(value);
@@ -848,6 +1289,13 @@ export function createCloudDirectoryPickerModalClass(
       this.lookupGeneration += 1;
       this.lookupController?.abort();
       this.lookupController = null;
+      this.browserController?.abort();
+      this.browserController = null;
+      this.browserGeneration += 1;
+      this.browserUnsubscribe?.();
+      this.browserUnsubscribe = null;
+      this.browserSurface?.dispose();
+      this.browserSurface = null;
       this.lifecycleController?.abort();
       this.lifecycleController = null;
       for (const input of Array.from(
@@ -866,6 +1314,16 @@ export function createCloudDirectoryPickerModalClass(
       this.disposeAfterSettling = false;
       this.hostClosedWhileSettling = false;
       this.runtime = null;
+      this.purpose = null;
+      this.browser = undefined;
+      this.browserPath = null;
+      this.browserLayer = null;
+      this.browserHighlightedPath = null;
+      this.browserActivity = "idle";
+      this.browserRound = null;
+      this.browserFixedError = null;
+      this.browserRoundBaseline = null;
+      this.rootDisclosureVisible = false;
       this.locator = undefined;
       this.ui = null;
       this.contentEl.replaceChildren();

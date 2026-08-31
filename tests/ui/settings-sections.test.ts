@@ -15,6 +15,10 @@ import { createWorkbenchI18n } from "../../src/i18n/workbench-i18n";
 import { presentCatalogProgress } from "../../src/ui/catalog-progress-presenter";
 import { EMPTY_RECENT_CLOUD_DIRECTORIES } from "../../src/storage/recent-cloud-directories";
 import { LARGE_CATALOG_AUTO_CHAIN_MAX_SEGMENTS } from "../../src/catalog/hybrid-catalog-types";
+import type {
+  CloudDirectoryPickerPurpose,
+  CloudDirectorySelection,
+} from "../../src/catalog/cloud-directory-selection";
 
 const INACTIVE_AUTO_RESUME = {
   autoResumeState: "inactive" as const,
@@ -208,7 +212,12 @@ describe("shared grouped settings surface", () => {
   });
 
   it("fills the session-only cloud root from the directory picker without saving settings", async () => {
-    const chooseCatalogRoot = vi.fn(async () => "/Synthetic/9-文学253册");
+    const selection: CloudDirectorySelection = {
+      kind: "directory",
+      selectedPath: "/Synthetic/9-文学253册",
+      effectiveRoot: "/Synthetic/9-文学253册",
+    };
+    const chooseCatalogRoot = vi.fn(async () => selection);
     const setOpenAtStartup = vi.fn(async () => undefined);
     const setLocale = vi.fn(async () => undefined);
     const requestCatalogScan = vi.fn(async () => undefined);
@@ -242,18 +251,244 @@ describe("shared grouped settings surface", () => {
     await Promise.resolve();
     await Promise.resolve();
 
-    expect(chooseCatalogRoot).toHaveBeenCalledWith("");
+    expect(chooseCatalogRoot).toHaveBeenCalledWith({
+      initialRoot: "",
+      purpose: { kind: "scan" },
+    });
     expect(input.value).toBe("/Synthetic/9-文学253册");
     expect(root.querySelector('[data-cloud-directory-current="true"]')?.textContent)
       .toContain("/Synthetic/9-文学253册");
-    expect(root.querySelector<HTMLButtonElement>('[data-action="catalog-start-scan"]')?.disabled)
-      .toBe(false);
+    await vi.waitFor(() => expect(
+      root.querySelector<HTMLButtonElement>('[data-action="catalog-start-scan"]')?.disabled,
+    ).toBe(false));
     expect(setOpenAtStartup).not.toHaveBeenCalled();
     expect(setLocale).not.toHaveBeenCalled();
     expect(requestCatalogScan).not.toHaveBeenCalled();
     surface.render(root, "zh-CN");
     expect(root.querySelector<HTMLInputElement>('[data-catalog-scan-root="true"]')?.value)
       .toBe("/Synthetic/9-文学253册");
+  });
+
+  it("applies verification categories and directories locally without starting cloud work", async () => {
+    const groupA = `group:${"a".repeat(64)}`;
+    const groupB = `group:${"b".repeat(64)}`;
+    const purpose: CloudDirectoryPickerPurpose = {
+      kind: "verification",
+      groups: [{ groupKey: groupA, rootRelativePath: "A", label: "甲" }, {
+        groupKey: groupB,
+        rootRelativePath: "B",
+        label: "乙",
+      }],
+    };
+    const category: CloudDirectorySelection = {
+      kind: "category",
+      selectedPath: "/科学文库/B",
+      effectiveRoot: "/科学文库",
+      groupKey: groupB,
+    };
+    const directory: CloudDirectorySelection = {
+      kind: "directory",
+      selectedPath: "/另一个父目录",
+      effectiveRoot: "/另一个父目录",
+    };
+    const results: Array<CloudDirectorySelection | null> = [category, directory, null];
+    const chooseCatalogRoot = vi.fn(async () => results.shift() ?? null);
+    const requestCatalogScan = vi.fn(async () => undefined);
+    const requestLargeCatalogVerification = vi.fn(async () => undefined);
+    const active = {
+      importedAt: 1,
+      pdfCount: 3,
+      unverifiedCount: 3,
+      verifiedCount: 0,
+      differenceCount: 0,
+      cloudMissingCount: 0,
+      groupCount: 2,
+      verifiedGroupCount: 0,
+      coveredCandidatePdfCount: 0,
+      groups: [{
+        groupKey: groupA,
+        rootRelativePath: "A",
+        label: "甲",
+        pdfCount: 1,
+        mode: "recursive" as const,
+        verificationStatus: "unverified" as const,
+      }, {
+        groupKey: groupB,
+        rootRelativePath: "B",
+        label: "乙",
+        pdfCount: 2,
+        mode: "recursive" as const,
+        verificationStatus: "unverified" as const,
+      }],
+    };
+    const controller = connectedControllerFixture({
+      chooseCatalogRoot,
+      requestCatalogScan,
+      hybridCatalog: () => ({ status: "ready", active }),
+      subscribeHybridCatalog: () => () => undefined,
+      previewCatalogTxt: async () => undefined,
+      requestCatalogTxtImport: async () => undefined,
+      requestLargeCatalogVerification,
+      requestResumeLargeCatalogVerification: async () => undefined,
+      cancelLargeCatalogVerification: () => undefined,
+    });
+    const root = createTestDiv();
+    createSettingsSectionsSurface({
+      app: {} as App,
+      controller,
+      policy: NORMAL_RUNTIME_POLICY,
+    }).render(root, "zh-CN");
+    const groupAInput = root.querySelector<HTMLInputElement>(
+      `[data-catalog-group-key="${groupA}"]`,
+    )!;
+    groupAInput.checked = true;
+    groupAInput.dispatchEvent(new Event("change", { bubbles: true }));
+    const choose = root.querySelector<HTMLButtonElement>(
+      '[data-action="browse-catalog-large-scan-root"]',
+    )!;
+
+    choose.click();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(chooseCatalogRoot).toHaveBeenNthCalledWith(1, {
+      initialRoot: "",
+      purpose,
+    });
+    expect(root.querySelector<HTMLInputElement>('[data-catalog-large-scan-root="true"]')?.value)
+      .toBe("/科学文库");
+    expect(root.querySelector<HTMLInputElement>(`[data-catalog-group-key="${groupA}"]`)?.checked)
+      .toBe(false);
+    expect(root.querySelector<HTMLInputElement>(`[data-catalog-group-key="${groupB}"]`)?.checked)
+      .toBe(true);
+    expect(root.textContent).toContain("/科学文库/B");
+    expect(root.textContent).toContain("实际核验父目录：/科学文库");
+
+    await vi.waitFor(() => expect(choose.disabled).toBe(false));
+    groupAInput.checked = true;
+    groupAInput.dispatchEvent(new Event("change", { bubbles: true }));
+    choose.click();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(root.querySelector<HTMLInputElement>('[data-catalog-large-scan-root="true"]')?.value)
+      .toBe("/另一个父目录");
+    expect(root.querySelector<HTMLInputElement>(`[data-catalog-group-key="${groupA}"]`)?.checked)
+      .toBe(true);
+    expect(root.querySelector<HTMLInputElement>(`[data-catalog-group-key="${groupB}"]`)?.checked)
+      .toBe(true);
+
+    choose.click();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(root.querySelector<HTMLInputElement>('[data-catalog-large-scan-root="true"]')?.value)
+      .toBe("/另一个父目录");
+    const input = root.querySelector<HTMLInputElement>('[data-catalog-large-scan-root="true"]')!;
+    input.value = "/手工父目录";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    expect(root.textContent).not.toContain("/另一个父目录");
+    expect(requestCatalogScan).not.toHaveBeenCalled();
+    expect(requestLargeCatalogVerification).not.toHaveBeenCalled();
+  });
+
+  it("rejects a category result from the scan-purpose chooser", async () => {
+    const requestCatalogScan = vi.fn(async () => undefined);
+    const chooseCatalogRoot = vi.fn(async (): Promise<CloudDirectorySelection> => ({
+      kind: "category",
+      selectedPath: "/科学文库/分类",
+      effectiveRoot: "/科学文库",
+      groupKey: `group:${"c".repeat(64)}`,
+    }));
+    const root = createTestDiv();
+    createSettingsSectionsSurface({
+      app: {} as App,
+      controller: connectedControllerFixture({ chooseCatalogRoot, requestCatalogScan }),
+      policy: NORMAL_RUNTIME_POLICY,
+    }).render(root, "zh-CN");
+
+    root.querySelector<HTMLButtonElement>('[data-action="browse-catalog-scan-root"]')?.click();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(root.querySelector<HTMLInputElement>('[data-catalog-scan-root="true"]')?.value).toBe("");
+    expect(requestCatalogScan).not.toHaveBeenCalled();
+  });
+
+  it("drops category context when the user manually changes verification groups", async () => {
+    const groupA = `group:${"d".repeat(64)}`;
+    const groupB = `group:${"e".repeat(64)}`;
+    const active = {
+      importedAt: 1,
+      pdfCount: 3,
+      unverifiedCount: 3,
+      verifiedCount: 0,
+      differenceCount: 0,
+      cloudMissingCount: 0,
+      groupCount: 2,
+      verifiedGroupCount: 0,
+      coveredCandidatePdfCount: 0,
+      groups: [{
+        groupKey: groupA,
+        rootRelativePath: "A",
+        label: "甲",
+        pdfCount: 1,
+        mode: "recursive" as const,
+        verificationStatus: "unverified" as const,
+      }, {
+        groupKey: groupB,
+        rootRelativePath: "B",
+        label: "乙",
+        pdfCount: 2,
+        mode: "recursive" as const,
+        verificationStatus: "unverified" as const,
+      }],
+    };
+    const requestLargeCatalogVerification = vi.fn(async () => undefined);
+    const root = createTestDiv();
+    createSettingsSectionsSurface({
+      app: {} as App,
+      controller: connectedControllerFixture({
+        chooseCatalogRoot: async () => ({
+          kind: "category",
+          selectedPath: "/科学文库/B",
+          effectiveRoot: "/科学文库",
+          groupKey: groupB,
+        }),
+        hybridCatalog: () => ({ status: "ready", active }),
+        subscribeHybridCatalog: () => () => undefined,
+        previewCatalogTxt: async () => undefined,
+        requestCatalogTxtImport: async () => undefined,
+        requestLargeCatalogVerification,
+        requestResumeLargeCatalogVerification: async () => undefined,
+        cancelLargeCatalogVerification: () => undefined,
+      }),
+      policy: NORMAL_RUNTIME_POLICY,
+    }).render(root, "zh-CN");
+    root.querySelector<HTMLButtonElement>(
+      '[data-action="browse-catalog-large-scan-root"]',
+    )?.click();
+    await vi.waitFor(() => expect(root.textContent).toContain("/科学文库/B"));
+
+    const groupAInput = root.querySelector<HTMLInputElement>(
+      `[data-catalog-group-key="${groupA}"]`,
+    )!;
+    groupAInput.checked = true;
+    groupAInput.dispatchEvent(new Event("change", { bubbles: true }));
+
+    expect(root.querySelector<HTMLInputElement>('[data-catalog-large-scan-root="true"]')?.value)
+      .toBe("/科学文库");
+    expect(root.textContent).not.toContain("/科学文库/B");
+    expect(root.querySelector<HTMLInputElement>(`[data-catalog-group-key="${groupB}"]`)?.checked)
+      .toBe(true);
+    const start = root.querySelector<HTMLButtonElement>(
+      '[data-action="catalog-start-large-verification"]',
+    )!;
+    expect(start.disabled).toBe(false);
+    start.click();
+    expect(requestLargeCatalogVerification).toHaveBeenCalledWith(
+      "/科学文库",
+      [groupB, groupA],
+      expect.any(Function),
+      undefined,
+    );
   });
 
   it("keeps scan and category verification gated by a valid non-root draft and busy state", () => {
@@ -282,6 +517,7 @@ describe("shared grouped settings surface", () => {
           coveredCandidatePdfCount: 0,
           groups: [{
             groupKey,
+            rootRelativePath: "Science",
             label: "Science",
             pdfCount: 1,
             mode: "recursive",
@@ -371,6 +607,7 @@ describe("shared grouped settings surface", () => {
           verifiedGroupCount: 7,
           groups: [{
             groupKey,
+            rootRelativePath: "Literature",
             label: "Literature",
             pdfCount: 252,
             mode: "recursive",
@@ -454,6 +691,7 @@ describe("shared grouped settings surface", () => {
           coveredCandidatePdfCount: 0,
           groups: [{
             groupKey,
+            rootRelativePath: "Science",
             label: "Science",
             pdfCount: 1,
             mode: "recursive",
@@ -562,6 +800,7 @@ describe("shared grouped settings surface", () => {
           coveredCandidatePdfCount: 0,
           groups: [{
             groupKey,
+            rootRelativePath: "Science",
             label: "Science",
             pdfCount: 1,
             mode: "recursive",
@@ -763,6 +1002,7 @@ describe("shared grouped settings surface", () => {
           coveredCandidatePdfCount: 0,
           groups: [{
             groupKey: `group:${"a".repeat(64)}`,
+            rootRelativePath: "A",
             label: "A",
             pdfCount: 1,
             mode: "recursive",

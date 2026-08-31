@@ -2,12 +2,18 @@ import type { App, Modal } from "obsidian";
 import { normalizeCatalogScanRoot } from "../catalog/catalog-path";
 import { LARGE_CATALOG_RUN_BUDGET } from "../catalog/hybrid-catalog-types";
 import {
+  validateCloudDirectorySelection,
+  type CloudDirectoryPickerPurpose,
+  type CloudDirectorySelection,
+} from "../catalog/cloud-directory-selection";
+import {
   createWorkbenchI18n,
   type WorkbenchLocaleProvider,
 } from "../i18n/workbench-i18n";
 
 export interface CatalogLargeScanConfirmationGroup {
   readonly groupKey: string;
+  readonly rootRelativePath: string;
   readonly label: string;
   readonly pdfCount: number;
 }
@@ -16,6 +22,7 @@ export interface CatalogLargeScanConfirmationRequest {
   readonly kind: "start" | "resume";
   readonly cloudRoot: string;
   readonly groups: readonly CatalogLargeScanConfirmationGroup[];
+  readonly directorySelection?: CloudDirectorySelection;
 }
 
 export interface CatalogLargeScanConfirmationPresenter {
@@ -35,7 +42,10 @@ const checkedRequest = (
       input.groups.length < 1
       || input.groups.length > LARGE_CATALOG_RUN_BUDGET.maxSelectedTopLevelGroups
     ))
-    || (input.kind === "resume" && input.groups.length !== 0)
+    || (input.kind === "resume" && (
+      input.groups.length !== 0
+      || input.directorySelection !== undefined
+    ))
   ) throw new RangeError("invalid-large-catalog-selection");
   const seen = new Set<string>();
   const groups = input.groups.map((group) => {
@@ -43,18 +53,62 @@ const checkedRequest = (
     if (
       !GROUP_PATTERN.test(group.groupKey)
       || seen.has(group.groupKey)
+      || typeof group.rootRelativePath !== "string"
       || label.length === 0
       || /\p{Cc}/u.test(label)
       || !Number.isSafeInteger(group.pdfCount)
       || group.pdfCount < 1
     ) throw new RangeError("invalid-large-catalog-selection");
     seen.add(group.groupKey);
-    return { groupKey: group.groupKey, label, pdfCount: group.pdfCount };
+    return {
+      groupKey: group.groupKey,
+      rootRelativePath: group.rootRelativePath,
+      label,
+      pdfCount: group.pdfCount,
+    };
   });
+  const cloudRoot = normalizeCatalogScanRoot(input.cloudRoot);
+  if (input.kind === "resume") return { kind: "resume", cloudRoot, groups: [] };
+  const purpose: CloudDirectoryPickerPurpose = {
+    kind: "verification",
+    groups: groups.map(({ groupKey, rootRelativePath, label }) => ({
+      groupKey,
+      rootRelativePath,
+      label,
+    })),
+  };
+  try {
+    validateCloudDirectorySelection({
+      kind: "directory",
+      selectedPath: cloudRoot,
+      effectiveRoot: cloudRoot,
+    }, purpose);
+  } catch {
+    throw new RangeError("invalid-large-catalog-selection");
+  }
+  let directorySelection: CloudDirectorySelection | undefined;
+  if (input.directorySelection !== undefined) {
+    try {
+      directorySelection = validateCloudDirectorySelection(input.directorySelection, purpose);
+    } catch {
+      throw new RangeError("invalid-large-catalog-selection");
+    }
+    if (directorySelection.effectiveRoot !== cloudRoot) {
+      throw new RangeError("invalid-large-catalog-selection");
+    }
+    if (
+      directorySelection.kind === "category"
+      && (
+        groups.length !== 1
+        || groups[0]?.groupKey !== directorySelection.groupKey
+      )
+    ) throw new RangeError("invalid-large-catalog-selection");
+  }
   return {
-    kind: input.kind,
-    cloudRoot: normalizeCatalogScanRoot(input.cloudRoot),
+    kind: "start",
+    cloudRoot,
     groups,
+    ...(directorySelection === undefined ? {} : { directorySelection }),
   };
 };
 
@@ -95,6 +149,25 @@ export function createCatalogLargeScanConfirmationModalClass(
       scope.textContent = i18n.t(request.kind === "start"
         ? "verification.confirm.start.scope"
         : "verification.confirm.resume.scope", { root: request.cloudRoot });
+      const structuredSummary: HTMLElement[] = [];
+      if (request.kind === "start" && request.directorySelection !== undefined) {
+        const selectedFolder = doc.createElement("p");
+        selectedFolder.textContent = i18n.t("directoryField.selection.selected", {
+          path: request.directorySelection.selectedPath,
+        });
+        const effectiveRoot = doc.createElement("p");
+        effectiveRoot.textContent = i18n.t("directoryField.selection.effectiveRoot", {
+          path: request.cloudRoot,
+        });
+        structuredSummary.push(selectedFolder, effectiveRoot);
+        if (request.directorySelection.kind === "category") {
+          const category = doc.createElement("p");
+          category.textContent = i18n.t("directoryField.selection.category", {
+            category: request.groups[0]?.label ?? "",
+          });
+          structuredSummary.push(category);
+        }
+      }
       const selection = doc.createElement("p");
       selection.textContent = request.kind === "start"
         ? i18n.t("verification.confirm.start.selection", {
@@ -129,7 +202,7 @@ export function createCatalogLargeScanConfirmationModalClass(
         : "verification.confirm.resume.action");
       confirm.addEventListener("click", () => this.finish(true));
       actions.append(cancel, confirm);
-      this.contentEl.append(scope, selection, budget, safety, actions);
+      this.contentEl.append(scope, ...structuredSummary, selection, budget, safety, actions);
       confirm.focus();
     }
 

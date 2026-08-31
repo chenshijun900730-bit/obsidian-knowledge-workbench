@@ -468,6 +468,8 @@ describe("HybridCatalogRuntimeService", () => {
     });
     expect(value.runtime.snapshot().active?.groups.map((group) => group.label))
       .toEqual(["Root items", "History", "Science"]);
+    expect(value.runtime.snapshot().active?.groups.map((group) => group.rootRelativePath))
+      .toEqual(["", "History", "Science"]);
     expect(value.runtime.snapshot().batch?.batchId).toBe("batch-paused");
     const detached = value.runtime.snapshot();
     (detached.batch as { batchId: string }).batchId = "mutated";

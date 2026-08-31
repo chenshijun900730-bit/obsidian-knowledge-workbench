@@ -33,6 +33,7 @@ export interface CatalogTxtSourcePort {
 
 export interface HybridCatalogGroupViewModel {
   readonly groupKey: string;
+  readonly rootRelativePath: string;
   readonly label: string;
   readonly pdfCount: number;
   readonly mode: LargeCatalogGroupMode;
@@ -605,6 +606,7 @@ export class HybridCatalogRuntimeService implements HybridCatalogRuntime {
           : "verified";
       return {
         groupKey: candidateGroup.groupKey,
+        rootRelativePath: candidateGroup.rootRelativePath,
         label: candidateGroup.label,
         pdfCount: candidateGroup.pdfCount,
         mode: candidateGroup.mode,

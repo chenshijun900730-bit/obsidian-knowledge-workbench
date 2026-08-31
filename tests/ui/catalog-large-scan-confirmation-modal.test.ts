@@ -45,8 +45,13 @@ const request = {
   kind: "start" as const,
   cloudRoot: "/Synthetic/private-root",
   groups: [
-    { groupKey: "txt-root-items", label: "Root items", pdfCount: 2 },
-    { groupKey: `group:${"1".repeat(64)}`, label: "Science", pdfCount: 30 },
+    { groupKey: "txt-root-items", rootRelativePath: "", label: "Root items", pdfCount: 2 },
+    {
+      groupKey: `group:${"1".repeat(64)}`,
+      rootRelativePath: "Science",
+      label: "Science",
+      pdfCount: 30,
+    },
   ],
 };
 
@@ -117,11 +122,81 @@ describe("large catalog scan confirmation", () => {
       ...request,
       groups: Array.from({ length: 6 }, (_, index) => ({
         groupKey: `group:${String(index).repeat(64)}`,
+        rootRelativePath: `Group-${index}`,
         label: `Group ${index}`,
         pdfCount: 1,
       })),
     })).toThrow("invalid-large-catalog-selection");
     expect(excessive.surface.contentEl.textContent).toBe("");
+  });
+
+  it("renders a detached category selection and rejects forged or mismatched context", () => {
+    const groupKey = `group:${"3".repeat(64)}`;
+    const input = {
+      kind: "start" as const,
+      cloudRoot: "/科学文库",
+      groups: [{
+        groupKey,
+        rootRelativePath: "6-经济类",
+        label: "经济类",
+        pdfCount: 12,
+      }],
+      directorySelection: {
+        kind: "category" as const,
+        selectedPath: "/科学文库/6-经济类",
+        effectiveRoot: "/科学文库",
+        groupKey,
+      },
+    };
+    const accepted = fixture("zh-CN");
+    void accepted.modal.request(input);
+    (input.directorySelection as { selectedPath: string }).selectedPath = "/已篡改";
+    expect(accepted.surface.contentEl.textContent).toContain("/科学文库/6-经济类");
+    expect(accepted.surface.contentEl.textContent).toContain("/科学文库");
+    expect(accepted.surface.contentEl.textContent).toContain("经济类");
+    expect(accepted.surface.contentEl.textContent).not.toContain("/已篡改");
+
+    for (const directorySelection of [{
+      ...input.directorySelection,
+      selectedPath: "/科学文库/其他",
+    }, {
+      ...input.directorySelection,
+      effectiveRoot: "/其他父目录",
+    }, {
+      ...input.directorySelection,
+      groupKey: `group:${"4".repeat(64)}`,
+    }, {
+      kind: "directory" as const,
+      selectedPath: "/",
+      effectiveRoot: "/",
+    }]) {
+      expect(() => fixture().modal.request({
+        ...input,
+        directorySelection,
+      })).toThrow("invalid-large-catalog-selection");
+    }
+  });
+
+  it("keeps directory and legacy start flows compatible but rejects selection on resume", () => {
+    expect(() => fixture().modal.request(request)).not.toThrow();
+    expect(() => fixture().modal.request({
+      ...request,
+      directorySelection: {
+        kind: "directory",
+        selectedPath: request.cloudRoot,
+        effectiveRoot: request.cloudRoot,
+      },
+    })).not.toThrow();
+    expect(() => fixture().modal.request({
+      kind: "resume",
+      cloudRoot: "/Synthetic",
+      groups: [],
+      directorySelection: {
+        kind: "directory",
+        selectedPath: "/Synthetic",
+        effectiveRoot: "/Synthetic",
+      },
+    })).toThrow("invalid-large-catalog-selection");
   });
 
   it("resolves false on Cancel, Escape, or host close", async () => {
@@ -162,6 +237,7 @@ describe("large catalog scan confirmation", () => {
         coveredCandidatePdfCount: 0,
         groups: [{
           groupKey,
+          rootRelativePath: "Science",
           label: "Science",
           pdfCount: 30,
           mode: "recursive",
@@ -215,12 +291,12 @@ describe("large catalog scan confirmation", () => {
     expect(confirmation.request).toHaveBeenNthCalledWith(1, {
       kind: "start",
       cloudRoot: "/Synthetic",
-      groups: [{ groupKey, label: "Science", pdfCount: 30 }],
+      groups: [{ groupKey, rootRelativePath: "Science", label: "Science", pdfCount: 30 }],
     });
     expect(confirmation.request).toHaveBeenNthCalledWith(2, {
       kind: "resume",
       cloudRoot: "/Synthetic",
-      groups: [{ groupKey, label: "Science", pdfCount: 30 }],
+      groups: [],
     });
     expect(hybrid.startInputs).toEqual([{ cloudRoot: "/Synthetic", groupKeys: [groupKey] }]);
     expect(hybrid.resumeRoots).toEqual(["/Synthetic"]);
@@ -244,6 +320,7 @@ describe("large catalog scan confirmation", () => {
         coveredCandidatePdfCount: 0,
         groups: [{
           groupKey,
+          rootRelativePath: "Science",
           label: "Science",
           pdfCount: 30,
           mode: "recursive",
@@ -266,5 +343,60 @@ describe("large catalog scan confirmation", () => {
     expect(confirmation.request).not.toHaveBeenCalled();
     expect(hybrid.startInputs).toEqual([]);
     expect(catalog.initializeCalls).toBe(0);
+  });
+
+  it("forwards the structured category context only after an explicit start action", async () => {
+    const groupKey = `group:${"5".repeat(64)}`;
+    const hybrid = new FakeHybridCatalogRuntime({
+      status: "ready",
+      active: {
+        importedAt: 1,
+        pdfCount: 8,
+        unverifiedCount: 8,
+        verifiedCount: 0,
+        differenceCount: 0,
+        cloudMissingCount: 0,
+        groupCount: 1,
+        verifiedGroupCount: 0,
+        coveredCandidatePdfCount: 0,
+        groups: [{
+          groupKey,
+          rootRelativePath: "5-艺术",
+          label: "艺术",
+          pdfCount: 8,
+          mode: "recursive",
+          verificationStatus: "unverified",
+        }],
+      },
+    });
+    const confirmation = { request: vi.fn(async () => false) };
+    const controller = controllerFixture({
+      catalog: new FakeCloudCatalogRuntime({}, undefined, hybrid),
+      catalogLargeScanConfirmation: confirmation,
+    }).controller;
+    const selection = {
+      kind: "category" as const,
+      selectedPath: "/科学文库/5-艺术",
+      effectiveRoot: "/科学文库",
+      groupKey,
+    };
+
+    controller.applyCatalogRootSelection(selection);
+    expect(confirmation.request).not.toHaveBeenCalled();
+    await controller.startSelectedVerification();
+
+    expect(confirmation.request).toHaveBeenCalledWith({
+      kind: "start",
+      cloudRoot: "/科学文库",
+      groups: [{
+        groupKey,
+        rootRelativePath: "5-艺术",
+        label: "艺术",
+        pdfCount: 8,
+      }],
+      directorySelection: selection,
+    });
+    expect(hybrid.startInputs).toEqual([]);
+    controller.dispose();
   });
 });

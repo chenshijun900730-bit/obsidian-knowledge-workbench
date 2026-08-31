@@ -12,6 +12,7 @@ import {
   type VerificationPageModel,
 } from "../../src/ui/verification-page";
 import { LARGE_CATALOG_AUTO_CHAIN_MAX_SEGMENTS } from "../../src/catalog/hybrid-catalog-types";
+import type { CloudDirectorySelection } from "../../src/catalog/cloud-directory-selection";
 
 const INACTIVE_AUTO_RESUME = {
   autoResumeState: "inactive" as const,
@@ -36,6 +37,7 @@ const active = {
   coveredCandidatePdfCount: 0,
   groups: [{
     groupKey: GROUP_KEY,
+    rootRelativePath: "9-Literature-253",
     label: "9-Literature-253",
     pdfCount: 252,
     mode: "recursive" as const,
@@ -50,6 +52,7 @@ const actions = (overrides: Partial<VerificationPageActions> = {}): Verification
   onResume: async () => undefined,
   onCancel: () => undefined,
   onBrowseRoot: async () => null,
+  onDirectorySelection: () => undefined,
   ...overrides,
 });
 
@@ -80,11 +83,17 @@ describe("verification page", () => {
   it("fills the controller-owned verification root after an explicit directory choice", async () => {
     const root = testRoot();
     const onRootChange = vi.fn();
-    const onBrowseRoot = vi.fn(async () => "/Synthetic/9-文学253册");
+    const selection: CloudDirectorySelection = {
+      kind: "directory",
+      selectedPath: "/Synthetic/9-文学253册",
+      effectiveRoot: "/Synthetic/9-文学253册",
+    };
+    const onDirectorySelection = vi.fn();
+    const onBrowseRoot = vi.fn(async () => selection);
     renderVerificationPage(root, {
       ...model(),
       rootPath: "",
-      actions: actions({ onRootChange, onBrowseRoot }),
+      actions: actions({ onRootChange, onBrowseRoot, onDirectorySelection }),
     });
 
     const browse = root.querySelector<HTMLButtonElement>(
@@ -102,7 +111,8 @@ describe("verification page", () => {
     await Promise.resolve();
 
     expect(onBrowseRoot).toHaveBeenCalledOnce();
-    expect(onRootChange).toHaveBeenCalledWith("/Synthetic/9-文学253册");
+    expect(onDirectorySelection).toHaveBeenCalledWith(selection);
+    expect(onRootChange).not.toHaveBeenCalled();
     expect(root.querySelector<HTMLInputElement>('[data-verification-root="true"]')?.value)
       .toBe("/Synthetic/9-文学253册");
     expect(root.querySelector<HTMLButtonElement>('[data-action="start-verification"]')?.disabled)
