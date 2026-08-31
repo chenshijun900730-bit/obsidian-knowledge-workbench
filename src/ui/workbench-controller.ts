@@ -40,10 +40,9 @@ import type { HybridCatalogViewModel } from "../catalog/hybrid-catalog-runtime";
 import type { CatalogTxtImportConfirmationPresenter } from "./catalog-txt-import-confirmation-modal";
 import type { CatalogLargeScanConfirmationPresenter } from "./catalog-large-scan-confirmation-modal";
 import type { CloudDirectoryPickerPresenter } from "./cloud-directory-picker";
-import {
-  validateCloudDirectorySelection,
-  type CloudDirectoryPickerPurpose,
-  type CloudDirectorySelection,
+import type {
+  CloudDirectoryPickerPurpose,
+  CloudDirectorySelection,
 } from "../catalog/cloud-directory-selection";
 import type {
   CatalogDifferenceKind,
@@ -79,6 +78,10 @@ export interface WorkbenchProjectionScheduler {
   cancel(handle: unknown): void;
 }
 
+export type CloudDirectorySelectionValidator = typeof import(
+  "../catalog/cloud-directory-selection"
+).validateCloudDirectorySelection;
+
 export interface WorkbenchDependencies {
   readonly policy: RuntimeSafetyPolicy;
   readonly reads: VaultReadPort;
@@ -105,6 +108,7 @@ export interface WorkbenchDependencies {
   readonly catalogTxtImportConfirmation?: CatalogTxtImportConfirmationPresenter;
   readonly catalogLargeScanConfirmation?: CatalogLargeScanConfirmationPresenter;
   readonly catalogDirectoryPicker?: CloudDirectoryPickerPresenter;
+  readonly catalogDirectorySelectionValidator?: CloudDirectorySelectionValidator;
 }
 
 export type MapCenter = Readonly<{ kind: "document" | "topic"; id: string }>;
@@ -116,6 +120,12 @@ const isAbortError = (error: unknown): boolean => error instanceof DOMException
   ? error.name === "AbortError"
   : error instanceof Error && error.name === "AbortError";
 const errorMessage = (error: unknown): string => error instanceof Error ? error.message : String(error);
+const requireCloudDirectorySelectionValidator = (
+  validator: CloudDirectorySelectionValidator | undefined,
+): CloudDirectorySelectionValidator => {
+  if (validator === undefined) throw new Error("catalog-unavailable");
+  return validator;
+};
 const RECOVERY_LOCK_MESSAGE = "Recovery required; organization writes are locked";
 const PROJECTION_REFRESH_ERROR = "Workbench projection refresh failed";
 const PROJECTION_QUIET_DELAY_MS = 50;
@@ -412,9 +422,12 @@ export class WorkbenchController {
     if (this.disposed || this.lockedVerificationRoot !== null) return;
     const activeGroups = this.dependencies.catalog.hybrid?.snapshot().active?.groups;
     if (activeGroups === undefined) throw new Error("catalog-unavailable");
+    const validateSelection = requireCloudDirectorySelectionValidator(
+      this.dependencies.catalogDirectorySelectionValidator,
+    );
     let validated: CloudDirectorySelection;
     try {
-      validated = validateCloudDirectorySelection(
+      validated = validateSelection(
         selection,
         verificationPickerPurpose(activeGroups),
       );
@@ -727,6 +740,9 @@ export class WorkbenchController {
       : this.validateCatalogScanRoot(trimmed);
     const picker = this.dependencies.catalogDirectoryPicker;
     if (picker === undefined) throw new Error("catalog-unavailable");
+    const validateSelection = requireCloudDirectorySelectionValidator(
+      this.dependencies.catalogDirectorySelectionValidator,
+    );
     const purpose = clone(input.purpose);
     const selection = await picker.request({
       initialPath,
@@ -741,7 +757,7 @@ export class WorkbenchController {
     });
     if (selection === null || this.disposed) return null;
     try {
-      return validateCloudDirectorySelection(selection, purpose);
+      return validateSelection(selection, purpose);
     } catch {
       throw new RangeError("cloud-directory-selection-invalid");
     }
@@ -1376,7 +1392,9 @@ export class WorkbenchController {
     let verificationDirectorySelection = this.model.verificationDirectorySelection;
     if (verificationDirectorySelection?.kind === "category") {
       try {
-        verificationDirectorySelection = validateCloudDirectorySelection(
+        verificationDirectorySelection = requireCloudDirectorySelectionValidator(
+          this.dependencies.catalogDirectorySelectionValidator,
+        )(
           verificationDirectorySelection,
           verificationPickerPurpose(hybridCatalog?.active?.groups ?? []),
         );

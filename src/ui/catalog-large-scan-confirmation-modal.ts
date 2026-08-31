@@ -152,17 +152,17 @@ export function createCatalogLargeScanConfirmationModalClass(
       const structuredSummary: HTMLElement[] = [];
       if (request.kind === "start" && request.directorySelection !== undefined) {
         const selectedFolder = doc.createElement("p");
-        selectedFolder.textContent = i18n.t("directoryField.selection.selected", {
+        selectedFolder.textContent = i18n.t("verification.confirm.start.selectedFolder", {
           path: request.directorySelection.selectedPath,
         });
         const effectiveRoot = doc.createElement("p");
-        effectiveRoot.textContent = i18n.t("directoryField.selection.effectiveRoot", {
+        effectiveRoot.textContent = i18n.t("verification.confirm.start.effectiveRoot", {
           path: request.cloudRoot,
         });
         structuredSummary.push(selectedFolder, effectiveRoot);
         if (request.directorySelection.kind === "category") {
           const category = doc.createElement("p");
-          category.textContent = i18n.t("directoryField.selection.category", {
+          category.textContent = i18n.t("verification.confirm.start.category", {
             category: request.groups[0]?.label ?? "",
           });
           structuredSummary.push(category);

@@ -27,6 +27,7 @@ import { createCatalogTxtImportConfirmationModalClass } from "./ui/catalog-txt-i
 import { createCatalogLargeScanConfirmationModalClass } from "./ui/catalog-large-scan-confirmation-modal";
 import { createCloudDirectoryPickerModalClass } from "./ui/cloud-directory-picker";
 import { createDirectoryPickerI18n } from "./i18n/workbench-directory-picker-i18n";
+import { validateCloudDirectorySelection } from "./catalog/cloud-directory-selection";
 
 if (
   __KNOWLEDGE_WORKBENCH_BUILD_MODE__ !== "normal"
@@ -145,6 +146,7 @@ const runtime = Object.freeze({
       (message) => { new Notice(message); },
     ).request(input),
   }),
+  catalogDirectorySelectionValidator: validateCloudDirectorySelection,
   createAi: (app, getLocale) => {
     const ConcreteAiPayloadPreviewModal = createAiPayloadPreviewModalClass(Modal, getLocale);
     return {

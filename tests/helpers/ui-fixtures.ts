@@ -27,6 +27,7 @@ import { ObsidianQuickCaptureAdapter } from "../../src/adapters/obsidian-quick-c
 import type { VaultEvent } from "../../src/core/ports";
 import { FakeVault } from "../fakes/fake-vault";
 import { NORMAL_RUNTIME_POLICY, type RuntimeSafetyPolicy } from "../../src/runtime/safety-policy";
+import { validateCloudDirectorySelection } from "../../src/catalog/cloud-directory-selection";
 
 /** Structural contract for the production dependency that Task 2 will expose. */
 export interface ProjectionSchedulerDependency {
@@ -781,6 +782,7 @@ export function controllerFixture(options: ControllerFixtureOptions = {}) {
     ai,
     catalog,
     catalogConfirmation,
+    catalogDirectorySelectionValidator: validateCloudDirectorySelection,
     ...(options.catalogTxtImportConfirmation === undefined
       ? {}
       : { catalogTxtImportConfirmation: options.catalogTxtImportConfirmation }),

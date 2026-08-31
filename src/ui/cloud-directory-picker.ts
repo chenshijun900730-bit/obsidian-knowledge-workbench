@@ -18,7 +18,7 @@ import {
 } from "../catalog/catalog-path";
 import type {
   CloudDirectoryBrowserRuntime,
-  CloudDirectoryBrowseRound,
+  CloudDirectoryBrowserStopReason,
   CloudDirectoryLayerSnapshot,
 } from "../catalog/cloud-directory-browser";
 import {
@@ -236,7 +236,7 @@ export function createCloudDirectoryPickerModalClass(
       checkedEntryCount: number;
       listRequestCount: number;
       elapsedMs: number;
-      stopReason: CloudDirectoryBrowseRound["stopReason"] | null;
+      stopReason: CloudDirectoryBrowserStopReason | null;
     }> | null = null;
     private browserFixedError: CloudDirectoryBrowserFixedError | null = null;
     private browserRoundBaseline: Readonly<{ checked: number; requests: number }> | null = null;

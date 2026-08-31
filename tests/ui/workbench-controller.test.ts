@@ -435,6 +435,55 @@ describe("WorkbenchController verification page state", () => {
     verificationStatus: "unverified" as const,
   };
 
+  it("fails closed when the normal-only directory selection validator is absent", async () => {
+    const hybrid = new FakeHybridCatalogRuntime({
+      status: "ready",
+      active: {
+        importedAt: 1,
+        pdfCount: 12,
+        unverifiedCount: 12,
+        verifiedCount: 0,
+        differenceCount: 0,
+        cloudMissingCount: 0,
+        groupCount: 1,
+        verifiedGroupCount: 0,
+        coveredCandidatePdfCount: 0,
+        groups: [group],
+      },
+    });
+    const fixture = controllerFixture({
+      catalog: new FakeCloudCatalogRuntime({}, undefined, hybrid),
+    });
+    const internals = fixture.controller as unknown as {
+      readonly dependencies: {
+        catalogDirectoryPicker?: CloudDirectoryPickerPresenter;
+        catalogDirectorySelectionValidator?: unknown;
+      };
+    };
+    let pickerCalls = 0;
+    internals.dependencies.catalogDirectoryPicker = {
+      request: async () => {
+        pickerCalls += 1;
+        return directorySelection("/Synthetic/Chosen");
+      },
+    };
+    delete internals.dependencies.catalogDirectorySelectionValidator;
+
+    await expect(fixture.controller.chooseCatalogRoot({
+      initialRoot: "",
+      purpose: scanPurpose,
+    })).rejects.toThrow("catalog-unavailable");
+    expect(pickerCalls).toBe(0);
+    expect(() => fixture.controller.applyCatalogRootSelection({
+      kind: "category",
+      selectedPath: "/科学文库/Literature",
+      effectiveRoot: "/科学文库",
+      groupKey,
+    })).toThrow("catalog-unavailable");
+
+    fixture.controller.dispose();
+  });
+
   it("applies one validated category selection without starting or resuming verification", async () => {
     const secondKey = `group:${"d".repeat(64)}`;
     const hybrid = new FakeHybridCatalogRuntime({

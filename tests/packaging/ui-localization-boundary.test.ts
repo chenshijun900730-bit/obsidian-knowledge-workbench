@@ -855,7 +855,7 @@ const findingsForSource = (
     if (TECHNICAL_FILENAME_FRAGMENT.test(text)) return true;
     if (text === "en" || text === "zh-CN" || text === "en-US") return true;
     if (file === "src/ui/cloud-directory-picker.ts"
-      && (text === "ArrowDown" || text === "ArrowUp" || text === "Enter")) return true;
+      && (text === "ArrowDown" || text === "ArrowUp" || text === "Enter" || text === "Backspace")) return true;
     const parent = node.parent;
     if ((ts.isImportDeclaration(parent) || ts.isExportDeclaration(parent)) && parent.moduleSpecifier === node) return true;
     if (ts.isExternalModuleReference(parent) && parent.expression === node) return true;

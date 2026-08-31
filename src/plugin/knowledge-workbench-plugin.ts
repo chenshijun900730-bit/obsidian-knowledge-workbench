@@ -192,6 +192,12 @@ export function createKnowledgeWorkbenchPluginClass(runtime: RuntimeComposition)
           ? {}
           : { catalogLargeScanConfirmation }),
         ...(catalogDirectoryPicker === undefined ? {} : { catalogDirectoryPicker }),
+        ...(runtime.catalogDirectorySelectionValidator === undefined
+          ? {}
+          : {
+              catalogDirectorySelectionValidator:
+                runtime.catalogDirectorySelectionValidator,
+            }),
       });
       this.controller = controller;
       this.vaultAdapter = vaultAdapter;

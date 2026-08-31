@@ -4,6 +4,7 @@ import type { ChangePlanService } from "../plans/change-plan-service";
 import type { ChangePreviewPresenter } from "../ui/change-preview-modal";
 import type { HistoryConfirmationPresenter } from "../ui/history-tab";
 import type {
+  CloudDirectorySelectionValidator,
   WorkbenchAiDependencies,
   WorkbenchController,
 } from "../ui/workbench-controller";
@@ -74,6 +75,7 @@ export interface RuntimeComposition {
     app: App,
     getLocale: WorkbenchLocaleProvider,
   ) => CloudDirectoryPickerPresenter;
+  readonly catalogDirectorySelectionValidator?: CloudDirectorySelectionValidator;
 }
 
 export function assertRuntimeCompositionCoherence(

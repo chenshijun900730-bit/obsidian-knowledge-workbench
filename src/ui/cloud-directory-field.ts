@@ -37,9 +37,9 @@ export function createCloudDirectoryField(
   const fieldOrdinal = ++fieldSequence;
   const eventController = new AbortController();
   let draft = model.path;
-  let directorySelection = model.selection === undefined
-    ? null
-    : structuredClone(model.selection);
+  let directorySelection: CloudDirectorySelection | null = structuredClone(
+    model.selection ?? null,
+  );
   let disabled = model.disabled;
   let locked = model.locked;
   let disposed = false;

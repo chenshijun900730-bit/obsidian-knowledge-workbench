@@ -61,11 +61,14 @@ const externalImports = (
 const FORBIDDEN_ACCEPTANCE_DIRECTORY_TEXT = [
   "directoryPicker.",
   "CloudDirectoryDiscoveryService",
+  "CloudDirectoryBrowserService",
   "CloudDirectoryLocatorService",
+  "cloud-directory-root-consent-required",
   "BaiduCatalogSourceAdapter",
   "Locate same-name folders in Baidu Netdisk",
   "Fixed limit: {directories} folders, {requests} list requests, and {seconds} seconds.",
   "\u5728\u7f51\u76d8\u4e2d\u5b9a\u4f4d\u540c\u540d\u76ee\u5f55",
+  "\u4ece\u767e\u5ea6\u7f51\u76d8\u6839\u76ee\u5f55\u6d4f\u89c8",
   "\u56fa\u5b9a\u4e0a\u9650\uff1a{directories} \u4e2a\u76ee\u5f55\u3001{requests} \u6b21\u5217\u8868\u8bf7\u6c42\u3001{seconds} \u79d2\u3002",
   "https://openapi.baidu.com/oauth/2.0/authorize",
   "https://openapi.baidu.com/oauth/2.0/token",
@@ -123,7 +126,10 @@ describe("composition-root dependency graphs", () => {
       "src/catalog/cloud-catalog-connection-runtime.ts",
       "src/catalog/catalog-scan-service.ts",
       "src/catalog/cloud-directory-discovery-service.ts",
+      "src/catalog/cloud-directory-browser.ts",
+      "src/catalog/cloud-directory-selection.ts",
       "src/catalog/cloud-directory-locator.ts",
+      "src/ui/cloud-directory-browser-view.ts",
       "src/ui/cloud-directory-picker.ts",
       "src/i18n/workbench-directory-picker-i18n.ts",
     ];
@@ -174,14 +180,19 @@ describe("composition-root dependency graphs", () => {
       "src/catalog/cloud-catalog-connection-runtime.ts",
       "src/catalog/catalog-scan-service.ts",
       "src/catalog/cloud-directory-discovery-service.ts",
+      "src/catalog/cloud-directory-browser.ts",
+      "src/catalog/cloud-directory-selection.ts",
       "src/catalog/cloud-directory-locator.ts",
+      "src/ui/cloud-directory-browser-view.ts",
       "src/ui/cloud-directory-picker.ts",
+      "src/i18n/workbench-directory-picker-i18n.ts",
     ]));
     expect(output).toMatch(/requestUrl/u);
     expect(output).toMatch(/secretStorage/u);
     expect(output).toContain("maxListRequestCount");
     expect(output).toContain("maxDurationMs");
     expect(output).toContain("CloudDirectoryDiscoveryService");
+    expect(output).toContain("CloudDirectoryBrowserService");
     expect(output).toContain("CloudDirectoryLocatorService");
     expect(output).not.toMatch(/method=download|\/filemanager|["']dlink["']/u);
 
@@ -206,6 +217,9 @@ describe("composition-root dependency graphs", () => {
     expect(catalogCompositionSource.match(/new BaiduCatalogSourceAdapter/gu)).toHaveLength(1);
     expect(catalogCompositionSource.match(
       /new CloudDirectoryDiscoveryService\(baiduSource/gu,
+    )).toHaveLength(1);
+    expect(catalogCompositionSource.match(
+      /new CloudDirectoryBrowserService\(baiduSource/gu,
     )).toHaveLength(1);
     expect(catalogCompositionSource.match(
       /new CloudDirectoryLocatorService\(baiduSource/gu,
