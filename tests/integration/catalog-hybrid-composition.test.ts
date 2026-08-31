@@ -25,6 +25,9 @@ const environment = (homeDirectory: string): NormalCatalogEnvironment => ({
   homeDirectory,
 });
 
+const occurrenceCount = (source: string, value: string): number =>
+  source.split(value).length - 1;
+
 describe("normal hybrid catalog composition", () => {
   it("keeps imported candidates isolated between explicitly scoped catalog roots", async () => {
     const home = await realpath(await mkdtemp(join(tmpdir(), "knowledge-workbench-hybrid-isolation-")));
@@ -104,6 +107,9 @@ describe("normal hybrid catalog composition", () => {
     });
 
     expect(runtime.hybrid).toBeDefined();
+    expect(runtime.directoryBrowser).toBeDefined();
+    expect(runtime.directoryBrowser?.rootAccessGranted()).toBe(false);
+    expect(runtime.directoryBrowser?.snapshot("/")).toBeNull();
     await runtime.initialize();
     expect(requests).toEqual([]);
     expect(runtime.hybrid?.snapshot()).toEqual({ status: "empty" });
@@ -134,6 +140,26 @@ describe("normal hybrid catalog composition", () => {
     expect((await stat(join(catalogRoot, "hybrid"))).isDirectory())
       .toBe(true);
     expect(await readFile(inventoryPath, "utf8")).toContain("Alpha.pdf");
+
+    const compositionSource = await readFile(
+      join(process.cwd(), "src/runtime/normal-cloud-catalog-composition.ts"),
+      "utf8",
+    );
+    expect(occurrenceCount(compositionSource, "new BaiduCatalogSourceAdapter")).toBe(1);
+    expect(occurrenceCount(compositionSource, "new CatalogScanService(baiduSource")).toBe(1);
+    expect(occurrenceCount(
+      compositionSource,
+      "new CloudDirectoryBrowserService(baiduSource",
+    )).toBe(1);
+    expect(occurrenceCount(
+      compositionSource,
+      "new CloudDirectoryDiscoveryService(baiduSource",
+    )).toBe(1);
+    expect(occurrenceCount(
+      compositionSource,
+      "new CloudDirectoryLocatorService(baiduSource",
+    )).toBe(1);
+    expect(occurrenceCount(compositionSource, "source: baiduSource,")).toBe(1);
 
     runtime.dispose();
   });

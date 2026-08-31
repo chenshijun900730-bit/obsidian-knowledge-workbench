@@ -20,6 +20,7 @@ import {
 } from "./hybrid-catalog-types";
 import type { UnifiedCatalogSearchQuery } from "./unified-catalog-search-service";
 import type { CloudDirectoryDiscoveryRuntime } from "./cloud-directory-discovery-service";
+import type { CloudDirectoryBrowserRuntime } from "./cloud-directory-browser";
 import type { CloudDirectoryLocatorRuntime } from "./cloud-directory-locator";
 
 const PAGE_SIZE = 50 as const;
@@ -131,6 +132,7 @@ export interface CloudCatalogRuntime {
   readonly connection?: CloudCatalogConnectionRuntime;
   readonly hybrid?: HybridCatalogRuntime;
   readonly directoryDiscovery?: CloudDirectoryDiscoveryRuntime;
+  readonly directoryBrowser?: CloudDirectoryBrowserRuntime;
   readonly directoryLocator?: CloudDirectoryLocatorRuntime;
   initialize(): Promise<void>;
   snapshot(): CloudCatalogViewModel;
@@ -241,6 +243,7 @@ export class CloudCatalogRuntimeService implements CloudCatalogRuntime {
   readonly connection?: CloudCatalogConnectionRuntime;
   readonly hybrid?: HybridCatalogRuntime;
   readonly directoryDiscovery?: CloudDirectoryDiscoveryRuntime;
+  readonly directoryBrowser?: CloudDirectoryBrowserRuntime;
   readonly directoryLocator?: CloudDirectoryLocatorRuntime;
   private viewModel: CloudCatalogViewModel = initialViewModel();
   private legacySearch: CatalogSearchService | undefined;
@@ -258,11 +261,13 @@ export class CloudCatalogRuntimeService implements CloudCatalogRuntime {
     hybrid?: HybridCatalogRuntime,
     private readonly unified?: Pick<UnifiedCatalogStorePort, "queryActiveUnified">,
     directoryDiscovery?: CloudDirectoryDiscoveryRuntime,
+    directoryBrowser?: CloudDirectoryBrowserRuntime,
     directoryLocator?: CloudDirectoryLocatorRuntime,
   ) {
     this.connection = connection;
     this.hybrid = hybrid;
     this.directoryDiscovery = directoryDiscovery;
+    this.directoryBrowser = directoryBrowser;
     this.directoryLocator = directoryLocator;
     this.unsubscribeConnection = connection?.subscribe(() => this.emit());
   }
@@ -423,6 +428,7 @@ export class CloudCatalogRuntimeService implements CloudCatalogRuntime {
     this.unsubscribeConnection?.();
     this.unsubscribeConnection = undefined;
     this.directoryLocator?.dispose();
+    this.directoryBrowser?.dispose();
     this.directoryDiscovery?.dispose();
     this.hybrid?.dispose();
     this.connection?.dispose();

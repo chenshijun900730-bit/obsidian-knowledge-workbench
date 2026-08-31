@@ -17,6 +17,7 @@ import { CatalogTxtParser } from "../catalog/catalog-txt-parser";
 import { SMALL_ACCEPTANCE_CATALOG_SCAN_BUDGET } from "../catalog/catalog-types";
 import { CloudCatalogConnectionRuntimeService } from "../catalog/cloud-catalog-connection-runtime";
 import { CloudDirectoryDiscoveryService } from "../catalog/cloud-directory-discovery-service";
+import { CloudDirectoryBrowserService } from "../catalog/cloud-directory-browser";
 import { CloudDirectoryLocatorService } from "../catalog/cloud-directory-locator";
 import {
   CloudCatalogRuntimeService,
@@ -131,6 +132,7 @@ export const createNormalCloudCatalogRuntime = (
     budget: SMALL_ACCEPTANCE_CATALOG_SCAN_BUDGET,
   });
   const directoryDiscovery = new CloudDirectoryDiscoveryService(baiduSource, { now });
+  const directoryBrowser = new CloudDirectoryBrowserService(baiduSource, { now });
   const directoryLocator = new CloudDirectoryLocatorService(baiduSource, { now });
   const verification = new LargeCatalogVerificationService({
     source: baiduSource,
@@ -161,6 +163,7 @@ export const createNormalCloudCatalogRuntime = (
     hybrid,
     hybridStore,
     directoryDiscovery,
+    directoryBrowser,
     directoryLocator,
   );
   return runtime;

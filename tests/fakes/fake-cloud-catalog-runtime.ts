@@ -5,6 +5,7 @@ import type {
   CloudCatalogViewModel,
 } from "../../src/catalog/cloud-catalog-runtime";
 import type { CloudDirectoryDiscoveryRuntime } from "../../src/catalog/cloud-directory-discovery-service";
+import type { CloudDirectoryBrowserRuntime } from "../../src/catalog/cloud-directory-browser";
 import type { CloudDirectoryLocatorRuntime } from "../../src/catalog/cloud-directory-locator";
 import type { CatalogScanConfirmationPresenter } from "../../src/ui/catalog-scan-confirmation-modal";
 import type { HybridCatalogRuntime } from "../../src/catalog/hybrid-catalog-runtime";
@@ -59,6 +60,7 @@ export class FakeCloudCatalogRuntime implements CloudCatalogRuntime {
     readonly connection?: CloudCatalogConnectionRuntime,
     readonly hybrid?: HybridCatalogRuntime,
     readonly directoryDiscovery?: CloudDirectoryDiscoveryRuntime,
+    readonly directoryBrowser?: CloudDirectoryBrowserRuntime,
     readonly directoryLocator?: CloudDirectoryLocatorRuntime,
   ) {
     this.viewModel = { ...emptyViewModel(), ...initial };

@@ -618,6 +618,7 @@ export class WorkbenchController {
     if (connection === undefined) throw new Error("catalog-unavailable");
     this.dependencies.catalog.directoryLocator?.cancel();
     this.dependencies.catalog.directoryDiscovery?.clear();
+    this.dependencies.catalog.directoryBrowser?.clear();
     await connection.saveApplicationCredentials(credentials);
     if (this.disposed) return;
     await connection.beginAuthorization();
@@ -641,6 +642,7 @@ export class WorkbenchController {
     if (connection === undefined) throw new Error("catalog-unavailable");
     this.dependencies.catalog.directoryLocator?.cancel();
     this.dependencies.catalog.directoryDiscovery?.clear();
+    this.dependencies.catalog.directoryBrowser?.clear();
     await connection.revoke();
   }
 

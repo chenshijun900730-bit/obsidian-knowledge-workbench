@@ -10,6 +10,7 @@ import {
   LARGE_CATALOG_AUTO_CHAIN_MAX_SEGMENTS,
 } from "../../src/catalog/hybrid-catalog-types";
 import type { CloudDirectoryDiscoveryRuntime } from "../../src/catalog/cloud-directory-discovery-service";
+import type { CloudDirectoryBrowserRuntime } from "../../src/catalog/cloud-directory-browser";
 import type { CloudDirectoryLocatorRuntime } from "../../src/catalog/cloud-directory-locator";
 import type {
   CloudDirectoryPickerPresenter,
@@ -119,7 +120,14 @@ describe("WorkbenchController cloud catalog filters", () => {
       cancel: () => undefined,
       dispose: () => undefined,
     } satisfies CloudDirectoryLocatorRuntime;
-    const catalog = new FakeCloudCatalogRuntime({}, undefined, hybrid, discovery, locator);
+    const catalog = new FakeCloudCatalogRuntime(
+      {},
+      undefined,
+      hybrid,
+      discovery,
+      undefined,
+      locator,
+    );
     const fixture = controllerFixture({ catalog });
     fixture.store.setSettingsForTest({
       ...fixture.store.settings(),
@@ -170,7 +178,7 @@ describe("WorkbenchController cloud catalog filters", () => {
     fixture.controller.dispose();
   });
 
-  it("cancels lookup and clears session discovery before replacing or revoking credentials", async () => {
+  it("clears every directory identity cache before replacing or revoking credentials", async () => {
     const events: string[] = [];
     const connection = new FakeCloudCatalogConnectionRuntime();
     connection.saveApplicationCredentials = async (input) => {
@@ -186,15 +194,45 @@ describe("WorkbenchController cloud catalog filters", () => {
       searchCached: () => [],
       snapshotCached: () => [],
       discoverMore: async () => { throw new Error("must-not-discover"); },
-      clear: () => { events.push("clear"); },
+      clear: () => { events.push("discovery-clear"); },
       dispose: () => undefined,
     } satisfies CloudDirectoryDiscoveryRuntime;
+    let browserRootAccessGranted = true;
+    let browserHasSnapshot = true;
+    const browser = {
+      rootAccessGranted: () => browserRootAccessGranted,
+      grantRootAccess: () => { browserRootAccessGranted = true; },
+      loadLayer: async () => { throw new Error("must-not-browse"); },
+      snapshot: (_path: string) => browserHasSnapshot ? {
+        path: "/",
+        directories: [],
+        nextStart: 0,
+        complete: false,
+        cumulativeCheckedEntryCount: 0,
+        cumulativeListRequestCount: 0,
+        lastStopReason: null,
+      } : null,
+      subscribe: () => () => undefined,
+      clear: () => {
+        events.push("browser-clear");
+        browserRootAccessGranted = false;
+        browserHasSnapshot = false;
+      },
+      dispose: () => undefined,
+    } satisfies CloudDirectoryBrowserRuntime;
     const locator = {
       locateByName: async () => { throw new Error("must-not-locate"); },
       cancel: () => { events.push("cancel"); },
       dispose: () => undefined,
     } satisfies CloudDirectoryLocatorRuntime;
-    const catalog = new FakeCloudCatalogRuntime({}, connection, undefined, discovery, locator);
+    const catalog = new FakeCloudCatalogRuntime(
+      {},
+      connection,
+      undefined,
+      discovery,
+      browser,
+      locator,
+    );
     const fixture = controllerFixture({ catalog });
     fixture.store.setSettingsForTest({
       ...fixture.store.settings(),
@@ -212,9 +250,11 @@ describe("WorkbenchController cloud catalog filters", () => {
     await fixture.controller.revokeCatalog();
 
     expect(events).toEqual([
-      "cancel", "clear", "save", "authorize",
-      "cancel", "clear", "revoke",
+      "cancel", "discovery-clear", "browser-clear", "save", "authorize",
+      "cancel", "discovery-clear", "browser-clear", "revoke",
     ]);
+    expect(browser.rootAccessGranted()).toBe(false);
+    expect(browser.snapshot("/")).toBeNull();
     expect(fixture.store.settings().recentCloudDirectories.items).toHaveLength(1);
     fixture.controller.dispose();
   });
