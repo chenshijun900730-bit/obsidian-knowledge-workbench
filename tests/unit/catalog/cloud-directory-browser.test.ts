@@ -622,6 +622,70 @@ describe("cloud directory browser", () => {
     expect(sourceCalls).toBe(1);
   });
 
+  it("returns canceled without a ghost notification when a page listener clears the service", async () => {
+    const browser = new CloudDirectoryBrowserService(sourceFrom(async (input) => {
+      await input.beforeRequest();
+      return { entries: [directory("1", "/科学文库/已提交后清理")] };
+    }));
+    let notifications = 0;
+    browser.subscribe(() => {
+      notifications += 1;
+      browser.clear();
+    });
+
+    await expect(browser.loadLayer({ path: "/科学文库", start: 0 })).resolves.toMatchObject({
+      status: "canceled",
+      stopReason: "user-canceled",
+      checkedEntryCount: 1,
+      directoryCount: 1,
+    });
+    expect(notifications).toBe(1);
+    expect(browser.snapshot("/科学文库")).toBeNull();
+  });
+
+  it("returns canceled and unavailable when a page listener disposes the service", async () => {
+    const browser = new CloudDirectoryBrowserService(sourceFrom(async (input) => {
+      await input.beforeRequest();
+      return { entries: [directory("1", "/科学文库/已提交后释放")] };
+    }));
+    let notifications = 0;
+    browser.subscribe(() => {
+      notifications += 1;
+      browser.dispose();
+    });
+
+    await expect(browser.loadLayer({ path: "/科学文库", start: 0 })).resolves.toMatchObject({
+      status: "canceled",
+      stopReason: "user-canceled",
+      checkedEntryCount: 1,
+      directoryCount: 1,
+    });
+    expect(notifications).toBe(1);
+    expect(() => browser.snapshot("/科学文库"))
+      .toThrow("cloud-directory-browser-unavailable");
+  });
+
+  it("downgrades a final completion notification cleared by its listener without renotifying", async () => {
+    const browser = new CloudDirectoryBrowserService(sourceFrom(async (input) => {
+      await input.beforeRequest();
+      return { entries: [directory("1", "/科学文库/已提交")] };
+    }));
+    let notifications = 0;
+    browser.subscribe(() => {
+      notifications += 1;
+      if (notifications === 2) browser.clear();
+    });
+
+    await expect(browser.loadLayer({ path: "/科学文库", start: 0 })).resolves.toMatchObject({
+      status: "canceled",
+      stopReason: "user-canceled",
+      checkedEntryCount: 1,
+      directoryCount: 1,
+    });
+    expect(notifications).toBe(2);
+    expect(browser.snapshot("/科学文库")).toBeNull();
+  });
+
   it("contains listener failures after commit and still notifies remaining listeners", async () => {
     const browser = new CloudDirectoryBrowserService(sourceFrom(async (input) => {
       await input.beforeRequest();

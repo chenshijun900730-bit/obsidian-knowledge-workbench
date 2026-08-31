@@ -221,11 +221,12 @@ export class CloudDirectoryBrowserService implements CloudDirectoryBrowserRuntim
             layer,
             round,
             beforePage,
+            operation,
             this.#isCurrent(operation),
           );
         }
         const pageStart = layer.nextStart;
-        if (pageStart === null) return this.#finish(layer, round, "complete");
+        if (pageStart === null) return this.#finish(layer, round, "complete", operation);
 
         let sourceEntries: unknown;
         try {
@@ -249,12 +250,13 @@ export class CloudDirectoryBrowserService implements CloudDirectoryBrowserRuntim
               layer,
               round,
               error.reason,
+              operation,
               this.#isCurrent(operation),
             );
           }
           const afterError = this.#pauseReason(operation, round, false);
           if (afterError === "user-canceled") {
-            return this.#finish(layer, round, afterError, false);
+            return this.#finish(layer, round, afterError, operation, false);
           }
           throw error;
         }
@@ -264,6 +266,7 @@ export class CloudDirectoryBrowserService implements CloudDirectoryBrowserRuntim
             layer,
             round,
             round.deniedPermitReason,
+            operation,
             this.#isCurrent(operation),
           );
         }
@@ -273,6 +276,7 @@ export class CloudDirectoryBrowserService implements CloudDirectoryBrowserRuntim
             layer,
             round,
             afterResponse,
+            operation,
             this.#isCurrent(operation),
           );
         }
@@ -284,14 +288,18 @@ export class CloudDirectoryBrowserService implements CloudDirectoryBrowserRuntim
             layer,
             round,
             beforeCommit,
+            operation,
             this.#isCurrent(operation),
           );
         }
 
         this.#commitPage(layer, round, pageStart, page);
-        this.#notify(path);
+        this.#notify(path, operation);
+        if (!this.#isCurrent(operation)) {
+          return this.#finish(layer, round, "user-canceled", operation, false);
+        }
 
-        if (layer.complete) return this.#finish(layer, round, "complete");
+        if (layer.complete) return this.#finish(layer, round, "complete", operation);
       }
     } finally {
       signal?.removeEventListener("abort", abortFromCaller);
@@ -444,15 +452,23 @@ export class CloudDirectoryBrowserService implements CloudDirectoryBrowserRuntim
     layer: CloudDirectoryLayerState,
     round: RoundState,
     stopReason: CloudDirectoryBrowserStopReason,
+    operation: ActiveOperation,
     notify = true,
   ): CloudDirectoryBrowseRound {
-    layer.lastStopReason = stopReason;
-    if (notify) this.#notify(layer.path);
+    let finalStopReason = stopReason;
+    layer.lastStopReason = finalStopReason;
+    if (notify) {
+      this.#notify(layer.path, operation);
+      if (!this.#isCurrent(operation)) {
+        finalStopReason = "user-canceled";
+        layer.lastStopReason = finalStopReason;
+      }
+    }
     const at = safeNow(this.#now);
     return {
       path: layer.path,
-      status: statusFor(stopReason),
-      stopReason,
+      status: statusFor(finalStopReason),
+      stopReason: finalStopReason,
       nextStart: layer.nextStart,
       checkedEntryCount: round.checkedEntryCount,
       cumulativeCheckedEntryCount: layer.cumulativeCheckedEntryCount,
@@ -463,8 +479,9 @@ export class CloudDirectoryBrowserService implements CloudDirectoryBrowserRuntim
     };
   }
 
-  #notify(path: string): void {
+  #notify(path: string, operation: ActiveOperation): void {
     for (const listener of [...this.#listeners]) {
+      if (!this.#isCurrent(operation)) break;
       try {
         listener(path);
       } catch {
