@@ -1,6 +1,6 @@
 # Knowledge Workbench 百度网盘文件夹浏览器设计
 
-- 状态：界面、架构与验收设计已获用户确认；书面规格待用户复核
+- 状态：界面、架构、验收设计与书面规格均已获用户批准
 - 日期：2026-08-31
 - 适用产品：Knowledge Workbench for Obsidian
 - 前置规格：`2026-08-23-smart-cloud-directory-picker-design.md`
@@ -257,11 +257,14 @@ type CloudDirectoryPickerPurpose =
 
 ```ts
 interface CloudDirectoryBrowserRuntime {
+  rootAccessGranted(): boolean;
+  grantRootAccess(): void;
   loadLayer(
     input: Readonly<{ path: string; start: number }>,
     signal?: AbortSignal,
   ): Promise<CloudDirectoryBrowseRound>;
   snapshot(path: string): CloudDirectoryLayerSnapshot | null;
+  subscribe(listener: (path: string) => void): () => void;
   clear(): void;
   dispose(): void;
 }
@@ -277,11 +280,17 @@ interface CloudDirectoryBrowseRound {
     | "user-canceled";
   readonly nextStart: number | null;
   readonly checkedEntryCount: number;
+  readonly cumulativeCheckedEntryCount: number;
   readonly directoryCount: number;
   readonly listRequestCount: number;
+  readonly cumulativeListRequestCount: number;
   readonly elapsedMs: number;
 }
 ```
+
+`subscribe` 在每个完整页面原子提交后以及本轮停止状态变化后通知对应路径，使界面可以逐页更新进度。根目录确认也属于这个共享运行时的会话状态，而不是单个 Modal 实例的状态；`clear()` 与 `dispose()` 都会清除确认和缓存。
+
+`CloudDirectoryBrowseRound.checkedEntryCount` 与 `listRequestCount` 表示本轮用量；`cumulativeCheckedEntryCount` 与 `cumulativeListRequestCount` 表示当前层在本次插件会话中的累计用量。`CloudDirectoryLayerSnapshot` 的同名累计字段始终表示当前层累计值。
 
 网络、授权、限流和响应错误继续使用现有有限 `CatalogError` 代码，不把原始异常文本放入摘要或 UI。
 
