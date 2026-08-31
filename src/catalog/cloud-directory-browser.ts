@@ -1,7 +1,7 @@
 import { normalizeCloudAbsolutePath } from "./catalog-path";
 import type { BaiduCatalogSourcePort } from "./catalog-ports";
 import { validateBaiduListEntry } from "./cloud-directory-page-validator";
-import { CatalogError } from "./catalog-types";
+import { CatalogError, type BaiduListEntry } from "./catalog-types";
 
 export const CLOUD_DIRECTORY_BROWSE_ROUND_BUDGET = /* @__PURE__ */ Object.freeze({
   maxEntryCount: 20_000,
@@ -64,7 +64,9 @@ export interface CloudDirectoryBrowserServiceOptions {
 
 interface CloudDirectoryLayerState {
   readonly path: string;
-  readonly directories: CloudDirectoryIdentity[];
+  directories: CloudDirectoryIdentity[];
+  directoryFsIdByPath: Map<string, string>;
+  directoryPathByFsId: Map<string, string>;
   nextStart: number | null;
   complete: boolean;
   cumulativeCheckedEntryCount: number;
@@ -76,12 +78,25 @@ interface RoundState {
   readonly startedAt: number;
   checkedEntryCount: number;
   listRequestCount: number;
+  deniedPermitReason: PauseReason | null;
 }
 
-type PausedBeforeRequestReason = Exclude<CloudDirectoryBrowserStopReason, "complete">;
+interface ActiveOperation {
+  readonly generation: number;
+  readonly controller: AbortController;
+}
+
+interface ValidatedPage {
+  readonly entries: readonly BaiduListEntry[];
+  readonly directories: CloudDirectoryIdentity[];
+  readonly directoryFsIdByPath: Map<string, string>;
+  readonly directoryPathByFsId: Map<string, string>;
+}
+
+type PauseReason = Exclude<CloudDirectoryBrowserStopReason, "complete">;
 
 class CloudDirectoryBrowserPause extends Error {
-  constructor(readonly reason: PausedBeforeRequestReason) {
+  constructor(readonly reason: PauseReason) {
     super(reason);
     this.name = "CloudDirectoryBrowserPause";
   }
@@ -92,6 +107,8 @@ const invalidResponse = (): CatalogError => new CatalogError("invalid-baidu-resp
 const invalidStart = (): RangeError => new RangeError(
   "cloud-directory-browser-start-invalid",
 );
+
+const unavailable = (): Error => new Error("cloud-directory-browser-unavailable");
 
 const safeNow = (now: () => number): number => {
   const value = now();
@@ -116,6 +133,18 @@ const cloneDirectory = (
   directory: CloudDirectoryIdentity,
 ): CloudDirectoryIdentity => ({ ...directory });
 
+const createLayer = (path: string): CloudDirectoryLayerState => ({
+  path,
+  directories: [],
+  directoryFsIdByPath: new Map(),
+  directoryPathByFsId: new Map(),
+  nextStart: 0,
+  complete: false,
+  cumulativeCheckedEntryCount: 0,
+  cumulativeListRequestCount: 0,
+  lastStopReason: null,
+});
+
 export class CloudDirectoryBrowserService implements CloudDirectoryBrowserRuntime {
   readonly #source: BaiduCatalogSourcePort;
   readonly #now: () => number;
@@ -123,6 +152,8 @@ export class CloudDirectoryBrowserService implements CloudDirectoryBrowserRuntim
   readonly #listeners = new Set<(path: string) => void>();
   #rootAccessGranted = false;
   #disposed = false;
+  #generation = 0;
+  #active: ActiveOperation | null = null;
 
   constructor(
     source: BaiduCatalogSourcePort,
@@ -133,11 +164,12 @@ export class CloudDirectoryBrowserService implements CloudDirectoryBrowserRuntim
   }
 
   rootAccessGranted(): boolean {
-    return !this.#disposed && this.#rootAccessGranted;
+    this.#assertAvailable();
+    return this.#rootAccessGranted;
   }
 
   grantRootAccess(): void {
-    if (this.#disposed) return;
+    this.#assertAvailable();
     this.#rootAccessGranted = true;
   }
 
@@ -146,6 +178,8 @@ export class CloudDirectoryBrowserService implements CloudDirectoryBrowserRuntim
     signal?: AbortSignal,
   ): Promise<CloudDirectoryBrowseRound> {
     this.#assertAvailable();
+    if (this.#active !== null) throw new Error("cloud-directory-browser-busy");
+
     const path = normalizeCloudAbsolutePath(input.path);
     if (path === "/" && !this.#rootAccessGranted) {
       throw new Error("cloud-directory-root-consent-required");
@@ -155,90 +189,118 @@ export class CloudDirectoryBrowserService implements CloudDirectoryBrowserRuntim
     let layer = this.#layers.get(path);
     if (layer === undefined) {
       if (input.start !== 0) throw invalidStart();
-      layer = {
-        path,
-        directories: [],
-        nextStart: 0,
-        complete: false,
-        cumulativeCheckedEntryCount: 0,
-        cumulativeListRequestCount: 0,
-        lastStopReason: null,
-      };
+      layer = createLayer(path);
       this.#layers.set(path, layer);
     } else if (layer.nextStart !== input.start) {
       throw invalidStart();
     }
 
+    const startedAt = safeNow(this.#now);
+    const operation: ActiveOperation = {
+      generation: this.#generation + 1,
+      controller: new AbortController(),
+    };
+    this.#generation = operation.generation;
+    this.#active = operation;
+    const abortFromCaller = (): void => operation.controller.abort();
+    if (signal?.aborted === true) operation.controller.abort();
+    else signal?.addEventListener("abort", abortFromCaller, { once: true });
+
     const round: RoundState = {
-      startedAt: safeNow(this.#now),
+      startedAt,
       checkedEntryCount: 0,
       listRequestCount: 0,
+      deniedPermitReason: null,
     };
 
-    while (true) {
-      const beforePage = this.#stopReason(round, signal);
-      if (beforePage !== null) return this.#finish(layer, round, beforePage);
-      const pageStart = layer.nextStart;
-      if (pageStart === null) return this.#finish(layer, round, "complete");
-
-      let requestPermitGranted = false;
-      let sourceEntries: unknown;
-      try {
-        sourceEntries = (await this.#source.listDirectory({
-          path,
-          start: pageStart,
-          limit: 1000,
-          beforeRequest: async () => {
-            if (requestPermitGranted) return;
-            const beforeRequest = this.#stopReason(round, signal);
-            if (beforeRequest !== null) {
-              throw new CloudDirectoryBrowserPause(beforeRequest);
-            }
-            requestPermitGranted = true;
-            round.listRequestCount += 1;
-          },
-        })).entries;
-      } catch (error) {
-        if (error instanceof CloudDirectoryBrowserPause) {
-          return this.#finish(layer, round, error.reason);
+    try {
+      while (true) {
+        const beforePage = this.#pauseReason(operation, round, true);
+        if (beforePage !== null) {
+          return this.#finish(
+            layer,
+            round,
+            beforePage,
+            this.#isCurrent(operation),
+          );
         }
-        throw error;
-      }
+        const pageStart = layer.nextStart;
+        if (pageStart === null) return this.#finish(layer, round, "complete");
 
-      if (!Array.isArray(sourceEntries) || sourceEntries.length > 1000) {
-        throw invalidResponse();
-      }
-      const entries = (sourceEntries as readonly unknown[]).map((entry) => (
-        validateBaiduListEntry({ entry, currentPath: path, traversalRoot: path })
-      ));
-      const directories = entries
-        .filter((entry) => entry.isDirectory)
-        .map((entry): CloudDirectoryIdentity => ({
-          fsId: entry.fsId,
-          path: entry.path,
-          filename: entry.filename,
-        }));
+        let sourceEntries: unknown;
+        try {
+          sourceEntries = (await this.#source.listDirectory({
+            path,
+            start: pageStart,
+            limit: 1000,
+            beforeRequest: async () => {
+              const beforeRequest = this.#pauseReason(operation, round, true);
+              if (beforeRequest !== null) {
+                round.deniedPermitReason = beforeRequest;
+                throw new CloudDirectoryBrowserPause(beforeRequest);
+              }
+              round.listRequestCount += 1;
+              layer.cumulativeListRequestCount += 1;
+            },
+          })).entries;
+        } catch (error) {
+          if (error instanceof CloudDirectoryBrowserPause) {
+            return this.#finish(
+              layer,
+              round,
+              error.reason,
+              this.#isCurrent(operation),
+            );
+          }
+          const afterError = this.#pauseReason(operation, round, false);
+          if (afterError === "user-canceled") {
+            return this.#finish(layer, round, afterError, false);
+          }
+          throw error;
+        }
 
-      layer.directories.push(...directories);
-      layer.cumulativeCheckedEntryCount += entries.length;
-      round.checkedEntryCount += entries.length;
-      if (requestPermitGranted) layer.cumulativeListRequestCount += 1;
-      if (entries.length < 1000) {
-        layer.nextStart = null;
-        layer.complete = true;
-      } else {
-        layer.nextStart = pageStart + 1000;
-        layer.complete = false;
-      }
-      layer.lastStopReason = null;
-      this.#notify(path);
+        if (round.deniedPermitReason !== null) {
+          return this.#finish(
+            layer,
+            round,
+            round.deniedPermitReason,
+            this.#isCurrent(operation),
+          );
+        }
+        const afterResponse = this.#pauseReason(operation, round, false);
+        if (afterResponse !== null) {
+          return this.#finish(
+            layer,
+            round,
+            afterResponse,
+            this.#isCurrent(operation),
+          );
+        }
 
-      if (layer.complete) return this.#finish(layer, round, "complete");
+        const page = this.#validatePage(sourceEntries, path, layer);
+        const beforeCommit = this.#pauseReason(operation, round, false);
+        if (beforeCommit !== null) {
+          return this.#finish(
+            layer,
+            round,
+            beforeCommit,
+            this.#isCurrent(operation),
+          );
+        }
+
+        this.#commitPage(layer, round, pageStart, page);
+        this.#notify(path);
+
+        if (layer.complete) return this.#finish(layer, round, "complete");
+      }
+    } finally {
+      signal?.removeEventListener("abort", abortFromCaller);
+      if (this.#active === operation) this.#active = null;
     }
   }
 
   snapshot(path: string): CloudDirectoryLayerSnapshot | null {
-    if (this.#disposed) return null;
+    this.#assertAvailable();
     const normalizedPath = normalizeCloudAbsolutePath(path);
     const layer = this.#layers.get(normalizedPath);
     if (layer === undefined) return null;
@@ -254,7 +316,7 @@ export class CloudDirectoryBrowserService implements CloudDirectoryBrowserRuntim
   }
 
   subscribe(listener: (path: string) => void): () => void {
-    if (this.#disposed) return () => undefined;
+    this.#assertAvailable();
     this.#listeners.add(listener);
     return () => {
       this.#listeners.delete(listener);
@@ -262,19 +324,19 @@ export class CloudDirectoryBrowserService implements CloudDirectoryBrowserRuntim
   }
 
   clear(): void {
-    this.#layers.clear();
-    this.#rootAccessGranted = false;
+    this.#assertAvailable();
+    this.#resetSession();
   }
 
   dispose(): void {
     if (this.#disposed) return;
-    this.clear();
+    this.#resetSession();
     this.#listeners.clear();
     this.#disposed = true;
   }
 
   #assertAvailable(): void {
-    if (this.#disposed) throw new Error("cloud-directory-browser-unavailable");
+    if (this.#disposed) throw unavailable();
   }
 
   #assertStart(start: number): void {
@@ -283,31 +345,109 @@ export class CloudDirectoryBrowserService implements CloudDirectoryBrowserRuntim
     }
   }
 
-  #stopReason(
+  #isCurrent(operation: ActiveOperation): boolean {
+    return !this.#disposed
+      && this.#active === operation
+      && this.#generation === operation.generation
+      && !operation.controller.signal.aborted;
+  }
+
+  #pauseReason(
+    operation: ActiveOperation,
     round: RoundState,
-    signal: AbortSignal | undefined,
-  ): PausedBeforeRequestReason | null {
-    if (signal?.aborted === true) return "user-canceled";
+    includeQuantityLimits: boolean,
+  ): PauseReason | null {
+    if (!this.#isCurrent(operation)) return "user-canceled";
     const at = safeNow(this.#now);
     if (elapsedAt(round.startedAt, at) >= CLOUD_DIRECTORY_BROWSE_ROUND_BUDGET.maxDurationMs) {
       return "time-limit";
     }
-    if (round.checkedEntryCount >= CLOUD_DIRECTORY_BROWSE_ROUND_BUDGET.maxEntryCount) {
-      return "entry-limit";
-    }
-    if (round.listRequestCount >= CLOUD_DIRECTORY_BROWSE_ROUND_BUDGET.maxListRequestCount) {
-      return "list-request-limit";
-    }
+    if (
+      includeQuantityLimits
+      && round.checkedEntryCount >= CLOUD_DIRECTORY_BROWSE_ROUND_BUDGET.maxEntryCount
+    ) return "entry-limit";
+    if (
+      includeQuantityLimits
+      && round.listRequestCount >= CLOUD_DIRECTORY_BROWSE_ROUND_BUDGET.maxListRequestCount
+    ) return "list-request-limit";
     return null;
+  }
+
+  #validatePage(
+    sourceEntries: unknown,
+    path: string,
+    layer: CloudDirectoryLayerState,
+  ): ValidatedPage {
+    if (!Array.isArray(sourceEntries) || sourceEntries.length > 1000) {
+      throw invalidResponse();
+    }
+    const entries = (sourceEntries as readonly unknown[]).map((entry) => (
+      validateBaiduListEntry({ entry, currentPath: path, traversalRoot: path })
+    ));
+    const directories = layer.directories.map(cloneDirectory);
+    const directoryFsIdByPath = new Map(layer.directoryFsIdByPath);
+    const directoryPathByFsId = new Map(layer.directoryPathByFsId);
+    const pagePaths = new Set<string>();
+    const pageFsIds = new Set<string>();
+
+    for (const entry of entries) {
+      if (pagePaths.has(entry.path) || pageFsIds.has(entry.fsId)) throw invalidResponse();
+      pagePaths.add(entry.path);
+      pageFsIds.add(entry.fsId);
+
+      if (
+        directoryFsIdByPath.has(entry.path)
+        || directoryPathByFsId.has(entry.fsId)
+      ) throw invalidResponse();
+
+      if (!entry.isDirectory) continue;
+      directoryFsIdByPath.set(entry.path, entry.fsId);
+      directoryPathByFsId.set(entry.fsId, entry.path);
+      directories.push({
+        fsId: entry.fsId,
+        path: entry.path,
+        filename: entry.filename,
+      });
+    }
+
+    return {
+      entries,
+      directories,
+      directoryFsIdByPath,
+      directoryPathByFsId,
+    };
+  }
+
+  #commitPage(
+    layer: CloudDirectoryLayerState,
+    round: RoundState,
+    pageStart: number,
+    page: ValidatedPage,
+  ): void {
+    let nextStart: number | null = null;
+    if (page.entries.length === 1000) {
+      nextStart = pageStart + 1000;
+      if (!Number.isSafeInteger(nextStart)) throw invalidResponse();
+    }
+
+    layer.directories = page.directories;
+    layer.directoryFsIdByPath = page.directoryFsIdByPath;
+    layer.directoryPathByFsId = page.directoryPathByFsId;
+    layer.cumulativeCheckedEntryCount += page.entries.length;
+    round.checkedEntryCount += page.entries.length;
+    layer.nextStart = nextStart;
+    layer.complete = nextStart === null;
+    layer.lastStopReason = null;
   }
 
   #finish(
     layer: CloudDirectoryLayerState,
     round: RoundState,
     stopReason: CloudDirectoryBrowserStopReason,
+    notify = true,
   ): CloudDirectoryBrowseRound {
     layer.lastStopReason = stopReason;
-    this.#notify(layer.path);
+    if (notify) this.#notify(layer.path);
     const at = safeNow(this.#now);
     return {
       path: layer.path,
@@ -324,6 +464,21 @@ export class CloudDirectoryBrowserService implements CloudDirectoryBrowserRuntim
   }
 
   #notify(path: string): void {
-    for (const listener of [...this.#listeners]) listener(path);
+    for (const listener of [...this.#listeners]) {
+      try {
+        listener(path);
+      } catch {
+        // Listener failures are isolated from durable browser state and other listeners.
+      }
+    }
+  }
+
+  #resetSession(): void {
+    this.#generation += 1;
+    const active = this.#active;
+    this.#active = null;
+    if (active !== null && !active.controller.signal.aborted) active.controller.abort();
+    this.#layers.clear();
+    this.#rootAccessGranted = false;
   }
 }
