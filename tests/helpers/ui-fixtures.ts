@@ -28,6 +28,33 @@ import type { VaultEvent } from "../../src/core/ports";
 import { FakeVault } from "../fakes/fake-vault";
 import { NORMAL_RUNTIME_POLICY, type RuntimeSafetyPolicy } from "../../src/runtime/safety-policy";
 import { validateCloudDirectorySelection } from "../../src/catalog/cloud-directory-selection";
+import type {
+  HybridCatalogActiveSummary,
+  LargeCatalogBatchSummary,
+} from "../../src/catalog/hybrid-catalog-runtime";
+
+export const TEST_SOURCE_IMPORT_SHA256 = "a".repeat(64);
+
+export const TEST_HYBRID_ACTIVE_AUTHORITY = {
+  sourceImportSha256: TEST_SOURCE_IMPORT_SHA256,
+  legacyArtifactSetSha256: null,
+} as const satisfies Pick<
+  HybridCatalogActiveSummary,
+  "sourceImportSha256" | "legacyArtifactSetSha256"
+>;
+
+export const TEST_LARGE_BATCH_AUTHORITY = {
+  verificationScope: null,
+  legacyPromotionRequired: false,
+  selectedGroupKeys: [`group:${"1".repeat(64)}`],
+} as const satisfies Pick<
+  LargeCatalogBatchSummary,
+  "verificationScope" | "legacyPromotionRequired" | "selectedGroupKeys"
+>;
+
+export const TEST_INACTIVE_HYBRID_EXECUTION = {
+  executionActive: false,
+} as const;
 
 /** Structural contract for the production dependency that Task 2 will expose. */
 export interface ProjectionSchedulerDependency {

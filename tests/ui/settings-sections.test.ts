@@ -19,6 +19,11 @@ import type {
   CloudDirectoryPickerPurpose,
   CloudDirectorySelection,
 } from "../../src/catalog/cloud-directory-selection";
+import {
+  TEST_HYBRID_ACTIVE_AUTHORITY,
+  TEST_INACTIVE_HYBRID_EXECUTION,
+  TEST_LARGE_BATCH_AUTHORITY,
+} from "../helpers/ui-fixtures";
 
 const INACTIVE_AUTO_RESUME = {
   autoResumeState: "inactive" as const,
@@ -300,6 +305,7 @@ describe("shared grouped settings surface", () => {
     const requestCatalogScan = vi.fn(async () => undefined);
     const requestLargeCatalogVerification = vi.fn(async () => undefined);
     const active = {
+      ...TEST_HYBRID_ACTIVE_AUTHORITY,
       importedAt: 1,
       pdfCount: 3,
       unverifiedCount: 3,
@@ -328,7 +334,7 @@ describe("shared grouped settings surface", () => {
     const controller = connectedControllerFixture({
       chooseCatalogRoot,
       requestCatalogScan,
-      hybridCatalog: () => ({ status: "ready", active }),
+      hybridCatalog: () => ({ ...TEST_INACTIVE_HYBRID_EXECUTION, status: "ready", active }),
       subscribeHybridCatalog: () => () => undefined,
       previewCatalogTxt: async () => undefined,
       requestCatalogTxtImport: async () => undefined,
@@ -420,6 +426,7 @@ describe("shared grouped settings surface", () => {
     const groupA = `group:${"d".repeat(64)}`;
     const groupB = `group:${"e".repeat(64)}`;
     const active = {
+      ...TEST_HYBRID_ACTIVE_AUTHORITY,
       importedAt: 1,
       pdfCount: 3,
       unverifiedCount: 3,
@@ -456,7 +463,7 @@ describe("shared grouped settings surface", () => {
           effectiveRoot: "/科学文库",
           groupKey: groupB,
         }),
-        hybridCatalog: () => ({ status: "ready", active }),
+        hybridCatalog: () => ({ ...TEST_INACTIVE_HYBRID_EXECUTION, status: "ready", active }),
         subscribeHybridCatalog: () => () => undefined,
         previewCatalogTxt: async () => undefined,
         requestCatalogTxtImport: async () => undefined,
@@ -508,8 +515,10 @@ describe("shared grouped settings surface", () => {
         return () => { connectionListener = (): void => undefined; };
       },
       hybridCatalog: () => ({
+        ...TEST_INACTIVE_HYBRID_EXECUTION,
         status: hybridStatus,
         active: {
+          ...TEST_HYBRID_ACTIVE_AUTHORITY,
           importedAt: 1,
           pdfCount: 1,
           unverifiedCount: 1,
@@ -598,8 +607,10 @@ describe("shared grouped settings surface", () => {
     const groupKey = `group:${"7".repeat(64)}`;
     const controller = connectedControllerFixture({
       hybridCatalog: () => ({
+        ...TEST_INACTIVE_HYBRID_EXECUTION,
         status: "paused",
         active: {
+          ...TEST_HYBRID_ACTIVE_AUTHORITY,
           importedAt: 1,
           pdfCount: 68_959,
           coveredCandidatePdfCount: 11_870,
@@ -619,6 +630,7 @@ describe("shared grouped settings surface", () => {
           }],
         },
         batch: {
+          ...TEST_LARGE_BATCH_AUTHORITY,
           batchId: "batch-settings-details",
           status: "paused",
           stopReason: "pdf-limit",
@@ -682,8 +694,10 @@ describe("shared grouped settings surface", () => {
     const controller = connectedControllerFixture({
       requestCatalogScan,
       hybridCatalog: () => ({
+        ...TEST_INACTIVE_HYBRID_EXECUTION,
         status: "paused",
         active: {
+          ...TEST_HYBRID_ACTIVE_AUTHORITY,
           importedAt: 1,
           pdfCount: 1,
           unverifiedCount: 1,
@@ -703,6 +717,7 @@ describe("shared grouped settings surface", () => {
           }],
         },
         batch: {
+          ...TEST_LARGE_BATCH_AUTHORITY,
           ...INACTIVE_AUTO_RESUME,
           batchId: "batch-settings-pending-gate",
           status: "paused",
@@ -791,8 +806,10 @@ describe("shared grouped settings surface", () => {
     const groupKey = `group:${"b".repeat(64)}`;
     const controller = connectedControllerFixture({
       hybridCatalog: () => ({
+        ...TEST_INACTIVE_HYBRID_EXECUTION,
         status: "ready",
         active: {
+          ...TEST_HYBRID_ACTIVE_AUTHORITY,
           importedAt: 1,
           pdfCount: 1,
           unverifiedCount: 1,
@@ -993,8 +1010,10 @@ describe("shared grouped settings surface", () => {
     const controller = connectedControllerFixture({
       catalogConnection: () => ({ status: "paused" }),
       hybridCatalog: () => ({
+        ...TEST_INACTIVE_HYBRID_EXECUTION,
         status: "paused",
         active: {
+          ...TEST_HYBRID_ACTIVE_AUTHORITY,
           importedAt: 1,
           pdfCount: 1,
           unverifiedCount: 1,
@@ -1014,6 +1033,7 @@ describe("shared grouped settings surface", () => {
           }],
         },
         batch: {
+          ...TEST_LARGE_BATCH_AUTHORITY,
           ...INACTIVE_AUTO_RESUME,
           batchId: "batch-settings-sections",
           status: "paused",

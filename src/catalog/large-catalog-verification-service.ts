@@ -4,15 +4,24 @@ import { normalizeCloudAbsolutePath } from "./catalog-path";
 import type { BaiduCatalogSourcePort } from "./catalog-ports";
 import type { CatalogReconciliationService } from "./catalog-reconciliation-service";
 import {
+  cloudVerificationScopesEqual,
+  decodeCloudVerificationAuthority,
+  type CloudVerificationAuthority,
+} from "./cloud-verification-scope";
+import {
   CatalogError,
   type BaiduListEntry,
   type CloudCatalogRecord,
 } from "./catalog-types";
-import type { HybridCatalogStorePort } from "./hybrid-catalog-ports";
+import type {
+  HybridCatalogStorePort,
+  LoadedLargeCatalogBatch,
+  LoadedLargeCatalogBatchV4,
+} from "./hybrid-catalog-ports";
 import {
   LARGE_CATALOG_RUN_BUDGET,
   HybridCatalogError,
-  type LargeCatalogBatchCheckpointV3,
+  type LargeCatalogBatchCheckpointV4,
   type LargeCatalogBatchGroupV3,
   type LargeCatalogErrorCode,
   type LargeCatalogGroupMode,
@@ -40,6 +49,7 @@ export interface LargeCatalogVerificationSelection {
 export interface LargeCatalogVerificationStartInput {
   readonly batchId: string;
   readonly sourceImportSha256: string;
+  readonly authority: ScopedCloudVerificationAuthority;
   readonly cloudRoot: string;
   readonly groups: readonly LargeCatalogVerificationSelection[];
   readonly signal?: AbortSignal;
@@ -48,6 +58,7 @@ export interface LargeCatalogVerificationStartInput {
 
 export interface LargeCatalogVerificationSegmentInput {
   readonly batchId: string;
+  readonly authority: ScopedCloudVerificationAuthority;
   readonly cloudRoot: string;
   readonly allowedGroupKeys: readonly string[];
   readonly signal?: AbortSignal;
@@ -70,6 +81,11 @@ type ConvertedPage = Readonly<{
   ignoredFileCount: number;
 }>;
 
+type ScopedCloudVerificationAuthority = Extract<
+  CloudVerificationAuthority,
+  Readonly<{ kind: "scoped" }>
+>;
+
 class LargeCatalogPause extends Error {
   constructor(readonly reason: LargeCatalogPauseReason) {
     super(reason);
@@ -77,7 +93,6 @@ class LargeCatalogPause extends Error {
   }
 }
 
-const HASH_PATTERN = /^[a-f0-9]{64}$/u;
 const GROUP_PATTERN = /^(?:txt-root-items|group:[a-f0-9]{64})$/u;
 
 const sha256 = (value: string): string => createHash("sha256").update(value).digest("hex");
@@ -152,13 +167,19 @@ export class LargeCatalogVerificationService {
 
   async prepare(input: Omit<LargeCatalogVerificationStartInput, "signal">): Promise<void> {
     const cloudRoot = this.#normalizedSessionRoot(input.cloudRoot);
-    if (!HASH_PATTERN.test(input.sourceImportSha256)) {
-      throw new HybridCatalogError("hybrid-batch-invalid");
-    }
+    const authority = this.#validatedAuthority(
+      input.authority,
+      cloudRoot,
+      input.sourceImportSha256,
+    );
     const candidates = await this.#store.loadActiveCandidateGroups(
       input.groups.map((group) => group.groupKey),
+      authority,
     );
-    if (candidates === null || candidates.descriptor.sourceSha256 !== input.sourceImportSha256) {
+    if (
+      candidates === null
+      || candidates.descriptor.sourceSha256 !== authority.scope.sourceImportSha256
+    ) {
       throw new HybridCatalogError("hybrid-batch-unavailable");
     }
     if (
@@ -198,11 +219,12 @@ export class LargeCatalogVerificationService {
         completedDirectoryCount: 0,
       };
     });
-    const checkpoint: LargeCatalogBatchCheckpointV3 = {
-      schemaVersion: 3,
+    const checkpoint: LargeCatalogBatchCheckpointV4 = {
+      schemaVersion: 4,
       batchId: input.batchId,
-      sourceImportSha256: input.sourceImportSha256,
-      cloudRootSha256: sha256(cloudRoot),
+      verificationScope: { ...authority.scope },
+      legacyCheckpointSha256: null,
+      latestReceipt: null,
       startedAt: safeNow(this.#now),
       runOrdinal: 1,
       budget: LARGE_CATALOG_RUN_BUDGET,
@@ -225,6 +247,7 @@ export class LargeCatalogVerificationService {
     await this.prepare(input);
     return this.runSegment({
       batchId: input.batchId,
+      authority: input.authority,
       cloudRoot: input.cloudRoot,
       allowedGroupKeys: input.groups.map((group) => group.groupKey),
       ...(input.signal === undefined ? {} : { signal: input.signal }),
@@ -245,15 +268,20 @@ export class LargeCatalogVerificationService {
     this.#active = true;
     try {
       const cloudRoot = this.#normalizedSessionRoot(input.cloudRoot);
-      const loaded = await this.#store.loadBatch(input.batchId);
-      if (loaded === null) throw new HybridCatalogError("hybrid-batch-unavailable");
+      const authority = this.#validatedAuthority(input.authority, cloudRoot);
+      const activeCandidate = await this.#store.loadActiveCandidateDescriptor(authority);
+      if (
+        activeCandidate === null
+        || activeCandidate.sourceSha256 !== authority.scope.sourceImportSha256
+      ) throw new HybridCatalogError("hybrid-batch-unavailable");
+      const loaded = this.#scopedBatch(await this.#store.loadBatch(input.batchId));
       let checkpoint = loaded.checkpoint;
+      if (!cloudVerificationScopesEqual(checkpoint.verificationScope, authority.scope)) {
+        throw new HybridCatalogError("hybrid-batch-invalid");
+      }
       const allowedGroupKeys = this.#allowedGroupKeys(input.allowedGroupKeys, checkpoint);
       const recoveredFromScanning = loaded.checkpoint.status === "scanning";
       const committedPdfCount = loaded.records.length;
-      if (checkpoint.cloudRootSha256 !== sha256(cloudRoot)) {
-        throw new HybridCatalogError("hybrid-cloud-root-mismatch");
-      }
       if (checkpoint.status === "complete") {
         return summarizeLargeCatalogVerification(checkpoint, committedPdfCount);
       }
@@ -299,6 +327,7 @@ export class LargeCatalogVerificationService {
         committedPdfCount,
         recoveredFromScanning,
         allowedGroupKeys,
+        authority,
       );
     } finally {
       this.#active = false;
@@ -306,7 +335,7 @@ export class LargeCatalogVerificationService {
   }
 
   async #execute(
-    initial: LargeCatalogBatchCheckpointV3,
+    initial: LargeCatalogBatchCheckpointV4,
     cloudRoot: string,
     signal: AbortSignal | undefined,
     seenFsIds: Set<string>,
@@ -315,6 +344,7 @@ export class LargeCatalogVerificationService {
     initialCommittedPdfCount: number,
     recoveredFromScanning: boolean,
     allowedGroupKeys: ReadonlySet<string>,
+    authority: ScopedCloudVerificationAuthority,
   ): Promise<LargeCatalogVerificationSummary> {
     let checkpoint = initial;
     let committedPdfCount = initialCommittedPdfCount;
@@ -335,7 +365,7 @@ export class LargeCatalogVerificationService {
       const current = group.pending[0];
       if (current === undefined) {
         try {
-          await this.#publishCompleteGroup(checkpoint, group, cloudRoot);
+          await this.#publishCompleteGroup(checkpoint, group, cloudRoot, authority);
         } catch (error) {
           return this.#finalizePartial(
             checkpoint,
@@ -349,7 +379,7 @@ export class LargeCatalogVerificationService {
           const groups = checkpoint.groups.map((value, index) => (
             index === checkpoint.currentGroupIndex ? { ...value, status: "complete" as const } : value
           ));
-          const terminal: LargeCatalogBatchCheckpointV3 = {
+          const terminal: LargeCatalogBatchCheckpointV4 = {
             ...checkpoint,
             currentGroupIndex: groups.length,
             groups,
@@ -401,7 +431,7 @@ export class LargeCatalogVerificationService {
           beforeRequest: async () => {
             const pause = this.#preRequestPause(checkpoint, signal);
             if (pause !== null) throw new LargeCatalogPause(pause);
-            const permitted: LargeCatalogBatchCheckpointV3 = {
+            const permitted: LargeCatalogBatchCheckpointV4 = {
               ...checkpoint,
               listRequestCount: checkpoint.listRequestCount + 1,
               cumulativeListRequestCount: checkpoint.cumulativeListRequestCount + 1,
@@ -518,7 +548,7 @@ export class LargeCatalogVerificationService {
   }
 
   #preRequestPause(
-    checkpoint: LargeCatalogBatchCheckpointV3,
+    checkpoint: LargeCatalogBatchCheckpointV4,
     signal: AbortSignal | undefined,
   ): LargeCatalogPauseReason | null {
     if (signal?.aborted) return "user-canceled";
@@ -534,7 +564,7 @@ export class LargeCatalogVerificationService {
   }
 
   #postRequestPause(
-    checkpoint: LargeCatalogBatchCheckpointV3,
+    checkpoint: LargeCatalogBatchCheckpointV4,
     signal: AbortSignal | undefined,
   ): LargeCatalogPauseReason | null {
     if (signal?.aborted) return "user-canceled";
@@ -621,13 +651,13 @@ export class LargeCatalogVerificationService {
   }
 
   #nextPageCheckpoint(
-    checkpoint: LargeCatalogBatchCheckpointV3,
+    checkpoint: LargeCatalogBatchCheckpointV4,
     group: LargeCatalogBatchGroupV3,
     current: Readonly<{ relativePath: string; start: number }>,
     sourceEntryCount: number,
     converted: ConvertedPage,
     pageKey: string,
-  ): LargeCatalogBatchCheckpointV3 {
+  ): LargeCatalogBatchCheckpointV4 {
     const continues = sourceEntryCount === 1000;
     const tail = group.pending.slice(1);
     const nextHead = continues
@@ -659,16 +689,17 @@ export class LargeCatalogVerificationService {
   }
 
   async #publishCompleteGroup(
-    checkpoint: LargeCatalogBatchCheckpointV3,
+    checkpoint: LargeCatalogBatchCheckpointV4,
     group: LargeCatalogBatchGroupV3,
     cloudRoot: string,
+    authority: ScopedCloudVerificationAuthority,
   ): Promise<void> {
-    const activeCandidates = await this.#store.loadActiveCandidateGroups([group.groupKey]);
-    const loaded = await this.#store.loadBatch(checkpoint.batchId);
+    const activeCandidates = await this.#store.loadActiveCandidateGroups([group.groupKey], authority);
+    const loaded = this.#scopedBatch(await this.#store.loadBatch(checkpoint.batchId));
     if (
       activeCandidates === null
-      || loaded === null
-      || activeCandidates.descriptor.sourceSha256 !== checkpoint.sourceImportSha256
+      || activeCandidates.descriptor.sourceSha256 !== checkpoint.verificationScope.sourceImportSha256
+      || !cloudVerificationScopesEqual(loaded.checkpoint.verificationScope, authority.scope)
     ) throw new HybridCatalogError("hybrid-batch-unavailable");
     const groupRoot = this.#groupRoot(cloudRoot, group);
     const cloudRecords = loaded.records.filter((record) => (
@@ -676,12 +707,13 @@ export class LargeCatalogVerificationService {
         ? record.parentPath === cloudRoot
         : record.path.startsWith(`${groupRoot}/`)
     ));
-    const activeOverlays = await this.#store.loadActiveOverlays();
+    const activeOverlays = await this.#store.loadActiveOverlays(authority);
     const priorOverlay = activeOverlays.find((overlay) => (
       overlay.descriptor.topLevelGroupId === group.groupKey
     ));
     const result = this.#reconcile.reconcile({
-      sourceImportSha256: checkpoint.sourceImportSha256,
+      authority,
+      sourceImportSha256: checkpoint.verificationScope.sourceImportSha256,
       topLevelGroupId: group.groupKey,
       cloudRoot: groupRoot,
       candidates: activeCandidates.records.filter((record) => (
@@ -707,7 +739,7 @@ export class LargeCatalogVerificationService {
   async #notify(
     listener: ProgressListener | undefined,
     phase: LargeVerificationProgressEvent["phase"],
-    checkpoint: LargeCatalogBatchCheckpointV3,
+    checkpoint: LargeCatalogBatchCheckpointV4,
     committedPdfCount: number,
     recoveredFromScanning: boolean,
   ): Promise<void> {
@@ -724,13 +756,13 @@ export class LargeCatalogVerificationService {
   }
 
   async #finalizePaused(
-    checkpoint: LargeCatalogBatchCheckpointV3,
+    checkpoint: LargeCatalogBatchCheckpointV4,
     reason: LargeCatalogPauseReason,
     listener: ProgressListener | undefined,
     committedPdfCount: number,
     recoveredFromScanning: boolean,
   ): Promise<LargeCatalogVerificationSummary> {
-    const terminal: LargeCatalogBatchCheckpointV3 = {
+    const terminal: LargeCatalogBatchCheckpointV4 = {
       ...checkpoint,
       status: "paused",
       stopReason: reason,
@@ -747,13 +779,13 @@ export class LargeCatalogVerificationService {
   }
 
   async #finalizePartial(
-    checkpoint: LargeCatalogBatchCheckpointV3,
+    checkpoint: LargeCatalogBatchCheckpointV4,
     code: LargeCatalogErrorCode,
     listener: ProgressListener | undefined,
     committedPdfCount: number,
     recoveredFromScanning: boolean,
   ): Promise<LargeCatalogVerificationSummary> {
-    const terminal: LargeCatalogBatchCheckpointV3 = {
+    const terminal: LargeCatalogBatchCheckpointV4 = {
       ...checkpoint,
       status: "partial",
       stopReason: code,
@@ -784,9 +816,41 @@ export class LargeCatalogVerificationService {
     return root;
   }
 
+  #validatedAuthority(
+    input: ScopedCloudVerificationAuthority,
+    cloudRoot: string,
+    expectedSourceImportSha256?: string,
+  ): ScopedCloudVerificationAuthority {
+    let authority: CloudVerificationAuthority;
+    try {
+      authority = decodeCloudVerificationAuthority(input);
+    } catch {
+      throw new HybridCatalogError("hybrid-batch-invalid");
+    }
+    if (
+      authority.kind !== "scoped"
+      || (
+        expectedSourceImportSha256 !== undefined
+        && authority.scope.sourceImportSha256 !== expectedSourceImportSha256
+      )
+    ) throw new HybridCatalogError("hybrid-batch-invalid");
+    if (authority.scope.cloudRootSha256 !== sha256(cloudRoot)) {
+      throw new HybridCatalogError("hybrid-cloud-root-mismatch");
+    }
+    return authority;
+  }
+
+  #scopedBatch(input: LoadedLargeCatalogBatch | null): LoadedLargeCatalogBatchV4 {
+    if (input === null) throw new HybridCatalogError("hybrid-batch-unavailable");
+    if (input.kind !== "scoped-v4" || input.checkpoint.schemaVersion !== 4) {
+      throw new HybridCatalogError("hybrid-batch-invalid");
+    }
+    return input;
+  }
+
   #allowedGroupKeys(
     values: readonly string[],
-    checkpoint: LargeCatalogBatchCheckpointV3,
+    checkpoint: LargeCatalogBatchCheckpointV4,
   ): ReadonlySet<string> {
     const unknownValues: unknown = values;
     if (

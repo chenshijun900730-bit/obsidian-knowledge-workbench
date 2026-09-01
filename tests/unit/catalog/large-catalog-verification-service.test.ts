@@ -1,4 +1,5 @@
-import { mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { mkdtemp, readFile, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -11,13 +12,32 @@ import {
   type LargeCatalogVerificationSelection,
   type LargeVerificationProgressEvent,
 } from "../../../src/catalog/large-catalog-verification-service";
-import type { CandidateImportWriter } from "../../../src/catalog/hybrid-catalog-ports";
-import { HybridCatalogError } from "../../../src/catalog/hybrid-catalog-types";
+import type {
+  CandidateImportWriter,
+  HybridCatalogStorePort,
+} from "../../../src/catalog/hybrid-catalog-ports";
+import {
+  LARGE_CATALOG_RUN_BUDGET,
+  HybridCatalogError,
+  type LargeCatalogBatchCheckpointV3,
+  type LargeCatalogBatchCheckpointV4,
+} from "../../../src/catalog/hybrid-catalog-types";
 import { UnifiedCatalogProjectionService } from "../../../src/catalog/unified-catalog-projection-service";
 
 const roots: string[] = [];
 const HASH_A = "a".repeat(64);
+const ROOT_HASH = createHash("sha256").update("/Library").digest("hex");
 const GROUP = `group:${"c".repeat(64)}`;
+const SCOPE = Object.freeze({
+  generation: 2,
+  sourceImportSha256: HASH_A,
+  cloudRootSha256: ROOT_HASH,
+});
+const AUTHORITY = Object.freeze({
+  kind: "scoped" as const,
+  scope: SCOPE,
+  legacyAllowlist: null,
+});
 
 const temporaryRoot = async (): Promise<string> => {
   const root = await realpath(await mkdtemp(join(tmpdir(), "knowledge-workbench-large-run-")));
@@ -78,8 +98,11 @@ class ScriptedSource implements BaiduCatalogSourcePort {
   }
 }
 
-const seedCandidates = async (adapter: LocalHybridCatalogAdapter): Promise<void> => {
-  const writer: CandidateImportWriter = await adapter.createCandidateImport("import-1");
+const seedCandidates = async (
+  adapter: LocalHybridCatalogAdapter,
+  importId = "import-1",
+): Promise<void> => {
+  const writer: CandidateImportWriter = await adapter.createCandidateImport(importId);
   for (const record of [
     {
       schemaVersion: 1,
@@ -134,6 +157,29 @@ const seedCandidates = async (adapter: LocalHybridCatalogAdapter): Promise<void>
   await new UnifiedCatalogProjectionService(adapter, { now: () => 1 }).rebuild();
 };
 
+const fingerprintedAuthority = async (root: string) => {
+  const manifestRaw = await readFile(join(root, "hybrid", "candidate-active.json"), "utf8");
+  const manifest = JSON.parse(manifestRaw) as Readonly<{ importId: string }>;
+  const descriptorRaw = await readFile(
+    join(root, "hybrid", "imports", manifest.importId, "receipt.json"),
+    "utf8",
+  );
+  return {
+    kind: "scoped" as const,
+    scope: SCOPE,
+    legacyAllowlist: {
+      candidate: {
+        importId: manifest.importId,
+        manifestSha256: createHash("sha256").update(manifestRaw).digest("hex"),
+        descriptorSha256: createHash("sha256").update(descriptorRaw).digest("hex"),
+      },
+      overlays: [],
+      unified: null,
+      resumableBatch: null,
+    },
+  };
+};
+
 const selection = (
   overrides: Partial<LargeCatalogVerificationSelection> = {},
 ): LargeCatalogVerificationSelection => ({
@@ -157,18 +203,152 @@ const harness = async (source: ScriptedSource, now: () => number = () => 100) =>
 };
 
 describe("LargeCatalogVerificationService", () => {
+  it("rejects a tampered candidate fingerprint before creating a batch or using the network", async () => {
+    const source = new ScriptedSource([]);
+    const { adapter, root, service } = await harness(source);
+    const authority = await fingerprintedAuthority(root);
+    await seedCandidates(adapter, "import-2");
+
+    await expect(service.prepare({
+      batchId: "batch-tampered-prepare",
+      sourceImportSha256: HASH_A,
+      authority,
+      cloudRoot: "/Library",
+      groups: [selection()],
+    })).rejects.toEqual(new HybridCatalogError("hybrid-snapshot-corrupt"));
+
+    expect(source.requests).toEqual([]);
+    await expect(adapter.loadBatch("batch-tampered-prepare")).resolves.toBeNull();
+    await expect(adapter.loadActiveOverlays()).resolves.toEqual([]);
+  });
+
+  it("revalidates the candidate fingerprint before a resumed segment can write or use the network", async () => {
+    const source = new ScriptedSource([]);
+    const { adapter, root, service } = await harness(source);
+    const authority = await fingerprintedAuthority(root);
+    await service.prepare({
+      batchId: "batch-tampered-run",
+      sourceImportSha256: HASH_A,
+      authority,
+      cloudRoot: "/Library",
+      groups: [selection()],
+    });
+    const before = await adapter.loadBatch("batch-tampered-run");
+    await seedCandidates(adapter, "import-2");
+
+    await expect(service.runSegment({
+      batchId: "batch-tampered-run",
+      authority,
+      cloudRoot: "/Library",
+      allowedGroupKeys: [GROUP],
+    })).rejects.toEqual(new HybridCatalogError("hybrid-snapshot-corrupt"));
+
+    expect(source.requests).toEqual([]);
+    await expect(adapter.loadBatch("batch-tampered-run")).resolves.toEqual(before);
+    await expect(adapter.loadActiveOverlays()).resolves.toEqual([]);
+  });
+
+  it("durably creates a scoped V4 checkpoint before the first network request", async () => {
+    const source = new ScriptedSource([{
+      path: "/Library/Synthetic",
+      start: 0,
+      entries: [],
+    }]);
+    const { adapter, service } = await harness(source);
+    const createBatch = vi.spyOn(adapter, "createBatch");
+    let observedDurableV4 = false;
+    source.afterPermit = async () => {
+      const loaded = await adapter.loadBatch("batch-v4-before-network");
+      observedDurableV4 = loaded?.checkpoint.schemaVersion === 4;
+    };
+
+    await service.start({
+      batchId: "batch-v4-before-network",
+      authority: AUTHORITY,
+      sourceImportSha256: HASH_A,
+      cloudRoot: "/Library",
+      groups: [selection()],
+    });
+
+    expect(createBatch).toHaveBeenCalledWith(expect.objectContaining({
+      schemaVersion: 4,
+      verificationScope: SCOPE,
+      legacyCheckpointSha256: null,
+      latestReceipt: null,
+    }));
+    expect(observedDurableV4).toBe(true);
+    expect(source.requests).toEqual([{ path: "/Library/Synthetic", start: 0 }]);
+  });
+
+  it("rejects a run scope mismatch before network or overlay mutation", async () => {
+    const source = new ScriptedSource([{
+      path: "/Library/Synthetic",
+      start: 0,
+      entries: [],
+    }]);
+    const { adapter, service } = await harness(source);
+    await service.prepare({
+      batchId: "batch-v4-scope-mismatch",
+      authority: AUTHORITY,
+      sourceImportSha256: HASH_A,
+      cloudRoot: "/Library",
+      groups: [selection()],
+    });
+
+    await expect(service.runSegment({
+      batchId: "batch-v4-scope-mismatch",
+      authority: {
+        ...AUTHORITY,
+        scope: { ...SCOPE, generation: SCOPE.generation + 1 },
+      },
+      cloudRoot: "/Library",
+      allowedGroupKeys: [GROUP],
+    })).rejects.toEqual(new HybridCatalogError("hybrid-batch-invalid"));
+    expect(source.requests).toEqual([]);
+    expect(await adapter.loadActiveOverlays(AUTHORITY)).toEqual([]);
+  });
+
+  it("publishes only schema-2 overlays and a scope-tagged unified projection", async () => {
+    const source = new ScriptedSource([{
+      path: "/Library/Synthetic",
+      start: 0,
+      entries: [file("/Library/Synthetic/A.pdf", "1")],
+    }]);
+    const { adapter, service } = await harness(source);
+
+    await service.start({
+      batchId: "batch-v4-schema-2-projection",
+      authority: AUTHORITY,
+      sourceImportSha256: HASH_A,
+      cloudRoot: "/Library",
+      groups: [selection()],
+    });
+
+    expect((await adapter.loadActiveOverlays(AUTHORITY))[0]?.descriptor).toMatchObject({
+      schemaVersion: 2,
+      verificationGeneration: SCOPE.generation,
+      cloudRootSha256: SCOPE.cloudRootSha256,
+    });
+    expect((await adapter.loadActiveUnified(AUTHORITY))?.descriptor).toMatchObject({
+      schemaVersion: 2,
+      verificationScope: SCOPE,
+    });
+  });
+
   it("rejects the cloud root before preparing or running a verification batch", async () => {
     const source = new ScriptedSource([]);
     const { adapter, service } = await harness(source);
 
     await expect(service.prepare({
       batchId: "batch-root-rejected",
+      authority: AUTHORITY,
       sourceImportSha256: HASH_A,
       cloudRoot: "/",
       groups: [selection()],
     })).rejects.toEqual(new HybridCatalogError("hybrid-batch-invalid"));
     await expect(service.start({
       batchId: "batch-root-rejected",
+      authority: AUTHORITY,
       sourceImportSha256: HASH_A,
       cloudRoot: "/",
       groups: [selection()],
@@ -189,6 +369,7 @@ describe("LargeCatalogVerificationService", () => {
     const { adapter, service } = await harness(source);
     await service.prepare({
       batchId: "batch-1",
+      authority: AUTHORITY,
       sourceImportSha256: HASH_A,
       cloudRoot: "/Library",
       groups: [selection()],
@@ -205,6 +386,7 @@ describe("LargeCatalogVerificationService", () => {
     };
     const result = await service.runSegment({
       batchId: "batch-1",
+      authority: AUTHORITY,
       cloudRoot: "/Library",
       allowedGroupKeys: [GROUP],
     });
@@ -220,6 +402,7 @@ describe("LargeCatalogVerificationService", () => {
 
     await expect(service.prepare({
       batchId: "batch-selected-read",
+      authority: AUTHORITY,
       sourceImportSha256: HASH_A,
       cloudRoot: "/Library",
       groups: [selection()],
@@ -239,6 +422,7 @@ describe("LargeCatalogVerificationService", () => {
     const events: LargeVerificationProgressEvent[] = [];
     const result = await service.start({
       batchId: "batch-events",
+      authority: AUTHORITY,
       sourceImportSha256: HASH_A,
       cloudRoot: "/Library",
       groups: [selection()],
@@ -269,6 +453,7 @@ describe("LargeCatalogVerificationService", () => {
     const { adapter, service } = await harness(source);
     const result = await service.start({
       batchId: "batch-listener-failure",
+      authority: AUTHORITY,
       sourceImportSha256: HASH_A,
       cloudRoot: "/Library",
       groups: [selection()],
@@ -284,6 +469,7 @@ describe("LargeCatalogVerificationService", () => {
     const { service } = await harness(source);
     await service.prepare({
       batchId: "batch-root-guard",
+      authority: AUTHORITY,
       sourceImportSha256: HASH_A,
       cloudRoot: "/Library",
       groups: [selection()],
@@ -291,6 +477,7 @@ describe("LargeCatalogVerificationService", () => {
 
     await expect(service.runSegment({
       batchId: "batch-root-guard",
+      authority: AUTHORITY,
       cloudRoot: "/Different-library",
       allowedGroupKeys: [GROUP],
     })).rejects.toEqual(new HybridCatalogError("hybrid-cloud-root-mismatch"));
@@ -305,12 +492,14 @@ describe("LargeCatalogVerificationService", () => {
     const invariant = await harness(invariantSource, () => times.shift() ?? 99);
     await invariant.service.prepare({
       batchId: "batch-clock-invariant",
+      authority: AUTHORITY,
       sourceImportSha256: HASH_A,
       cloudRoot: "/Library",
       groups: [selection()],
     });
     await expect(invariant.service.runSegment({
       batchId: "batch-clock-invariant",
+      authority: AUTHORITY,
       cloudRoot: "/Library",
       allowedGroupKeys: [GROUP],
     })).rejects.toEqual(new HybridCatalogError("hybrid-batch-invalid"));
@@ -336,6 +525,7 @@ describe("LargeCatalogVerificationService", () => {
     const { adapter, service } = await harness(source);
     const result = await service.start({
       batchId: "batch-serial",
+      authority: AUTHORITY,
       sourceImportSha256: HASH_A,
       cloudRoot: "/Library",
       groups: [selection()],
@@ -346,9 +536,9 @@ describe("LargeCatalogVerificationService", () => {
       { path: "/Library/Synthetic", start: 0 },
       { path: "/Library/Synthetic/Sub", start: 0 },
     ]);
-    expect((await adapter.loadActiveOverlays())[0]?.records.map((record) => record.fsId))
+    expect((await adapter.loadActiveOverlays(AUTHORITY))[0]?.records.map((record) => record.fsId))
       .toEqual(["1", "2"]);
-    expect((await adapter.loadActiveUnified())?.records.filter((record) => (
+    expect((await adapter.loadActiveUnified(AUTHORITY))?.records.filter((record) => (
       record.topLevelGroupId === GROUP
     )).every((record) => record.verificationStatus === "verified")).toBe(true);
   });
@@ -370,6 +560,7 @@ describe("LargeCatalogVerificationService", () => {
     const { adapter, service } = await harness(source, () => now++);
     const first = await service.start({
       batchId: "batch-selected-only",
+      authority: AUTHORITY,
       sourceImportSha256: HASH_A,
       cloudRoot: "/Library",
       groups: [
@@ -385,6 +576,7 @@ describe("LargeCatalogVerificationService", () => {
 
     const resumed = await service.runSegment({
       batchId: "batch-selected-only",
+      authority: AUTHORITY,
       cloudRoot: "/Library",
       allowedGroupKeys: [GROUP],
     });
@@ -399,7 +591,7 @@ describe("LargeCatalogVerificationService", () => {
       { path: "/Library/Synthetic", start: 0 },
       { path: "/Library/Synthetic", start: 0 },
     ]);
-    expect((await adapter.loadActiveOverlays()).map((overlay) => (
+    expect((await adapter.loadActiveOverlays(AUTHORITY)).map((overlay) => (
       overlay.descriptor.topLevelGroupId
     ))).toEqual([GROUP]);
   });
@@ -416,6 +608,7 @@ describe("LargeCatalogVerificationService", () => {
     const { adapter, service } = await harness(source);
     await service.start({
       batchId: "batch-root",
+      authority: AUTHORITY,
       sourceImportSha256: HASH_A,
       cloudRoot: "/Library",
       groups: [selection({
@@ -426,7 +619,7 @@ describe("LargeCatalogVerificationService", () => {
     });
 
     expect(source.requests).toEqual([{ path: "/Library", start: 0 }]);
-    expect((await adapter.loadActiveOverlays())[0]?.records).toEqual([
+    expect((await adapter.loadActiveOverlays(AUTHORITY))[0]?.records).toEqual([
       expect.objectContaining({ fsId: "3", relativePath: "Root.pdf" }),
     ]);
   });
@@ -442,6 +635,7 @@ describe("LargeCatalogVerificationService", () => {
     controller.abort();
     const result = await service.start({
       batchId: "batch-cancel",
+      authority: AUTHORITY,
       sourceImportSha256: HASH_A,
       cloudRoot: "/Library",
       groups: [selection()],
@@ -450,7 +644,7 @@ describe("LargeCatalogVerificationService", () => {
 
     expect(result).toMatchObject({ status: "paused", stopReason: "user-canceled" });
     expect(source.requests).toEqual([]);
-    expect(await adapter.loadActiveOverlays()).toEqual([]);
+    expect(await adapter.loadActiveOverlays(AUTHORITY)).toEqual([]);
   });
 
   it("persists a rate-limit failure, loads it offline, and resumes explicitly", async () => {
@@ -478,6 +672,7 @@ describe("LargeCatalogVerificationService", () => {
     const { adapter, service } = await harness(source, () => now++);
     const first = await service.start({
       batchId: "batch-resume",
+      authority: AUTHORITY,
       sourceImportSha256: HASH_A,
       cloudRoot: "/Library",
       groups: [selection()],
@@ -485,10 +680,11 @@ describe("LargeCatalogVerificationService", () => {
     expect(first).toMatchObject({ status: "partial", stopReason: "baidu-rate-limited" });
     expect(await service.loadPaused("batch-resume")).toMatchObject({ status: "partial" });
     expect(source.requests).toHaveLength(2);
-    expect(await adapter.loadActiveOverlays()).toEqual([]);
+    expect(await adapter.loadActiveOverlays(AUTHORITY)).toEqual([]);
 
     const resumed = await service.runSegment({
       batchId: "batch-resume",
+      authority: AUTHORITY,
       cloudRoot: "/Library",
       allowedGroupKeys: [GROUP],
     });
@@ -496,8 +692,69 @@ describe("LargeCatalogVerificationService", () => {
     expect(source.requests).toHaveLength(3);
     expect((await adapter.loadBatch("batch-resume"))?.checkpoint)
       .toMatchObject({ runOrdinal: 2, cumulativeListRequestCount: 3 });
-    expect((await adapter.loadActiveOverlays())[0]?.records.map((record) => record.fsId))
+    expect((await adapter.loadActiveOverlays(AUTHORITY))[0]?.records.map((record) => record.fsId))
       .toEqual(["1", "2"]);
+  });
+
+  it("canonicalizes reverse multi-error history when persisting the next partial failure", async () => {
+    const source = new ScriptedSource([{
+      path: "/Library/Synthetic",
+      start: 0,
+      error: new CatalogError("baidu-rate-limited", true),
+    }]);
+    const { adapter, root, service } = await harness(source);
+    const checkpoint: LargeCatalogBatchCheckpointV4 = {
+      schemaVersion: 4,
+      batchId: "batch-error-order",
+      verificationScope: SCOPE,
+      legacyCheckpointSha256: null,
+      latestReceipt: null,
+      startedAt: 100,
+      runOrdinal: 1,
+      budget: LARGE_CATALOG_RUN_BUDGET,
+      selectedGroupCount: 1,
+      currentGroupIndex: 0,
+      groups: [{
+        groupKey: GROUP,
+        rootRelativePath: "Synthetic",
+        mode: "recursive",
+        status: "scanning",
+        pending: [{ relativePath: "", start: 0 }],
+        committedPageKeys: [],
+        completedDirectoryCount: 0,
+      }],
+      pdfCount: 0,
+      directoryCount: 0,
+      ignoredFileCount: 0,
+      listRequestCount: 0,
+      cumulativeListRequestCount: 0,
+      status: "scanning",
+      stopReason: null,
+      errorCodeCounts: {
+        "hybrid-batch-unavailable": 2,
+        "baidu-not-found": 1,
+      },
+    };
+    await adapter.createBatch(checkpoint);
+
+    await expect(service.runSegment({
+      batchId: checkpoint.batchId,
+      authority: AUTHORITY,
+      cloudRoot: "/Library",
+      allowedGroupKeys: [GROUP],
+    })).resolves.toMatchObject({ status: "partial", stopReason: "baidu-rate-limited" });
+
+    const reloaded = await new LocalHybridCatalogAdapter(root).loadBatch(checkpoint.batchId);
+    expect(reloaded?.checkpoint.errorCodeCounts).toEqual({
+      "baidu-not-found": 1,
+      "baidu-rate-limited": 1,
+      "hybrid-batch-unavailable": 2,
+    });
+    expect(Object.keys(reloaded?.checkpoint.errorCodeCounts ?? {})).toEqual([
+      "baidu-not-found",
+      "baidu-rate-limited",
+      "hybrid-batch-unavailable",
+    ]);
   });
 
   it("discards a whole page that would exceed the directory budget", async () => {
@@ -514,6 +771,7 @@ describe("LargeCatalogVerificationService", () => {
     const events: LargeVerificationProgressEvent[] = [];
     const result = await service.start({
       batchId: "batch-budget",
+      authority: AUTHORITY,
       sourceImportSha256: HASH_A,
       cloudRoot: "/Library",
       groups: [selection()],
@@ -530,7 +788,7 @@ describe("LargeCatalogVerificationService", () => {
     });
     expect(events.some((event) => event.phase === "page-committed")).toBe(false);
     expect((await adapter.loadBatch("batch-budget"))?.records).toEqual([]);
-    expect(await adapter.loadActiveOverlays()).toEqual([]);
+    expect(await adapter.loadActiveOverlays(AUTHORITY)).toEqual([]);
   });
 
   it("restores the prior active overlay when unified projection fails", async () => {
@@ -553,12 +811,13 @@ describe("LargeCatalogVerificationService", () => {
 
     const result = await service.start({
       batchId: "batch-project-failure",
+      authority: AUTHORITY,
       sourceImportSha256: HASH_A,
       cloudRoot: "/Library",
       groups: [selection()],
     });
     expect(result).toMatchObject({ status: "partial", stopReason: "hybrid-snapshot-corrupt" });
-    expect(await adapter.loadActiveOverlays()).toEqual([]);
+    expect(await adapter.loadActiveOverlays(AUTHORITY)).toEqual([]);
   });
 
   it("continues a full 1,000-entry page with the next start offset", async () => {
@@ -573,6 +832,7 @@ describe("LargeCatalogVerificationService", () => {
     const { adapter, service } = await harness(source);
     const result = await service.start({
       batchId: "batch-pagination",
+      authority: AUTHORITY,
       sourceImportSha256: HASH_A,
       cloudRoot: "/Library",
       groups: [selection()],
@@ -611,6 +871,7 @@ describe("LargeCatalogVerificationService", () => {
 
     const result = await service.start({
       batchId: "batch-cross-page-duplicate",
+      authority: AUTHORITY,
       sourceImportSha256: HASH_A,
       cloudRoot: "/Library",
       groups: [selection()],
@@ -630,7 +891,7 @@ describe("LargeCatalogVerificationService", () => {
     });
     expect((await adapter.loadBatch("batch-cross-page-duplicate"))?.records)
       .toEqual([expect.objectContaining({ fsId: "1", path: "/Library/Synthetic/A.pdf" })]);
-    expect(await adapter.loadActiveOverlays()).toEqual([]);
+    expect(await adapter.loadActiveOverlays(AUTHORITY)).toEqual([]);
   });
 
   it.each([
@@ -659,6 +920,7 @@ describe("LargeCatalogVerificationService", () => {
 
     const first = await service.start({
       batchId: `batch-resume-ignored-${kind}`,
+      authority: AUTHORITY,
       sourceImportSha256: HASH_A,
       cloudRoot: "/Library",
       groups: [selection()],
@@ -672,6 +934,7 @@ describe("LargeCatalogVerificationService", () => {
 
     const resumed = await service.runSegment({
       batchId: `batch-resume-ignored-${kind}`,
+      authority: AUTHORITY,
       cloudRoot: "/Library",
       allowedGroupKeys: [GROUP],
     });
@@ -681,7 +944,7 @@ describe("LargeCatalogVerificationService", () => {
       listRequestCount: 1,
       ignoredFileCount: 0,
     });
-    expect(await adapter.loadActiveOverlays()).toEqual([]);
+    expect(await adapter.loadActiveOverlays(AUTHORITY)).toEqual([]);
   });
 
   it("rejects a directory identity repeated after a paused batch is resumed", async () => {
@@ -709,6 +972,7 @@ describe("LargeCatalogVerificationService", () => {
     const { adapter, service } = await harness(source, () => now++);
     await service.start({
       batchId: "batch-resume-directory",
+      authority: AUTHORITY,
       sourceImportSha256: HASH_A,
       cloudRoot: "/Library",
       groups: [selection()],
@@ -716,6 +980,7 @@ describe("LargeCatalogVerificationService", () => {
 
     const resumed = await service.runSegment({
       batchId: "batch-resume-directory",
+      authority: AUTHORITY,
       cloudRoot: "/Library",
       allowedGroupKeys: [GROUP],
     });
@@ -725,63 +990,71 @@ describe("LargeCatalogVerificationService", () => {
       directoryCount: 0,
       ignoredFileCount: 0,
     });
-    expect(await adapter.loadActiveOverlays()).toEqual([]);
+    expect(await adapter.loadActiveOverlays(AUTHORITY)).toEqual([]);
   });
 
-  it("loads a legacy PDF-only page but refuses to resume it without complete identities", async () => {
-    const firstPage = [
-      file("/Library/Synthetic/A.pdf", "1"),
-      ...Array.from({ length: 999 }, (_, index) => file(
-        `/Library/Synthetic/Ignored-${String(index).padStart(4, "0")}.txt`,
-        String(index + 2),
-      )),
-    ];
-    const source = new ScriptedSource([
-      { path: "/Library/Synthetic", start: 0, entries: firstPage },
-      {
-        path: "/Library/Synthetic",
-        start: 1000,
-        error: new CatalogError("baidu-rate-limited", true),
-      },
-    ]);
-    let now = 100;
-    const { adapter, root, service } = await harness(source, () => now++);
-    await service.start({
-      batchId: "batch-legacy-identities",
+  it("refuses a legacy V3 batch before network or overlay mutation", async () => {
+    const source = new ScriptedSource([{
+      path: "/Library/Synthetic",
+      start: 0,
+      entries: [],
+    }]);
+    const adapter = new LocalHybridCatalogAdapter(await temporaryRoot());
+    await seedCandidates(adapter);
+    const legacyCheckpoint: LargeCatalogBatchCheckpointV3 = {
+      schemaVersion: 3,
+      batchId: "batch-legacy-v3",
       sourceImportSha256: HASH_A,
-      cloudRoot: "/Library",
-      groups: [selection()],
+      cloudRootSha256: ROOT_HASH,
+      startedAt: 100,
+      runOrdinal: 1,
+      budget: LARGE_CATALOG_RUN_BUDGET,
+      selectedGroupCount: 1,
+      currentGroupIndex: 0,
+      groups: [{
+        groupKey: GROUP,
+        rootRelativePath: "Synthetic",
+        mode: "recursive",
+        status: "scanning",
+        pending: [{ relativePath: "", start: 0 }],
+        committedPageKeys: [],
+        completedDirectoryCount: 0,
+      }],
+      pdfCount: 0,
+      directoryCount: 0,
+      ignoredFileCount: 0,
+      listRequestCount: 0,
+      cumulativeListRequestCount: 0,
+      status: "scanning",
+      stopReason: null,
+      errorCodeCounts: {},
+    };
+    const store = {
+      loadActiveCandidateDescriptor: async () => adapter.loadActiveCandidateDescriptor(AUTHORITY),
+      loadBatch: async () => ({
+        kind: "legacy-v3" as const,
+        checkpoint: legacyCheckpoint,
+        checkpointSha256: "f".repeat(64),
+        records: [],
+        identities: [],
+        identitiesComplete: true,
+      }),
+    } as unknown as HybridCatalogStorePort;
+    const service = new LargeCatalogVerificationService({
+      source,
+      store,
+      reconcile: new CatalogReconciliationService(),
+      now: () => 100,
     });
-    const loaded = await adapter.loadBatch("batch-legacy-identities");
-    const pageKey = loaded?.checkpoint.groups[0]?.committedPageKeys[0];
-    expect(pageKey).toBeDefined();
-    const pagePath = join(
-      root,
-      "hybrid",
-      "batches",
-      "batch-legacy-identities",
-      "pages",
-      `${pageKey!}.json`,
-    );
-    const current = JSON.parse(await readFile(pagePath, "utf8")) as Readonly<{
-      pageKey: string;
-      records: readonly unknown[];
-      nextCheckpoint: unknown;
-    }>;
-    await writeFile(pagePath, `${JSON.stringify({
-      schemaVersion: 1,
-      pageKey: current.pageKey,
-      records: current.records,
-      nextCheckpoint: current.nextCheckpoint,
-    })}\n`, "utf8");
 
-    expect((await adapter.loadBatch("batch-legacy-identities"))?.identitiesComplete).toBe(false);
     await expect(service.runSegment({
-      batchId: "batch-legacy-identities",
+      batchId: legacyCheckpoint.batchId,
+      authority: AUTHORITY,
       cloudRoot: "/Library",
       allowedGroupKeys: [GROUP],
     })).rejects.toEqual(new HybridCatalogError("hybrid-batch-invalid"));
-    expect(source.requests).toHaveLength(2);
+    expect(source.requests).toEqual([]);
+    expect(await adapter.loadActiveOverlays(AUTHORITY)).toEqual([]);
   });
 
   it("counts both transport permits when a source replays after token refresh", async () => {
@@ -805,6 +1078,7 @@ describe("LargeCatalogVerificationService", () => {
     });
     await service.start({
       batchId: "batch-refresh",
+      authority: AUTHORITY,
       sourceImportSha256: HASH_A,
       cloudRoot: "/Library",
       groups: [selection()],
@@ -831,6 +1105,7 @@ describe("LargeCatalogVerificationService", () => {
     const { adapter, service } = await harness(source);
     const result = await service.start({
       batchId: "batch-two-groups",
+      authority: AUTHORITY,
       sourceImportSha256: HASH_A,
       cloudRoot: "/Library",
       groups: [
@@ -848,7 +1123,7 @@ describe("LargeCatalogVerificationService", () => {
       { path: "/Library/Synthetic", start: 0 },
       { path: "/Library", start: 0 },
     ]);
-    expect(await adapter.loadActiveOverlays()).toHaveLength(2);
+    expect(await adapter.loadActiveOverlays(AUTHORITY)).toHaveLength(2);
   });
 
   it("discards a fetched page when the 30-minute limit is reached before commit", async () => {
@@ -861,6 +1136,7 @@ describe("LargeCatalogVerificationService", () => {
     const { adapter, service } = await harness(source, () => times.shift() ?? 1_800_100);
     const result = await service.start({
       batchId: "batch-time",
+      authority: AUTHORITY,
       sourceImportSha256: HASH_A,
       cloudRoot: "/Library",
       groups: [selection()],
@@ -868,9 +1144,10 @@ describe("LargeCatalogVerificationService", () => {
 
     expect(result).toMatchObject({ status: "paused", stopReason: "time-limit" });
     expect((await adapter.loadBatch("batch-time"))?.records).toEqual([]);
-    expect(await adapter.loadActiveOverlays()).toEqual([]);
+    expect(await adapter.loadActiveOverlays(AUTHORITY)).toEqual([]);
   });
 
+  // Each permit intentionally persists an A/B checkpoint and pointer before transport.
   it("stops before transport 301 when repeated source permits reach the request limit", async () => {
     let transportCount = 0;
     const source: BaiduCatalogSourcePort = {
@@ -892,6 +1169,7 @@ describe("LargeCatalogVerificationService", () => {
     });
     const result = await service.start({
       batchId: "batch-request-limit",
+      authority: AUTHORITY,
       sourceImportSha256: HASH_A,
       cloudRoot: "/Library",
       groups: [selection()],
@@ -904,5 +1182,5 @@ describe("LargeCatalogVerificationService", () => {
       cumulativeListRequestCount: 300,
     });
     expect(transportCount).toBe(300);
-  });
+  }, 20_000);
 });

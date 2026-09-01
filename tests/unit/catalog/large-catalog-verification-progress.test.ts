@@ -6,7 +6,14 @@ import {
 import {
   LARGE_CATALOG_RUN_BUDGET,
   type LargeCatalogBatchCheckpointV3,
+  type LargeCatalogBatchCheckpointV4,
 } from "../../../src/catalog/hybrid-catalog-types";
+
+const SCOPE = Object.freeze({
+  generation: 2,
+  sourceImportSha256: "a".repeat(64),
+  cloudRootSha256: "b".repeat(64),
+});
 
 const checkpoint = (): LargeCatalogBatchCheckpointV3 => ({
   schemaVersion: 3,
@@ -48,11 +55,71 @@ const checkpoint = (): LargeCatalogBatchCheckpointV3 => ({
   errorCodeCounts: {},
 });
 
+const scopedCheckpoint = (): LargeCatalogBatchCheckpointV4 => ({
+  schemaVersion: 4,
+  batchId: "batch-progress",
+  verificationScope: SCOPE,
+  legacyCheckpointSha256: null,
+  latestReceipt: null,
+  startedAt: 100,
+  runOrdinal: 3,
+  budget: LARGE_CATALOG_RUN_BUDGET,
+  selectedGroupCount: 2,
+  currentGroupIndex: 1,
+  groups: [
+    {
+      groupKey: `group:${"1".repeat(64)}`,
+      rootRelativePath: "Science",
+      mode: "recursive",
+      status: "complete",
+      pending: [],
+      committedPageKeys: ["c".repeat(64)],
+      completedDirectoryCount: 2,
+    },
+    {
+      groupKey: `group:${"2".repeat(64)}`,
+      rootRelativePath: "History",
+      mode: "recursive",
+      status: "scanning",
+      pending: [{ relativePath: "Sub", start: 1000 }],
+      committedPageKeys: ["d".repeat(64), "e".repeat(64)],
+      completedDirectoryCount: 4,
+    },
+  ],
+  pdfCount: 200,
+  directoryCount: 41,
+  ignoredFileCount: 3,
+  listRequestCount: 20,
+  cumulativeListRequestCount: 427,
+  status: "paused",
+  stopReason: "list-request-limit",
+  errorCodeCounts: {},
+});
+
 describe("large catalog verification progress", () => {
+  it("projects detached V4 scope and marks legacy V3 promotion honestly", () => {
+    const scoped = summarizeLargeCatalogVerification(scopedCheckpoint(), 11_870);
+    const legacy = summarizeLargeCatalogVerification(checkpoint(), 11_870);
+
+    expect(scoped).toMatchObject({
+      verificationScope: SCOPE,
+      legacyPromotionRequired: false,
+    });
+    expect(scoped.verificationScope).not.toBe(SCOPE);
+    expect(legacy).toMatchObject({
+      verificationScope: null,
+      legacyPromotionRequired: true,
+    });
+  });
+
   it("derives aggregate-only counters without exposing pending paths", () => {
     const value = summarizeLargeCatalogVerification(checkpoint(), 11_870);
     expect(value).toMatchObject({
       selectedGroupCount: 2,
+      selectedGroupKeys: [
+        `group:${"1".repeat(64)}`,
+        `group:${"2".repeat(64)}`,
+      ],
       completedGroupCount: 1,
       currentGroupIndex: 1,
       currentGroupKey: `group:${"2".repeat(64)}`,

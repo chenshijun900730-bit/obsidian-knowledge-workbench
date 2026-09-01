@@ -13,6 +13,11 @@ import {
 } from "../../src/ui/verification-page";
 import { LARGE_CATALOG_AUTO_CHAIN_MAX_SEGMENTS } from "../../src/catalog/hybrid-catalog-types";
 import type { CloudDirectorySelection } from "../../src/catalog/cloud-directory-selection";
+import {
+  TEST_HYBRID_ACTIVE_AUTHORITY,
+  TEST_INACTIVE_HYBRID_EXECUTION,
+  TEST_LARGE_BATCH_AUTHORITY,
+} from "../helpers/ui-fixtures";
 
 const INACTIVE_AUTO_RESUME = {
   autoResumeState: "inactive" as const,
@@ -26,6 +31,7 @@ const testRoot = (): HTMLDivElement => document.createElementNS(
   "div",
 ) as HTMLDivElement;
 const active = {
+  ...TEST_HYBRID_ACTIVE_AUTHORITY,
   importedAt: 1,
   pdfCount: 252,
   unverifiedCount: 252,
@@ -56,8 +62,11 @@ const actions = (overrides: Partial<VerificationPageActions> = {}): Verification
   ...overrides,
 });
 
+type HybridCatalogFixture = Omit<HybridCatalogViewModel, "executionActive"> &
+  Partial<Pick<HybridCatalogViewModel, "executionActive">>;
+
 const model = (
-  hybrid: HybridCatalogViewModel = { status: "ready", active },
+  hybrid: HybridCatalogFixture = { status: "ready", active },
   connection: CloudCatalogConnectionViewModel = { status: "authorized" },
 ): VerificationPageModel => ({
   i18n: createWorkbenchI18n("zh-CN"),
@@ -65,7 +74,7 @@ const model = (
   rootLocked: false,
   selectedGroupKeys: [GROUP_KEY],
   connection,
-  hybrid,
+  hybrid: { ...TEST_INACTIVE_HYBRID_EXECUTION, ...hybrid },
   actions: actions(),
 });
 
@@ -144,6 +153,7 @@ describe("verification page", () => {
         status: "paused",
         active,
         batch: {
+          ...TEST_LARGE_BATCH_AUTHORITY,
           ...INACTIVE_AUTO_RESUME,
           batchId: "batch-local-root-gate",
           status: "paused",
@@ -200,6 +210,7 @@ describe("verification page", () => {
         status: "paused",
         active,
         batch: {
+          ...TEST_LARGE_BATCH_AUTHORITY,
           ...INACTIVE_AUTO_RESUME,
           batchId: "batch-pending-action-gate",
           status: "paused",
@@ -254,6 +265,7 @@ describe("verification page", () => {
         status: "scanning",
         active,
         batch: {
+          ...TEST_LARGE_BATCH_AUTHORITY,
           ...INACTIVE_AUTO_RESUME,
           batchId: "batch-scanning",
           status: "paused",
@@ -291,6 +303,7 @@ describe("verification page", () => {
 
   it("shows only pause while the automatic chain is running and resume after its limit", () => {
     const runningBatch: LargeCatalogBatchSummary = {
+      ...TEST_LARGE_BATCH_AUTHORITY,
       batchId: "batch-actions",
       status: "scanning",
       stopReason: null,
@@ -324,6 +337,7 @@ describe("verification page", () => {
       status: "paused",
       active,
       batch: {
+        ...TEST_LARGE_BATCH_AUTHORITY,
         ...runningBatch,
         status: "paused",
         stopReason: "pdf-limit",
@@ -349,6 +363,7 @@ describe("verification page", () => {
         status: "paused",
         active,
         batch: {
+          ...TEST_LARGE_BATCH_AUTHORITY,
           ...INACTIVE_AUTO_RESUME,
           batchId: `batch-lifecycle-${status}`,
           status: "paused",
@@ -385,6 +400,7 @@ describe("verification page", () => {
         active,
         messageCode: "baidu-not-found",
         batch: {
+          ...TEST_LARGE_BATCH_AUTHORITY,
           ...INACTIVE_AUTO_RESUME,
           batchId: "batch-auth-priority",
           status: "paused",
@@ -431,10 +447,12 @@ describe("verification page", () => {
   ) => {
     const root = testRoot();
     const staleHybrid: HybridCatalogViewModel = {
+      ...TEST_INACTIVE_HYBRID_EXECUTION,
       status: "paused",
       active,
       messageCode: "baidu-not-found",
       batch: {
+        ...TEST_LARGE_BATCH_AUTHORITY,
         ...INACTIVE_AUTO_RESUME,
         batchId: "batch-stale-fault",
         status: "paused",
@@ -479,6 +497,7 @@ describe("verification page", () => {
         status: "paused",
         active,
         batch: {
+          ...TEST_LARGE_BATCH_AUTHORITY,
           ...INACTIVE_AUTO_RESUME,
           batchId: "batch-root-mismatch",
           status: "paused",
@@ -545,6 +564,7 @@ describe("verification page", () => {
         status: "paused",
         active,
         batch: {
+          ...TEST_LARGE_BATCH_AUTHORITY,
           ...INACTIVE_AUTO_RESUME,
           batchId: "batch-root-locked",
           status: "paused",
@@ -586,6 +606,7 @@ describe("verification page", () => {
       status: "paused",
       active,
       batch: {
+        ...TEST_LARGE_BATCH_AUTHORITY,
         ...INACTIVE_AUTO_RESUME,
         batchId: "batch-progress",
         status: "paused",
@@ -623,6 +644,7 @@ describe("verification page", () => {
       active,
       messageCode: "baidu-not-found",
       batch: {
+        ...TEST_LARGE_BATCH_AUTHORITY,
         ...INACTIVE_AUTO_RESUME,
         batchId: "batch-not-found",
         status: "partial",
@@ -692,6 +714,7 @@ describe("verification page", () => {
       status: "paused",
       active,
       batch: {
+        ...TEST_LARGE_BATCH_AUTHORITY,
         ...INACTIVE_AUTO_RESUME,
         batchId: "batch-canceled",
         status: "paused",

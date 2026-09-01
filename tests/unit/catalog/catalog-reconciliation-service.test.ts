@@ -1,5 +1,7 @@
+import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { CatalogReconciliationService } from "../../../src/catalog/catalog-reconciliation-service";
+import { encodeCatalogOverlayDescriptor } from "../../../src/catalog/hybrid-catalog-codec";
 import type { CloudCatalogRecord } from "../../../src/catalog/catalog-types";
 import {
   HybridCatalogError,
@@ -11,8 +13,29 @@ import {
 
 const HASH_A = "a".repeat(64);
 const HASH_B = "b".repeat(64);
+const ROOT_HASH = createHash("sha256").update("/Library").digest("hex");
 const GROUP_A = `group:${"c".repeat(64)}`;
 const GROUP_B = `group:${"d".repeat(64)}`;
+
+const scopedAuthority = (overrides: Readonly<Record<string, unknown>> = {}) => ({
+  kind: "scoped" as const,
+  scope: {
+    generation: 2,
+    sourceImportSha256: HASH_A,
+    cloudRootSha256: ROOT_HASH,
+  },
+  legacyAllowlist: {
+    candidate: {
+      importId: "import-1",
+      manifestSha256: "1".repeat(64),
+      descriptorSha256: "2".repeat(64),
+    },
+    overlays: [],
+    unified: null,
+    resumableBatch: null,
+  },
+  ...overrides,
+});
 
 const candidate = (
   relativePath: string,
@@ -109,7 +132,135 @@ const overlay = (
   supersededCatalogIds: [],
 });
 
+const scopedOverlay = (
+  id: string,
+  groupId: string,
+  completedAt: number,
+  records: readonly UnifiedCatalogRecordV1[],
+  scope = scopedAuthority().scope,
+): ActiveCatalogOverlay => ({
+  descriptor: {
+    schemaVersion: 2,
+    overlayId: id,
+    sourceImportSha256: scope.sourceImportSha256,
+    verificationGeneration: scope.generation,
+    cloudRootSha256: scope.cloudRootSha256,
+    topLevelGroupId: groupId,
+    completedAt,
+    recordCount: records.length,
+    differenceCount: 0,
+    supersededCount: 0,
+    recordsSha256: HASH_A,
+    differencesSha256: HASH_B,
+    supersededSha256: HASH_A,
+  },
+  records,
+  differences: [],
+  supersededCatalogIds: [],
+});
+
+const overlayDescriptorSha256 = (value: ActiveCatalogOverlay): string => createHash("sha256")
+  .update(`${encodeCatalogOverlayDescriptor(value.descriptor)}\n`)
+  .digest("hex");
+
+const authorityFor = (overlays: readonly ActiveCatalogOverlay[] = []) => scopedAuthority({
+  legacyAllowlist: {
+    ...scopedAuthority().legacyAllowlist,
+    overlays: overlays.map((value) => ({
+      overlayId: value.descriptor.overlayId,
+      groupKey: value.descriptor.topLevelGroupId,
+      descriptorSha256: overlayDescriptorSha256(value),
+    })),
+  },
+});
+
 describe("CatalogReconciliationService", () => {
+  it("ignores unlisted schema-1 and stale-scope schema-2 overlays", () => {
+    const first = candidate("Synthetic/First.pdf", "a");
+    const unlisted = overlay("legacy-unlisted", GROUP_A, 500, [
+      priorRecord({
+        relativePath: first.relativePath,
+        fsId: "7",
+        candidateId: first.candidateId,
+      }),
+    ]);
+    const stale = scopedOverlay("stale-scoped", GROUP_A, 600, unlisted.records, {
+      ...scopedAuthority().scope,
+      generation: scopedAuthority().scope.generation + 1,
+    });
+
+    const result = new CatalogReconciliationService().reconcile({
+      authority: scopedAuthority(),
+      sourceImportSha256: HASH_A,
+      topLevelGroupId: GROUP_A,
+      cloudRoot: "/Library/Synthetic",
+      candidates: [first],
+      activeOverlays: [unlisted, stale],
+      cloudRecords: [cloud("/Library/Synthetic/New.pdf", "7")],
+      completedAt: 600,
+      complete: true,
+    });
+
+    expect(result.records).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        catalogId: "baidu:7",
+        candidateId: null,
+        differenceKinds: ["cloud-added"],
+      }),
+      expect.objectContaining({
+        catalogId: first.candidateId,
+        differenceKinds: ["cloud-missing"],
+      }),
+    ]));
+    expect(result).toMatchObject({ verificationScope: scopedAuthority().scope });
+  });
+
+  it("lets an exact-scope schema-2 overlay outrank a newer allowlisted schema-1 overlay", () => {
+    const exactCandidate = candidate("Synthetic/Exact-prior.pdf", "a");
+    const legacyCandidate = candidate("Synthetic/Legacy-prior.pdf", "b");
+    const exact = scopedOverlay("scoped-overlay", GROUP_A, 20, [
+      priorRecord({
+        relativePath: exactCandidate.relativePath,
+        fsId: "7",
+        candidateId: exactCandidate.candidateId,
+      }),
+    ]);
+    const legacy = overlay("legacy-allowlisted", GROUP_A, 999, [
+      priorRecord({
+        relativePath: legacyCandidate.relativePath,
+        fsId: "7",
+        candidateId: legacyCandidate.candidateId,
+      }),
+    ]);
+    const authority = scopedAuthority({
+      legacyAllowlist: {
+        ...scopedAuthority().legacyAllowlist,
+        overlays: [{
+          overlayId: "legacy-allowlisted",
+          groupKey: GROUP_A,
+          descriptorSha256: overlayDescriptorSha256(legacy),
+        }],
+      },
+    });
+
+    const result = new CatalogReconciliationService().reconcile({
+      authority,
+      sourceImportSha256: HASH_A,
+      topLevelGroupId: GROUP_A,
+      cloudRoot: "/Library/Synthetic",
+      candidates: [exactCandidate, legacyCandidate],
+      activeOverlays: [exact, legacy],
+      cloudRecords: [cloud("/Library/Synthetic/Renamed.pdf", "7")],
+      completedAt: 1_000,
+      complete: true,
+    });
+
+    expect(result.records.find((record) => record.cloudPath !== null)).toMatchObject({
+      candidateId: exactCandidate.candidateId,
+      differenceKinds: ["renamed"],
+    });
+  });
+
   it("matches global fsId before exact path and preserves explicit differences", () => {
     const exact = candidate("Synthetic/Exact.pdf", "a");
     const renamed = candidate("Synthetic/Old name.pdf", "b");
@@ -131,6 +282,7 @@ describe("CatalogReconciliationService", () => {
     ]);
     const service = new CatalogReconciliationService();
     const result = service.reconcile({
+      authority: authorityFor([prior, other]),
       sourceImportSha256: HASH_A,
       topLevelGroupId: GROUP_A,
       cloudRoot: "/Library/Synthetic",
@@ -173,6 +325,7 @@ describe("CatalogReconciliationService", () => {
   it("never merges the same title at a different relative path", () => {
     const old = candidate("Synthetic/Old/Same.pdf", "a");
     const result = new CatalogReconciliationService().reconcile({
+      authority: authorityFor(),
       sourceImportSha256: HASH_A,
       topLevelGroupId: GROUP_A,
       cloudRoot: "/Library/Synthetic",
@@ -192,6 +345,7 @@ describe("CatalogReconciliationService", () => {
 
   it("rejects an incomplete category, duplicate fsId, and cross-group cloud escape", () => {
     const base = {
+      authority: authorityFor(),
       sourceImportSha256: HASH_A,
       topLevelGroupId: GROUP_A,
       cloudRoot: "/Library/Synthetic",
@@ -224,6 +378,7 @@ describe("CatalogReconciliationService", () => {
     const base = candidate("Synthetic/Missing.pdf", "a");
     const service = new CatalogReconciliationService();
     const result = service.reconcile({
+      authority: authorityFor(),
       sourceImportSha256: HASH_A,
       topLevelGroupId: GROUP_A,
       cloudRoot: "/Library/Synthetic",
@@ -257,6 +412,7 @@ describe("CatalogReconciliationService", () => {
   it("handles root-level TXT items without inventing a top-level folder", () => {
     const root = candidate("Root.pdf", "a", "txt-root-items");
     const result = new CatalogReconciliationService().reconcile({
+      authority: authorityFor(),
       sourceImportSha256: HASH_A,
       topLevelGroupId: "txt-root-items",
       cloudRoot: "/Library",

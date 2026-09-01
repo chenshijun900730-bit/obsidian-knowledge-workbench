@@ -6,9 +6,14 @@ import {
   renderVerificationProgress,
   type VerificationProgressModel,
 } from "../../src/ui/verification-progress";
+import {
+  TEST_HYBRID_ACTIVE_AUTHORITY,
+  TEST_LARGE_BATCH_AUTHORITY,
+} from "../helpers/ui-fixtures";
 
 const progressModel = (locale: WorkbenchLocale): VerificationProgressModel => ({
   active: {
+    ...TEST_HYBRID_ACTIVE_AUTHORITY,
     importedAt: 1,
     pdfCount: 68_959,
     coveredCandidatePdfCount: 11_870,
@@ -21,6 +26,7 @@ const progressModel = (locale: WorkbenchLocale): VerificationProgressModel => ({
     groups: [],
   },
   batch: {
+    ...TEST_LARGE_BATCH_AUTHORITY,
     batchId: "batch-progress",
     status: "scanning",
     stopReason: null,

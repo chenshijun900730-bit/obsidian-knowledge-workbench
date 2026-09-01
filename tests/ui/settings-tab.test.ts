@@ -15,6 +15,11 @@ import {
 import { presentCatalogProgress } from "../../src/ui/catalog-progress-presenter";
 import { EMPTY_RECENT_CLOUD_DIRECTORIES } from "../../src/storage/recent-cloud-directories";
 import { LARGE_CATALOG_AUTO_CHAIN_MAX_SEGMENTS } from "../../src/catalog/hybrid-catalog-types";
+import {
+  TEST_HYBRID_ACTIVE_AUTHORITY,
+  TEST_INACTIVE_HYBRID_EXECUTION,
+  TEST_LARGE_BATCH_AUTHORITY,
+} from "../helpers/ui-fixtures";
 
 const INACTIVE_AUTO_RESUME = {
   autoResumeState: "inactive" as const,
@@ -310,8 +315,10 @@ describe("hybrid catalog settings", () => {
     const importGate = deferred();
     const scanGate = deferred();
     let hybrid: HybridCatalogViewModel = {
+      ...TEST_INACTIVE_HYBRID_EXECUTION,
       status: "ready" as const,
       active: {
+        ...TEST_HYBRID_ACTIVE_AUTHORITY,
         importedAt: 100,
         pdfCount: 21,
         unverifiedCount: 21,
@@ -445,8 +452,10 @@ describe("hybrid catalog settings", () => {
 
   it("keeps a selected category and cloud parent root for the current settings session", () => {
     const hybrid: HybridCatalogViewModel = {
+      ...TEST_INACTIVE_HYBRID_EXECUTION,
       status: "ready",
       active: {
+        ...TEST_HYBRID_ACTIVE_AUTHORITY,
         importedAt: 100,
         pdfCount: 2,
         unverifiedCount: 2,
@@ -512,8 +521,10 @@ describe("hybrid catalog settings", () => {
   it("blocks a selected category used as its own verification root before a request", async () => {
     const scans: Array<Readonly<{ rootPath: string; groupKeys: readonly string[] }>> = [];
     const hybrid: HybridCatalogViewModel = {
+      ...TEST_INACTIVE_HYBRID_EXECUTION,
       status: "ready",
       active: {
+        ...TEST_HYBRID_ACTIVE_AUTHORITY,
         importedAt: 100,
         pdfCount: 2,
         unverifiedCount: 2,
@@ -588,13 +599,16 @@ describe("hybrid catalog settings", () => {
     const calls = { resume: [] as string[], cancel: 0 };
     let notify = (): void => undefined;
     let hybrid: HybridCatalogViewModel = {
+      ...TEST_INACTIVE_HYBRID_EXECUTION,
       status: "paused",
       active: {
+        ...TEST_HYBRID_ACTIVE_AUTHORITY,
         importedAt: 100, pdfCount: 1, unverifiedCount: 1, verifiedCount: 0,
         differenceCount: 0, cloudMissingCount: 0, groupCount: 1,
         verifiedGroupCount: 0, coveredCandidatePdfCount: 0, groups: [group(1)],
       },
       batch: {
+        ...TEST_LARGE_BATCH_AUTHORITY,
         ...INACTIVE_AUTO_RESUME,
         batchId: "batch-settings-paused",
         status: "paused" as const,
@@ -685,13 +699,16 @@ describe("hybrid catalog settings", () => {
 
   it("does not offer resume after a path-not-found verification failure", () => {
     const hybrid: HybridCatalogViewModel = {
+      ...TEST_INACTIVE_HYBRID_EXECUTION,
       status: "partial",
       active: {
+        ...TEST_HYBRID_ACTIVE_AUTHORITY,
         importedAt: 100, pdfCount: 1, unverifiedCount: 1, verifiedCount: 0,
         differenceCount: 0, cloudMissingCount: 0, groupCount: 1,
         verifiedGroupCount: 0, coveredCandidatePdfCount: 0, groups: [group(1)],
       },
       batch: {
+        ...TEST_LARGE_BATCH_AUTHORITY,
         ...INACTIVE_AUTO_RESUME,
         batchId: "batch-settings-partial",
         status: "partial",

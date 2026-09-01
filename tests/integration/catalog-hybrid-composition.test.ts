@@ -67,7 +67,7 @@ describe("normal hybrid catalog composition", () => {
       status: "ready",
       active: { pdfCount: 1, unverifiedCount: 1 },
     });
-    expect(second.hybrid?.snapshot()).toEqual({ status: "empty" });
+    expect(second.hybrid?.snapshot()).toEqual({ status: "empty", executionActive: false });
     expect(requests).toEqual([]);
 
     first.dispose();
@@ -112,7 +112,7 @@ describe("normal hybrid catalog composition", () => {
     expect(runtime.directoryBrowser?.snapshot("/")).toBeNull();
     await runtime.initialize();
     expect(requests).toEqual([]);
-    expect(runtime.hybrid?.snapshot()).toEqual({ status: "empty" });
+    expect(runtime.hybrid?.snapshot()).toEqual({ status: "empty", executionActive: false });
     expect(runtime.snapshot()).toMatchObject({ status: "no-snapshot", source: "none" });
 
     await runtime.hybrid?.previewTxt(inventoryPath);

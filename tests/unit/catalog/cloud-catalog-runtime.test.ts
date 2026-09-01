@@ -18,6 +18,23 @@ import { FakeHybridCatalogRuntime } from "../../fakes/fake-cloud-catalog-runtime
 import type { UnifiedCatalogStorePort } from "../../../src/catalog/hybrid-catalog-ports";
 import type { UnifiedCatalogRecordV1 } from "../../../src/catalog/hybrid-catalog-types";
 import { UnifiedCatalogSearchService } from "../../../src/catalog/unified-catalog-search-service";
+import type { CloudVerificationAuthority } from "../../../src/catalog/cloud-verification-scope";
+
+const SOURCE_HASH = "a".repeat(64);
+const ROOT_HASH = "b".repeat(64);
+
+const scopedAuthority = (): Extract<
+  CloudVerificationAuthority,
+  Readonly<{ kind: "scoped" }>
+> => ({
+  kind: "scoped",
+  scope: {
+    generation: 2,
+    sourceImportSha256: SOURCE_HASH,
+    cloudRootSha256: ROOT_HASH,
+  },
+  legacyAllowlist: null,
+});
 
 const fileRecord = (path: string, fsId: string): CloudCatalogRecord => {
   const filename = path.slice(path.lastIndexOf("/") + 1);
@@ -156,7 +173,7 @@ const unifiedRecord = (input: Readonly<{
 const unifiedPort = (
   records: readonly UnifiedCatalogRecordV1[],
 ): Pick<UnifiedCatalogStorePort, "queryActiveUnified"> => ({
-  queryActiveUnified: async (query) => {
+  queryActiveUnified: async (query, _authority) => {
     const descriptor = {
       schemaVersion: 1,
       snapshotId: "unified-1",
@@ -409,6 +426,173 @@ describe("CloudCatalogRuntimeService", () => {
       hierarchyTags: ["folder/Science"],
     });
     expect(JSON.stringify(runtime.snapshot())).not.toContain("/Library");
+  });
+
+  it("passes a detached verification authority to every unified query and invalidates old results", async () => {
+    const records = [unifiedRecord({
+      catalogId: `txt:${"1".repeat(64)}`,
+      relativePath: "Science/Scoped.pdf",
+      cloudPath: null,
+      verificationStatus: "unverified",
+    })];
+    const authorities: Array<CloudVerificationAuthority | null> = [];
+    const base = unifiedPort(records);
+    const unified: Pick<UnifiedCatalogStorePort, "queryActiveUnified"> = {
+      async queryActiveUnified(query, authority, signal) {
+        authorities.push(structuredClone(authority));
+        return base.queryActiveUnified(query, authority, signal);
+      },
+    };
+    const hybrid = new FakeHybridCatalogRuntime();
+    const runtime = new CloudCatalogRuntimeService(
+      snapshotPort(),
+      actions(),
+      undefined,
+      hybrid,
+      unified,
+    );
+    const authority = scopedAuthority();
+
+    runtime.setVerificationAuthority(authority);
+    (authority.scope as { generation: number }).generation = 99;
+    await runtime.initialize();
+    runtime.setQuery("Scoped");
+    await vi.waitFor(() => { expect(authorities).toHaveLength(2); });
+
+    expect(authorities).toEqual([scopedAuthority(), scopedAuthority()]);
+    expect(hybrid.verificationAuthorities).toEqual([scopedAuthority()]);
+
+    runtime.setVerificationAuthority(null);
+    expect(runtime.snapshot()).toMatchObject({
+      status: "no-snapshot",
+      source: "none",
+      items: [],
+    });
+    await runtime.initialize();
+    expect(authorities.at(-1)).toBeNull();
+  });
+
+  it("keeps its old authority and search view when the hybrid runtime rejects replacement", async () => {
+    class RejectingHybridRuntime extends FakeHybridCatalogRuntime {
+      rejectReplacement = false;
+
+      override setVerificationAuthority(authority: CloudVerificationAuthority | null): void {
+        if (this.rejectReplacement) throw new Error("hybrid-busy");
+        super.setVerificationAuthority(authority);
+      }
+    }
+    const records = [unifiedRecord({
+      catalogId: `txt:${"1".repeat(64)}`,
+      relativePath: "Science/Scoped.pdf",
+      cloudPath: null,
+      verificationStatus: "unverified",
+    })];
+    const authorities: Array<CloudVerificationAuthority | null> = [];
+    const base = unifiedPort(records);
+    const unified: Pick<UnifiedCatalogStorePort, "queryActiveUnified"> = {
+      async queryActiveUnified(query, authority, signal) {
+        authorities.push(structuredClone(authority));
+        return base.queryActiveUnified(query, authority, signal);
+      },
+    };
+    const hybrid = new RejectingHybridRuntime();
+    const runtime = new CloudCatalogRuntimeService(
+      snapshotPort(),
+      actions(),
+      undefined,
+      hybrid,
+      unified,
+    );
+    const authority = scopedAuthority();
+    runtime.setVerificationAuthority(authority);
+    await runtime.initialize();
+    const before = runtime.snapshot();
+
+    hybrid.rejectReplacement = true;
+    expect(() => runtime.setVerificationAuthority(null)).toThrow("hybrid-busy");
+    expect(runtime.snapshot()).toEqual(before);
+    runtime.setQuery("Scoped");
+    await vi.waitFor(() => { expect(authorities).toHaveLength(2); });
+
+    expect(authorities.at(-1)).toEqual(authority);
+    expect(hybrid.verificationAuthorities).toEqual([authority]);
+  });
+
+  it.each([
+    scopedAuthority(),
+    {
+      kind: "legacy-local-only" as const,
+      sourceImportSha256: SOURCE_HASH,
+      activeManifestSha256: "c".repeat(64),
+    },
+  ])("never falls back to an authority-unaware legacy snapshot for $kind authority", async (authority) => {
+    const legacy = fileRecord("/Legacy/Other-account.pdf", "legacy-1");
+    const snapshots = snapshotPort({ descriptor: descriptor(1), records: [legacy] });
+    const loadActive = vi.spyOn(snapshots, "loadActive");
+    const runtime = new CloudCatalogRuntimeService(
+      snapshots,
+      actions(),
+      undefined,
+      undefined,
+      { queryActiveUnified: async () => null },
+    );
+
+    runtime.setVerificationAuthority(authority);
+    await runtime.initialize();
+
+    expect(loadActive).not.toHaveBeenCalled();
+    expect(runtime.snapshot()).toMatchObject({
+      status: "no-snapshot",
+      source: "none",
+      total: 0,
+      items: [],
+    });
+  });
+
+  it("never publishes an old-authority query after authority replacement", async () => {
+    let releaseFirst!: () => void;
+    const firstGate = new Promise<void>((resolve) => { releaseFirst = resolve; });
+    const oldPort = unifiedPort([unifiedRecord({
+      catalogId: `txt:${"1".repeat(64)}`,
+      relativePath: "Science/Old.pdf",
+      cloudPath: null,
+      verificationStatus: "unverified",
+    })]);
+    const currentPort = unifiedPort([unifiedRecord({
+      catalogId: `txt:${"2".repeat(64)}`,
+      relativePath: "Science/Current.pdf",
+      cloudPath: null,
+      verificationStatus: "unverified",
+    })]);
+    let queryCount = 0;
+    const unified: Pick<UnifiedCatalogStorePort, "queryActiveUnified"> = {
+      async queryActiveUnified(query, authority, signal) {
+        queryCount += 1;
+        if (queryCount === 1) {
+          await firstGate;
+          return oldPort.queryActiveUnified(query, authority, signal);
+        }
+        return currentPort.queryActiveUnified(query, authority, signal);
+      },
+    };
+    const runtime = new CloudCatalogRuntimeService(
+      snapshotPort(),
+      actions(),
+      undefined,
+      undefined,
+      unified,
+    );
+
+    runtime.setVerificationAuthority(scopedAuthority());
+    const oldInitialization = runtime.initialize();
+    await vi.waitFor(() => { expect(queryCount).toBe(1); });
+    runtime.setVerificationAuthority(null);
+    await runtime.initialize();
+    expect(runtime.snapshot().items.map((item) => item.filename)).toEqual(["Current.pdf"]);
+
+    releaseFirst();
+    await oldInitialization;
+    expect(runtime.snapshot().items.map((item) => item.filename)).toEqual(["Current.pdf"]);
   });
 
   it("filters unified state locally and rejects cloud-path copy for candidates", async () => {

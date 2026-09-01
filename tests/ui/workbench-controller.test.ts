@@ -20,6 +20,224 @@ import type {
   CloudDirectoryPickerPresenter,
   CloudDirectoryPickerRequest,
 } from "../../src/ui/cloud-directory-picker";
+import { deriveCloudVerificationScope } from "../../src/catalog/cloud-verification-scope";
+
+const SOURCE_HASH = "a".repeat(64);
+
+describe("WorkbenchController catalog authority bootstrap", () => {
+  it("installs a detached scoped authority before catalog initialization", async () => {
+    const hybrid = new FakeHybridCatalogRuntime();
+    const catalog = new FakeCloudCatalogRuntime({}, undefined, hybrid);
+    const fixture = controllerFixture({ catalog });
+    const binding = {
+      schemaVersion: 1 as const,
+      path: "/Synthetic Library",
+      sourceImportSha256: SOURCE_HASH,
+      verificationGeneration: 3,
+    };
+    const scope = deriveCloudVerificationScope(binding)!;
+    fixture.store.setSettingsForTest({
+      ...fixture.store.settings(),
+      boundCloudLibrary: binding,
+      cloudVerificationGeneration: 3,
+      legacyVerificationAdoption: {
+        schemaVersion: 1,
+        state: "adopted",
+        verificationGeneration: 3,
+        sourceImportSha256: SOURCE_HASH,
+        cloudRootSha256: scope.cloudRootSha256,
+        candidate: {
+          importId: "import-1",
+          manifestSha256: "b".repeat(64),
+          descriptorSha256: "c".repeat(64),
+        },
+        overlays: [],
+        unified: null,
+        resumableBatch: null,
+      },
+    });
+
+    await fixture.controller.initializeCatalog();
+
+    expect(catalog.verificationAuthorities).toEqual([{
+      kind: "scoped",
+      scope,
+      legacyAllowlist: {
+        candidate: {
+          importId: "import-1",
+          manifestSha256: "b".repeat(64),
+          descriptorSha256: "c".repeat(64),
+        },
+        overlays: [],
+        unified: null,
+        resumableBatch: null,
+      },
+    }]);
+    expect(hybrid.prepareLegacyLocalAuthorityCalls).toBe(0);
+    expect(catalog.initializeCalls).toBe(1);
+
+    const replacementBinding = {
+      ...binding,
+      path: "/Replacement Library",
+      verificationGeneration: 4,
+    };
+    fixture.store.setSettingsForTest({
+      ...fixture.store.settings(),
+      boundCloudLibrary: replacementBinding,
+      cloudVerificationGeneration: 4,
+    });
+    await fixture.controller.initializeCatalog();
+    expect(catalog.verificationAuthorities.at(-1)).toEqual({
+      kind: "scoped",
+      scope: deriveCloudVerificationScope(replacementBinding),
+      legacyAllowlist: null,
+    });
+    expect(hybrid.prepareLegacyLocalAuthorityCalls).toBe(0);
+    fixture.controller.dispose();
+  });
+
+  it.each([
+    ["generation", { verificationGeneration: 2 }],
+    ["source", { sourceImportSha256: "9".repeat(64) }],
+    ["root", { cloudRootSha256: "8".repeat(64) }],
+  ] as const)("keeps an adopted %s mismatch history-only", async (_label, mismatch) => {
+    const hybrid = new FakeHybridCatalogRuntime();
+    const catalog = new FakeCloudCatalogRuntime({}, undefined, hybrid);
+    const fixture = controllerFixture({ catalog });
+    const binding = {
+      schemaVersion: 1 as const,
+      path: "/Synthetic Library",
+      sourceImportSha256: SOURCE_HASH,
+      verificationGeneration: 3,
+    };
+    const scope = deriveCloudVerificationScope(binding)!;
+    fixture.store.setSettingsForTest({
+      ...fixture.store.settings(),
+      boundCloudLibrary: binding,
+      cloudVerificationGeneration: 3,
+      legacyVerificationAdoption: {
+        schemaVersion: 1,
+        state: "adopted",
+        verificationGeneration: 3,
+        sourceImportSha256: SOURCE_HASH,
+        cloudRootSha256: scope.cloudRootSha256,
+        candidate: {
+          importId: "import-1",
+          manifestSha256: "b".repeat(64),
+          descriptorSha256: "c".repeat(64),
+        },
+        overlays: [],
+        unified: null,
+        resumableBatch: null,
+        ...mismatch,
+      },
+    });
+
+    await fixture.controller.initializeCatalog();
+
+    const expectedAuthority = {
+      kind: "scoped" as const,
+      scope,
+      legacyAllowlist: null,
+    };
+    expect(catalog.verificationAuthorities).toEqual([expectedAuthority]);
+    expect(hybrid.verificationAuthorities).toEqual([expectedAuthority]);
+    expect(hybrid.prepareLegacyLocalAuthorityCalls).toBe(0);
+    expect(catalog.initializeCalls).toBe(1);
+    fixture.controller.dispose();
+  });
+
+  it("awaits validated legacy-local authority before initialization and otherwise installs null", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    class DeferredLegacyHybrid extends FakeHybridCatalogRuntime {
+      override async prepareLegacyLocalVerificationAuthority() {
+        this.prepareLegacyLocalAuthorityCalls += 1;
+        await gate;
+        return {
+          kind: "legacy-local-only" as const,
+          sourceImportSha256: SOURCE_HASH,
+          activeManifestSha256: "d".repeat(64),
+        };
+      }
+    }
+    const hybrid = new DeferredLegacyHybrid();
+    const catalog = new FakeCloudCatalogRuntime({}, undefined, hybrid);
+    const fixture = controllerFixture({ catalog });
+    fixture.store.setSettingsForTest({
+      ...fixture.store.settings(),
+      legacyVerificationAdoption: { schemaVersion: 1, state: "pending" },
+    });
+
+    const initializing = fixture.controller.initializeCatalog();
+    expect(hybrid.prepareLegacyLocalAuthorityCalls).toBe(1);
+    expect(catalog.initializeCalls).toBe(0);
+    release();
+    await initializing;
+
+    expect(catalog.verificationAuthorities).toEqual([{
+      kind: "legacy-local-only",
+      sourceImportSha256: SOURCE_HASH,
+      activeManifestSha256: "d".repeat(64),
+    }]);
+    expect(catalog.initializeCalls).toBe(1);
+
+    fixture.store.setSettingsForTest({
+      ...fixture.store.settings(),
+      legacyVerificationAdoption: { schemaVersion: 1, state: "none" },
+    });
+    await fixture.controller.initializeCatalog();
+    expect(catalog.verificationAuthorities.at(-1)).toBeNull();
+    expect(catalog.initializeCalls).toBe(2);
+    fixture.controller.dispose();
+  });
+
+  it("never installs a stale local authority when settings change during bootstrap", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    class DeferredLegacyHybrid extends FakeHybridCatalogRuntime {
+      override async prepareLegacyLocalVerificationAuthority() {
+        await gate;
+        return {
+          kind: "legacy-local-only" as const,
+          sourceImportSha256: SOURCE_HASH,
+          activeManifestSha256: "d".repeat(64),
+        };
+      }
+    }
+    const hybrid = new DeferredLegacyHybrid();
+    const catalog = new FakeCloudCatalogRuntime({}, undefined, hybrid);
+    const fixture = controllerFixture({ catalog });
+    fixture.store.setSettingsForTest({
+      ...fixture.store.settings(),
+      legacyVerificationAdoption: { schemaVersion: 1, state: "pending" },
+    });
+
+    const initializing = fixture.controller.initializeCatalog();
+    const binding = {
+      schemaVersion: 1 as const,
+      path: "/Replacement Library",
+      sourceImportSha256: SOURCE_HASH,
+      verificationGeneration: 1,
+    };
+    fixture.store.setSettingsForTest({
+      ...fixture.store.settings(),
+      boundCloudLibrary: binding,
+      cloudVerificationGeneration: 1,
+      legacyVerificationAdoption: { schemaVersion: 1, state: "none" },
+    });
+    release();
+    await initializing;
+
+    expect(catalog.verificationAuthorities).toEqual([{
+      kind: "scoped",
+      scope: deriveCloudVerificationScope(binding),
+      legacyAllowlist: null,
+    }]);
+    expect(catalog.initializeCalls).toBe(1);
+    fixture.controller.dispose();
+  });
+});
 
 const INACTIVE_AUTO_RESUME = {
   autoResumeState: "inactive" as const,

@@ -10,13 +10,53 @@ import type { CloudDirectoryLocatorRuntime } from "../../src/catalog/cloud-direc
 import type { CatalogScanConfirmationPresenter } from "../../src/ui/catalog-scan-confirmation-modal";
 import type { HybridCatalogRuntime } from "../../src/catalog/hybrid-catalog-runtime";
 import type {
+  HybridCatalogActiveSummary,
   HybridCatalogVerificationInput,
   HybridCatalogViewModel,
+  LargeCatalogBatchSummary,
 } from "../../src/catalog/hybrid-catalog-runtime";
 import type {
   CatalogDifferenceKind,
   CatalogVerificationStatus,
 } from "../../src/catalog/hybrid-catalog-types";
+import type {
+  CloudVerificationAuthority,
+  CloudVerificationScope,
+} from "../../src/catalog/cloud-verification-scope";
+import type { LegacyVerificationAdoptionV1 } from "../../src/storage/legacy-verification-adoption";
+
+type FakeHybridCatalogViewModel = Omit<
+  Partial<HybridCatalogViewModel>,
+  "active" | "batch" | "status"
+> & Readonly<{
+  status: HybridCatalogViewModel["status"];
+  active?: Partial<HybridCatalogActiveSummary>;
+  batch?: Partial<LargeCatalogBatchSummary> & Pick<LargeCatalogBatchSummary, "status">;
+}>;
+
+const normalizeHybridViewModel = (
+  value: FakeHybridCatalogViewModel,
+): HybridCatalogViewModel => {
+  const normalized: Record<string, unknown> = {
+    executionActive: false,
+    ...structuredClone(value),
+  };
+  if (value.active !== undefined) {
+    normalized.active = {
+      sourceImportSha256: "0".repeat(64),
+      legacyArtifactSetSha256: null,
+      ...structuredClone(value.active),
+    };
+  }
+  if (value.batch !== undefined) {
+    normalized.batch = {
+      verificationScope: null,
+      legacyPromotionRequired: false,
+      ...structuredClone(value.batch),
+    };
+  }
+  return normalized as unknown as HybridCatalogViewModel;
+};
 
 const emptyViewModel = (): CloudCatalogViewModel => ({
   status: "no-snapshot",
@@ -52,6 +92,7 @@ export class FakeCloudCatalogRuntime implements CloudCatalogRuntime {
   openBaiduCalls = 0;
   initializeCalls = 0;
   disposeCalls = 0;
+  readonly verificationAuthorities: Array<CloudVerificationAuthority | null> = [];
   private readonly listeners = new Set<() => void>();
   private viewModel: CloudCatalogViewModel;
 
@@ -67,6 +108,10 @@ export class FakeCloudCatalogRuntime implements CloudCatalogRuntime {
   }
 
   async initialize(): Promise<void> { this.initializeCalls += 1; }
+  setVerificationAuthority(authority: CloudVerificationAuthority | null): void {
+    this.verificationAuthorities.push(structuredClone(authority));
+    this.hybrid?.setVerificationAuthority(authority);
+  }
   snapshot(): CloudCatalogViewModel { return structuredClone(this.viewModel); }
   subscribe(listener: () => void): () => void {
     this.listeners.add(listener);
@@ -173,15 +218,32 @@ export class FakeHybridCatalogRuntime implements HybridCatalogRuntime {
   readonly startInputs: HybridCatalogVerificationInput[] = [];
   readonly resumeRoots: string[] = [];
   readonly resumeInputs: HybridCatalogVerificationInput[] = [];
+  readonly verificationAuthorities: Array<CloudVerificationAuthority | null> = [];
+  readonly preparedAdoptionScopes: CloudVerificationScope[] = [];
+  readonly revalidatedAdoptions: Array<LegacyVerificationAdoptionV1 | null> = [];
+  prepareLegacyLocalAuthorityCalls = 0;
+  rebuildVerificationProjectionCalls = 0;
   cancelCalls = 0;
   initializeCalls = 0;
   disposeCalls = 0;
   beforeImport: (() => void) | undefined;
   beforeStart: (() => void) | undefined;
   beforeResume: (() => void) | undefined;
+  legacyLocalAuthority: Extract<
+    CloudVerificationAuthority,
+    Readonly<{ kind: "legacy-local-only" }>
+  > | null = null;
+  preparedAdoption: LegacyVerificationAdoptionV1 | null = null;
   private readonly listeners = new Set<() => void>();
+  private viewModel: HybridCatalogViewModel;
 
-  constructor(private viewModel: HybridCatalogViewModel = { status: "empty" }) {}
+  constructor(
+    viewModel: FakeHybridCatalogViewModel = {
+      status: "empty",
+    },
+  ) {
+    this.viewModel = normalizeHybridViewModel(viewModel);
+  }
 
   async initialize(): Promise<void> { this.initializeCalls += 1; }
   snapshot(): HybridCatalogViewModel { return structuredClone(this.viewModel); }
@@ -193,6 +255,30 @@ export class FakeHybridCatalogRuntime implements HybridCatalogRuntime {
   async importTxt(path: string): Promise<void> {
     this.beforeImport?.();
     this.importPaths.push(path);
+  }
+  setVerificationAuthority(authority: CloudVerificationAuthority | null): void {
+    this.verificationAuthorities.push(structuredClone(authority));
+  }
+  async prepareLegacyLocalVerificationAuthority(): Promise<Extract<
+    CloudVerificationAuthority,
+    Readonly<{ kind: "legacy-local-only" }>
+  > | null> {
+    this.prepareLegacyLocalAuthorityCalls += 1;
+    return structuredClone(this.legacyLocalAuthority);
+  }
+  async prepareLegacyVerificationAdoption(
+    scope: CloudVerificationScope,
+  ): Promise<LegacyVerificationAdoptionV1 | null> {
+    this.preparedAdoptionScopes.push(structuredClone(scope));
+    return structuredClone(this.preparedAdoption);
+  }
+  async revalidatePreparedLegacyAdoption(
+    prepared: LegacyVerificationAdoptionV1 | null,
+  ): Promise<void> {
+    this.revalidatedAdoptions.push(structuredClone(prepared));
+  }
+  async rebuildVerificationProjection(): Promise<void> {
+    this.rebuildVerificationProjectionCalls += 1;
   }
   async startLargeVerification(input: HybridCatalogVerificationInput): Promise<void> {
     this.beforeStart?.();
@@ -208,8 +294,10 @@ export class FakeHybridCatalogRuntime implements HybridCatalogRuntime {
     this.disposeCalls += 1;
     this.listeners.clear();
   }
-  setSnapshot(value: HybridCatalogViewModel): void {
-    this.viewModel = structuredClone(value);
+  setSnapshot(
+    value: FakeHybridCatalogViewModel,
+  ): void {
+    this.viewModel = normalizeHybridViewModel(value);
     for (const listener of this.listeners) listener();
   }
 }

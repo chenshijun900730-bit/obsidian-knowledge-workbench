@@ -208,7 +208,7 @@ export function createKnowledgeWorkbenchPluginClass(runtime: RuntimeComposition)
       this.recoveryAudit = recoveryAudit;
       this.recoveryReadiness = recoveryReadiness;
 
-      startCatalogInitialization(catalog, (code) => {
+      startCatalogInitialization(controller, (code) => {
         if (this.lifecycle.owns(epoch)) controller.reportCatalogError(code);
       });
 

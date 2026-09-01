@@ -47,7 +47,7 @@ describe("large catalog streaming", () => {
       },
     });
     writer = undefined as never;
-    await new UnifiedCatalogProjectionService(adapter, { now: () => 2 }).rebuild();
+    await new UnifiedCatalogProjectionService(adapter, { now: () => 2 }).rebuild(null);
     const forceGc = process.getBuiltinModule("vm").runInThisContext(
       "typeof gc === 'function' ? gc : undefined",
     ) as (() => void) | undefined;
@@ -65,7 +65,7 @@ describe("large catalog streaming", () => {
       includeCloudMissing: false,
       offset: 0,
       limit: 50,
-    });
+    }, null);
     const finishedAt = performance.now();
     const afterUnifiedUsage = process.memoryUsage();
     const afterUnified = afterUnifiedUsage.rss;

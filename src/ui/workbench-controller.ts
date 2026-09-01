@@ -57,6 +57,13 @@ import {
   EMPTY_RECENT_CLOUD_DIRECTORIES,
   rememberRecentCloudDirectory,
 } from "../storage/recent-cloud-directories";
+import {
+  deriveCloudVerificationScope,
+  type CloudVerificationAuthority,
+  type CloudVerificationScope,
+  type LegacyVerificationAllowlist,
+} from "../catalog/cloud-verification-scope";
+import type { LegacyVerificationAdoptionV1 } from "../storage/legacy-verification-adoption";
 
 export interface AiSettingsInput {
   readonly enabled: boolean;
@@ -245,6 +252,55 @@ const verificationValidationCode = (
   return undefined;
 };
 
+const legacyAllowlistFor = (
+  adoption: LegacyVerificationAdoptionV1,
+  scope: CloudVerificationScope,
+): LegacyVerificationAllowlist | null => {
+  if (
+    adoption.state !== "adopted"
+    || adoption.verificationGeneration !== scope.generation
+    || adoption.sourceImportSha256 !== scope.sourceImportSha256
+    || adoption.cloudRootSha256 !== scope.cloudRootSha256
+  ) return null;
+  return {
+    candidate: { ...adoption.candidate },
+    overlays: adoption.overlays.map((overlay) => ({ ...overlay })),
+    unified: adoption.unified === null ? null : { ...adoption.unified },
+    resumableBatch: adoption.resumableBatch === null
+      ? null
+      : { ...adoption.resumableBatch },
+  };
+};
+
+const scopedAuthorityForSettings = (
+  settings: PluginSettings,
+): Extract<CloudVerificationAuthority, Readonly<{ kind: "scoped" }>> | null => {
+  const binding = settings.boundCloudLibrary;
+  if (
+    binding === null
+    || settings.cloudVerificationGeneration < 1
+    || binding.verificationGeneration !== settings.cloudVerificationGeneration
+  ) return null;
+  const scope = deriveCloudVerificationScope(binding);
+  if (scope === null) return null;
+  if (
+    settings.legacyVerificationAdoption.state === "pending"
+    || settings.legacyVerificationAdoption.state === "invalid"
+  ) return null;
+  const legacyAllowlist = legacyAllowlistFor(settings.legacyVerificationAdoption, scope);
+  return {
+    kind: "scoped",
+    scope: { ...scope },
+    legacyAllowlist,
+  };
+};
+
+const verificationAuthoritySettingsKey = (settings: PluginSettings): string => JSON.stringify({
+  boundCloudLibrary: settings.boundCloudLibrary,
+  cloudVerificationGeneration: settings.cloudVerificationGeneration,
+  legacyVerificationAdoption: settings.legacyVerificationAdoption,
+});
+
 export class WorkbenchController {
   private readonly listeners = new Set<() => void>();
   private readonly unsubscribeIndex: () => void;
@@ -374,6 +430,42 @@ export class WorkbenchController {
       this.listeners.delete(listener);
       if (this.listeners.size === 0 && this.center === null) this.cancelProjectionSchedule();
     };
+  }
+
+  /**
+   * Performs the local authority bootstrap before the catalog runtime may initialize
+   * its connection or issue any query.
+   */
+  async initializeCatalog(): Promise<void> {
+    if (this.disposed) return;
+    const hybrid = this.dependencies.catalog.hybrid;
+    let settings = this.dependencies.store.settings();
+    let authority: CloudVerificationAuthority | null = scopedAuthorityForSettings(settings);
+    if (
+      authority === null
+      && settings.boundCloudLibrary === null
+      && settings.cloudVerificationGeneration === 0
+      && settings.legacyVerificationAdoption.state === "pending"
+      && hybrid !== undefined
+    ) {
+      const expectedSettingsKey = verificationAuthoritySettingsKey(settings);
+      authority = await hybrid.prepareLegacyLocalVerificationAuthority();
+      if (this.disposed) return;
+      settings = this.dependencies.store.settings();
+      if (verificationAuthoritySettingsKey(settings) !== expectedSettingsKey) {
+        authority = scopedAuthorityForSettings(settings);
+        if (
+          authority === null
+          && settings.boundCloudLibrary === null
+          && settings.cloudVerificationGeneration === 0
+          && settings.legacyVerificationAdoption.state === "pending"
+        ) {
+          throw new Error("catalog-unavailable");
+        }
+      }
+    }
+    this.installVerificationAuthority(authority);
+    if (!this.disposed) await this.dependencies.catalog.initialize();
   }
 
   selectTab(tab: WorkbenchTab): void {
@@ -2038,6 +2130,14 @@ export class WorkbenchController {
     this.aiConfigurationGeneration += 1;
     if (clearSecret) this.#sessionAiSecret = null;
     this.clearAiDisplay();
+  }
+
+  private installVerificationAuthority(authority: CloudVerificationAuthority | null): void {
+    if (this.dependencies.catalog.setVerificationAuthority !== undefined) {
+      this.dependencies.catalog.setVerificationAuthority(authority);
+      return;
+    }
+    this.dependencies.catalog.hybrid?.setVerificationAuthority(authority);
   }
 
   private emit(): void {

@@ -1,3 +1,6 @@
+import type { CloudCatalogRecord } from "./catalog-types";
+import type { CloudVerificationScope } from "./cloud-verification-scope";
+
 export interface CatalogTxtImportBudget {
   readonly maxBytes: number;
   readonly maxNonEmptyLineCount: number;
@@ -114,7 +117,7 @@ export interface CatalogDifferenceRecordV1 {
   readonly acknowledgedAt: number | null;
 }
 
-export interface UnifiedCatalogDescriptor {
+export interface UnifiedCatalogDescriptorV1 {
   readonly schemaVersion: 1;
   readonly snapshotId: string;
   readonly sourceImportSha256: string;
@@ -125,7 +128,21 @@ export interface UnifiedCatalogDescriptor {
   readonly differencesSha256: string;
 }
 
-export interface CatalogOverlayDescriptor {
+export interface UnifiedCatalogDescriptorV2 {
+  readonly schemaVersion: 2;
+  readonly snapshotId: string;
+  readonly sourceImportSha256: string;
+  readonly verificationScope: CloudVerificationScope | null;
+  readonly completedAt: number;
+  readonly recordCount: number;
+  readonly differenceCount: number;
+  readonly catalogSha256: string;
+  readonly differencesSha256: string;
+}
+
+export type UnifiedCatalogDescriptor = UnifiedCatalogDescriptorV1 | UnifiedCatalogDescriptorV2;
+
+export interface CatalogOverlayDescriptorV1 {
   readonly schemaVersion: 1;
   readonly overlayId: string;
   readonly sourceImportSha256: string;
@@ -139,6 +156,24 @@ export interface CatalogOverlayDescriptor {
   readonly supersededSha256: string;
 }
 
+export interface CatalogOverlayDescriptorV2 {
+  readonly schemaVersion: 2;
+  readonly overlayId: string;
+  readonly sourceImportSha256: string;
+  readonly verificationGeneration: number;
+  readonly cloudRootSha256: string;
+  readonly topLevelGroupId: string;
+  readonly completedAt: number;
+  readonly recordCount: number;
+  readonly differenceCount: number;
+  readonly supersededCount: number;
+  readonly recordsSha256: string;
+  readonly differencesSha256: string;
+  readonly supersededSha256: string;
+}
+
+export type CatalogOverlayDescriptor = CatalogOverlayDescriptorV1 | CatalogOverlayDescriptorV2;
+
 export interface ActiveCatalogOverlay {
   readonly descriptor: CatalogOverlayDescriptor;
   readonly records: readonly UnifiedCatalogRecordV1[];
@@ -147,6 +182,7 @@ export interface ActiveCatalogOverlay {
 }
 
 export interface CatalogReconciliationResult {
+  readonly verificationScope: CloudVerificationScope;
   readonly sourceImportSha256: string;
   readonly topLevelGroupId: string;
   readonly completedAt: number;
@@ -232,4 +268,124 @@ export interface LargeCatalogRunReceiptV3 {
   readonly ignoredFileCount: number;
   readonly downloadedPdfBytes: 0;
   readonly errorCodeCounts: Readonly<Partial<Record<LargeCatalogErrorCode, number>>>;
+}
+
+export interface LargeCatalogLatestReceiptV4 {
+  readonly runOrdinal: number;
+  readonly receiptSha256: string;
+}
+
+export interface LargeCatalogBatchCheckpointV4 {
+  readonly schemaVersion: 4;
+  readonly batchId: string;
+  readonly verificationScope: CloudVerificationScope;
+  readonly legacyCheckpointSha256: string | null;
+  readonly latestReceipt: LargeCatalogLatestReceiptV4 | null;
+  readonly startedAt: number;
+  readonly runOrdinal: number;
+  readonly budget: LargeCatalogRunBudget;
+  readonly selectedGroupCount: number;
+  readonly currentGroupIndex: number;
+  readonly groups: readonly LargeCatalogBatchGroupV3[];
+  readonly pdfCount: number;
+  readonly directoryCount: number;
+  readonly ignoredFileCount: number;
+  readonly listRequestCount: number;
+  readonly cumulativeListRequestCount: number;
+  readonly status: LargeCatalogBatchStatus;
+  readonly stopReason: LargeCatalogStopReason | null;
+  readonly errorCodeCounts: Readonly<Partial<Record<LargeCatalogErrorCode, number>>>;
+}
+
+export type LargeCatalogBatchCheckpoint =
+  | LargeCatalogBatchCheckpointV3
+  | LargeCatalogBatchCheckpointV4;
+
+export interface LargeCatalogRunReceiptV4 {
+  readonly schemaVersion: 4;
+  readonly batchId: string;
+  readonly runOrdinal: number;
+  readonly verificationScope: CloudVerificationScope;
+  readonly legacyCheckpointSha256: string | null;
+  readonly status: "complete" | "paused" | "partial";
+  readonly stopReason: LargeCatalogStopReason;
+  readonly startedAt: number;
+  readonly endedAt: number;
+  readonly durationMs: number;
+  readonly budget: LargeCatalogRunBudget;
+  readonly selectedGroupCount: number;
+  readonly completedGroupCount: number;
+  readonly listRequestCount: number;
+  readonly cumulativeListRequestCount: number;
+  readonly directoryCount: number;
+  readonly pdfCount: number;
+  readonly ignoredFileCount: number;
+  readonly downloadedPdfBytes: 0;
+  readonly errorCodeCounts: Readonly<Partial<Record<LargeCatalogErrorCode, number>>>;
+}
+
+export type LargeCatalogRunReceipt = LargeCatalogRunReceiptV3 | LargeCatalogRunReceiptV4;
+
+export interface LargeCatalogPageIdentity {
+  readonly fsId: string;
+  readonly path: string;
+}
+
+export interface LargeCatalogBatchPageEnvelopeV3 {
+  readonly schemaVersion: 3;
+  readonly pageKey: string;
+  readonly verificationScope: CloudVerificationScope;
+  readonly legacyCheckpointSha256: string | null;
+  readonly priorCheckpointSha256: string;
+  readonly nextCheckpointSha256: string;
+  readonly records: readonly CloudCatalogRecord[];
+  readonly identities: readonly LargeCatalogPageIdentity[];
+  readonly nextCheckpoint: LargeCatalogBatchCheckpointV4;
+}
+
+export type LargeCatalogCheckpointSlot = "a" | "b";
+
+export interface LargeCatalogActiveCheckpointPointerV1 {
+  readonly schemaVersion: 1;
+  readonly batchId: string;
+  readonly activeSlot: LargeCatalogCheckpointSlot;
+  readonly activeCheckpointSha256: string;
+  readonly legacyCheckpointSha256: string | null;
+  readonly verificationScope: CloudVerificationScope;
+}
+
+export interface LargeCatalogBatchStagingManifestV1 {
+  readonly schemaVersion: 1;
+  readonly batchId: string;
+  readonly nonce: string;
+  readonly activeCheckpointSha256: string;
+  readonly activePointerSha256: string;
+  readonly verificationScope: CloudVerificationScope;
+}
+
+export interface LargeCatalogBatchClaimV1 {
+  readonly schemaVersion: 1;
+  readonly batchId: string;
+  readonly nonce: string;
+  readonly stagingManifestSha256: string;
+}
+
+export type LargeCatalogBatchOperationJournalState = "prepared" | "settled";
+export type LargeCatalogBatchOperationKind = "page" | "finalize";
+
+export interface LargeCatalogBatchOperationJournalV1 {
+  readonly schemaVersion: 1;
+  readonly state: LargeCatalogBatchOperationJournalState;
+  readonly operationId: string;
+  readonly operationKind: LargeCatalogBatchOperationKind;
+  readonly batchId: string;
+  readonly verificationScope: CloudVerificationScope;
+  readonly legacyCheckpointSha256: string | null;
+  readonly runOrdinal: number;
+  readonly priorActivePointerSha256: string;
+  readonly targetSlot: LargeCatalogCheckpointSlot;
+  readonly targetCheckpointSha256: string;
+  readonly pageKey: string | null;
+  readonly pageEnvelopeSha256: string | null;
+  readonly receiptSha256: string | null;
 }

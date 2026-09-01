@@ -10,12 +10,18 @@ import {
   type CandidateCatalogDescriptor,
   type CatalogTxtImportSummary,
   type LargeCatalogBatchCheckpointV3,
+  type LargeCatalogBatchCheckpointV4,
   type TxtCandidateRecordV1,
   type UnifiedCatalogRecordV1,
 } from "../../../src/catalog/hybrid-catalog-types";
 import type {
   HybridCatalogActivationSnapshot,
+  LoadedLargeCatalogBatchV4,
 } from "../../../src/catalog/hybrid-catalog-ports";
+import type {
+  CloudVerificationAuthority,
+  CloudVerificationScope,
+} from "../../../src/catalog/cloud-verification-scope";
 import type {
   LargeCatalogVerificationSummary,
   LargeCatalogVerificationSegmentInput,
@@ -25,8 +31,22 @@ import type {
 
 const HASH_A = "a".repeat(64);
 const HASH_B = "b".repeat(64);
+const HASH_D = "d".repeat(64);
 const GROUP_A = `group:${"1".repeat(64)}`;
 const GROUP_B = `group:${"2".repeat(64)}`;
+const DEFAULT_SCOPE: CloudVerificationScope = {
+  generation: 1,
+  sourceImportSha256: HASH_A,
+  cloudRootSha256: HASH_D,
+};
+
+const authority = (
+  resumableBatch: Extract<CloudVerificationAuthority, { kind: "scoped" }>["legacyAllowlist"] = null,
+): CloudVerificationAuthority => ({
+  kind: "scoped",
+  scope: { ...DEFAULT_SCOPE },
+  legacyAllowlist: resumableBatch,
+});
 
 const summary = (sourceSha256 = HASH_A): CatalogTxtImportSummary => ({
   sourceSha256,
@@ -121,15 +141,75 @@ const pausedCheckpoint = (): LargeCatalogBatchCheckpointV3 => ({
   errorCodeCounts: {},
 });
 
+const twoGroupPausedCheckpoint = (): LargeCatalogBatchCheckpointV3 => {
+  const first = pausedCheckpoint();
+  return {
+    ...first,
+    selectedGroupCount: 2,
+    groups: [
+      first.groups[0]!,
+      {
+        groupKey: GROUP_B,
+        rootRelativePath: "History",
+        mode: "recursive",
+        status: "pending",
+        pending: [{ relativePath: "", start: 0 }],
+        committedPageKeys: [],
+        completedDirectoryCount: 0,
+      },
+    ],
+  };
+};
+
+const scopedCheckpoint = (
+  overrides: Partial<LargeCatalogBatchCheckpointV4> = {},
+): LargeCatalogBatchCheckpointV4 => {
+  const legacy = pausedCheckpoint();
+  return {
+    schemaVersion: 4,
+    batchId: legacy.batchId,
+    verificationScope: { ...DEFAULT_SCOPE },
+    legacyCheckpointSha256: null,
+    latestReceipt: null,
+    startedAt: legacy.startedAt,
+    runOrdinal: legacy.runOrdinal,
+    budget: legacy.budget,
+    selectedGroupCount: legacy.selectedGroupCount,
+    currentGroupIndex: legacy.currentGroupIndex,
+    groups: legacy.groups,
+    pdfCount: legacy.pdfCount,
+    directoryCount: legacy.directoryCount,
+    ignoredFileCount: legacy.ignoredFileCount,
+    listRequestCount: legacy.listRequestCount,
+    cumulativeListRequestCount: legacy.cumulativeListRequestCount,
+    status: legacy.status,
+    stopReason: legacy.stopReason,
+    errorCodeCounts: legacy.errorCodeCounts,
+    ...overrides,
+  };
+};
+
+const promotedBatch = (): LoadedLargeCatalogBatchV4 => ({
+  kind: "scoped-v4",
+  checkpoint: scopedCheckpoint({ legacyCheckpointSha256: HASH_B }),
+  checkpointSha256: "7".repeat(64),
+  records: [],
+  identities: [],
+  identitiesComplete: true,
+});
+
 const verificationSummary = (
   overrides: Partial<LargeCatalogVerificationSummary> = {},
 ): LargeCatalogVerificationSummary => {
   const base: LargeCatalogVerificationSummary = {
     batchId: "batch-new",
+    verificationScope: { ...DEFAULT_SCOPE },
+    legacyPromotionRequired: false,
     status: "paused",
     stopReason: "pdf-limit",
     runOrdinal: 1,
     selectedGroupCount: 1,
+    selectedGroupKeys: [GROUP_A],
     completedGroupCount: 0,
     remainingGroupCount: 1,
     currentGroupIndex: 0,
@@ -179,7 +259,8 @@ const verificationProgressEvent = (
 
 const fixture = (options: Readonly<{
   previewSummaries?: readonly CatalogTxtImportSummary[];
-  latest?: LargeCatalogBatchCheckpointV3 | null;
+  latest?: LargeCatalogBatchCheckpointV3 | LargeCatalogBatchCheckpointV4 | null;
+  verificationAuthority?: CloudVerificationAuthority | null;
   openError?: Error;
   importPromise?: Promise<CandidateCatalogDescriptor>;
   projectPromise?: Promise<void>;
@@ -187,6 +268,9 @@ const fixture = (options: Readonly<{
   verificationResults?: readonly LargeCatalogVerificationSummary[];
   verificationStarts?: readonly LargeCatalogVerificationSummary[];
   verificationRecoveries?: readonly boolean[];
+  verificationStartPromise?: Promise<LargeCatalogVerificationSummary>;
+  verificationRunPromise?: Promise<LargeCatalogVerificationSummary>;
+  promotionPromise?: Promise<LoadedLargeCatalogBatchV4>;
 }> = {}) => {
   const candidates = [
     candidate("txt:root", "Root.pdf", "txt-root-items"),
@@ -230,6 +314,24 @@ const fixture = (options: Readonly<{
   };
   const openCalls: string[] = [];
   const previewSummaries = [...(options.previewSummaries ?? [summary(), summary()])];
+  const latestCheckpointSha256 = HASH_B;
+  const selectedAuthority = options.verificationAuthority === undefined
+    ? authority(options.latest?.schemaVersion === 3 ? {
+      candidate: {
+        importId: "import-1",
+        manifestSha256: "4".repeat(64),
+        descriptorSha256: "5".repeat(64),
+      },
+      overlays: [],
+      unified: null,
+      resumableBatch: {
+        batchId: options.latest.batchId,
+        checkpointSha256: latestCheckpointSha256,
+        sourceImportSha256: options.latest.sourceImportSha256,
+        cloudRootSha256: options.latest.cloudRootSha256,
+      },
+    } : null)
+    : options.verificationAuthority;
   const imports = {
     preview: vi.fn(async () => previewSummaries.shift() ?? summary()),
     import: vi.fn(async (_source, _signal?: AbortSignal) => {
@@ -308,18 +410,59 @@ const fixture = (options: Readonly<{
       differences: [],
       supersededCatalogIds: [],
     }]),
-    loadLatestBatch: vi.fn(async () => options.latest === undefined
-      ? null
-      : options.latest === null ? null : {
-        checkpoint: options.latest,
+    loadLatestBatch: vi.fn(async () => {
+      const latest = options.latest;
+      if (latest === undefined || latest === null) return null;
+      if (latest.schemaVersion === 3) {
+        return {
+          kind: "legacy-v3" as const,
+          checkpoint: latest,
+          checkpointSha256: latestCheckpointSha256,
+          records: [],
+          identities: [],
+          identitiesComplete: true,
+        };
+      }
+      return {
+        kind: "scoped-v4" as const,
+        checkpoint: latest,
+        checkpointSha256: latestCheckpointSha256,
         records: [],
         identities: [],
-        identitiesComplete: true,
-      }),
+        identitiesComplete: true as const,
+      };
+    }),
+    loadLegacyLocalAuthority: vi.fn(async () => ({
+      kind: "legacy-local-only" as const,
+      sourceImportSha256: HASH_A,
+      activeManifestSha256: "4".repeat(64),
+    })),
+    prepareLegacyVerificationAdoption: vi.fn(async (scope: CloudVerificationScope) => ({
+      schemaVersion: 1 as const,
+      state: "adopted" as const,
+      verificationGeneration: scope.generation,
+      sourceImportSha256: scope.sourceImportSha256,
+      cloudRootSha256: scope.cloudRootSha256,
+      candidate: {
+        importId: "import-1",
+        manifestSha256: "4".repeat(64),
+        descriptorSha256: "5".repeat(64),
+      },
+      overlays: [],
+      unified: null,
+      resumableBatch: null,
+    })),
+    revalidatePreparedLegacyAdoption: vi.fn(async () => undefined),
+    loadLegacyArtifactSetSha256: vi.fn(async () => "6".repeat(64)),
+    promoteAdoptedLegacyBatch: vi.fn(async () => {
+      if (options.promotionPromise !== undefined) return options.promotionPromise;
+      if (options.latest?.schemaVersion !== 3) throw new Error("no-legacy-batch");
+      return promotedBatch();
+    }),
     restoreCatalogActivation: vi.fn(async (_input: HybridCatalogActivationSnapshot) => undefined),
   };
   const project = {
-    rebuild: vi.fn(async (_signal?: AbortSignal) => {
+    rebuild: vi.fn(async (_authority?: CloudVerificationAuthority | null, _signal?: AbortSignal) => {
       await options.projectPromise;
       if (options.projectError !== undefined) throw options.projectError;
       activeUnified = activeUnified === null ? null : { ...activeUnified, descriptor: {
@@ -377,6 +520,9 @@ const fixture = (options: Readonly<{
   };
   const verification = {
     start: vi.fn(async (input: LargeCatalogVerificationStartInput) => {
+      if (options.verificationStartPromise !== undefined) {
+        return options.verificationStartPromise;
+      }
       const { start, result, recoveredFromScanning } = nextVerificationStep();
       await input.onProgress?.(verificationProgressEvent(
         start,
@@ -391,6 +537,9 @@ const fixture = (options: Readonly<{
       return result;
     }),
     runSegment: vi.fn(async (input: LargeCatalogVerificationSegmentInput) => {
+      if (options.verificationRunPromise !== undefined) {
+        return options.verificationRunPromise;
+      }
       const { start, result, recoveredFromScanning } = nextVerificationStep();
       await input.onProgress?.(verificationProgressEvent(
         start,
@@ -419,8 +568,10 @@ const fixture = (options: Readonly<{
     verification,
     createBatchId: () => "batch-new",
   };
+  const runtime = new HybridCatalogRuntimeService(dependencies);
+  runtime.setVerificationAuthority(selectedAuthority);
   return {
-    runtime: new HybridCatalogRuntimeService(dependencies),
+    runtime,
     candidates,
     openCalls,
     imports,
@@ -431,6 +582,336 @@ const fixture = (options: Readonly<{
 };
 
 describe("HybridCatalogRuntimeService", () => {
+  it("synchronously revokes trusted verification state when authority changes", async () => {
+    const value = fixture({ latest: scopedCheckpoint() });
+    await value.runtime.initialize();
+    expect(value.runtime.snapshot()).toMatchObject({
+      active: { verifiedCount: 1, differenceCount: 1, verifiedGroupCount: 1 },
+      batch: { batchId: "batch-paused" },
+    });
+
+    value.runtime.setVerificationAuthority({
+      kind: "scoped",
+      scope: { ...DEFAULT_SCOPE, generation: 2 },
+      legacyAllowlist: null,
+    });
+
+    expect(value.runtime.snapshot()).toMatchObject({
+      status: "ready",
+      executionActive: false,
+      active: {
+        sourceImportSha256: HASH_A,
+        legacyArtifactSetSha256: null,
+        unverifiedCount: 3,
+        verifiedCount: 0,
+        differenceCount: 0,
+        cloudMissingCount: 0,
+        verifiedGroupCount: 0,
+        coveredCandidatePdfCount: 0,
+        groups: [
+          { verificationStatus: "unverified" },
+          { verificationStatus: "unverified" },
+          { verificationStatus: "unverified" },
+        ],
+      },
+    });
+    expect(value.runtime.snapshot().batch).toBeUndefined();
+  });
+
+  it("does not let an older initialize overwrite a newer authority result", async () => {
+    const value = fixture();
+    const initialCandidate = await value.store.loadActiveCandidateSummary();
+    expect(initialCandidate).not.toBeNull();
+    let resolveOldCandidate!: (candidateValue: typeof initialCandidate) => void;
+    const oldCandidate = new Promise<typeof initialCandidate>((resolve) => {
+      resolveOldCandidate = resolve;
+    });
+    value.store.loadActiveCandidateSummary.mockClear();
+    value.store.loadActiveCandidateSummary
+      .mockImplementationOnce(async () => oldCandidate)
+      .mockResolvedValueOnce({
+        ...initialCandidate!,
+        descriptor: { ...initialCandidate!.descriptor, sourceSha256: HASH_B },
+      });
+    value.store.loadActiveUnifiedSummary.mockResolvedValueOnce(null);
+    value.store.loadActiveOverlayDescriptors.mockResolvedValueOnce([]);
+
+    const older = value.runtime.initialize();
+    await vi.waitFor(() => {
+      expect(value.store.loadActiveCandidateSummary).toHaveBeenCalledTimes(1);
+    });
+    value.runtime.setVerificationAuthority({
+      kind: "scoped",
+      scope: { ...DEFAULT_SCOPE, generation: 2, sourceImportSha256: HASH_B },
+      legacyAllowlist: null,
+    });
+    await value.runtime.initialize();
+    expect(value.runtime.snapshot().active?.sourceImportSha256).toBe(HASH_B);
+
+    resolveOldCandidate(initialCandidate);
+    await older;
+
+    expect(value.runtime.snapshot().active?.sourceImportSha256).toBe(HASH_B);
+    expect(value.runtime.snapshot().active?.verifiedCount).toBe(0);
+  });
+
+  it("does not publish an old projection rebuild after authority changes", async () => {
+    let finishProjection!: () => void;
+    const projectPromise = new Promise<void>((resolve) => { finishProjection = resolve; });
+    const value = fixture({ projectPromise });
+    await value.runtime.initialize();
+
+    const rebuilding = value.runtime.rebuildVerificationProjection();
+    await vi.waitFor(() => { expect(value.project.rebuild).toHaveBeenCalledOnce(); });
+    value.runtime.setVerificationAuthority({
+      kind: "scoped",
+      scope: { ...DEFAULT_SCOPE, generation: 2 },
+      legacyAllowlist: null,
+    });
+    expect(value.runtime.snapshot().active?.verifiedCount).toBe(0);
+
+    finishProjection();
+    await rebuilding;
+
+    expect(value.runtime.snapshot()).toMatchObject({
+      status: "ready",
+      executionActive: false,
+      active: { verifiedCount: 0, differenceCount: 0 },
+    });
+    expect(value.runtime.snapshot().batch).toBeUndefined();
+  });
+
+  it("rejects an authority change while verification is executing", async () => {
+    let finish!: (value: LargeCatalogVerificationSummary) => void;
+    const verificationStartPromise = new Promise<LargeCatalogVerificationSummary>((resolve) => {
+      finish = resolve;
+    });
+    const value = fixture({ verificationStartPromise });
+    await value.runtime.initialize();
+    const running = value.runtime.startLargeVerification({
+      cloudRoot: "/Synthetic",
+      groupKeys: [GROUP_A],
+    });
+    await vi.waitFor(() => { expect(value.verification.start).toHaveBeenCalledOnce(); });
+
+    expect(() => value.runtime.setVerificationAuthority(authority(null))).not.toThrow();
+    expect(() => value.runtime.setVerificationAuthority(null))
+      .toThrow(new HybridCatalogError("hybrid-batch-unavailable"));
+    expect(value.runtime.snapshot()).toMatchObject({ status: "scanning", executionActive: true });
+
+    value.runtime.cancelLargeVerification();
+    finish(verificationSummary({ status: "paused", stopReason: "user-canceled" }));
+    await running;
+  });
+
+  it("reports no live execution in every resting snapshot", async () => {
+    const value = fixture();
+
+    expect(value.runtime.snapshot().executionActive).toBe(false);
+    await value.runtime.initialize();
+    expect(value.runtime.snapshot().executionActive).toBe(false);
+  });
+
+  it("publishes executionActive before the verification promise emits progress", async () => {
+    let finish!: (value: LargeCatalogVerificationSummary) => void;
+    const verificationStartPromise = new Promise<LargeCatalogVerificationSummary>((resolve) => {
+      finish = resolve;
+    });
+    const value = fixture({ verificationStartPromise });
+    await value.runtime.initialize();
+
+    const running = value.runtime.startLargeVerification({
+      cloudRoot: "/Synthetic",
+      groupKeys: [GROUP_A],
+    });
+    await vi.waitFor(() => { expect(value.verification.start).toHaveBeenCalledOnce(); });
+
+    expect(value.runtime.snapshot()).toMatchObject({
+      status: "scanning",
+      executionActive: true,
+    });
+    value.runtime.cancelLargeVerification();
+    const signal = value.verification.start.mock.calls[0]?.[0].signal;
+    expect(signal).toBeInstanceOf(AbortSignal);
+    expect(signal?.aborted).toBe(true);
+    finish(verificationSummary({ status: "paused", stopReason: "user-canceled" }));
+    await running;
+    expect(value.runtime.snapshot().executionActive).toBe(false);
+  });
+
+  it("requires a current scoped authority before starting network-capable work", async () => {
+    const value = fixture({ verificationAuthority: null });
+    await value.runtime.initialize();
+
+    await expect(value.runtime.startLargeVerification({
+      cloudRoot: "/Synthetic",
+      groupKeys: [GROUP_A],
+    })).rejects.toEqual(new HybridCatalogError("hybrid-batch-unavailable"));
+
+    expect(value.verification.start).not.toHaveBeenCalled();
+    expect(value.store.promoteAdoptedLegacyBatch).not.toHaveBeenCalled();
+  });
+
+  it("projects a current orphan-scanning V4 checkpoint as offline paused and resumable", async () => {
+    const value = fixture({ latest: scopedCheckpoint({ status: "scanning", stopReason: null }) });
+
+    await value.runtime.initialize();
+
+    expect(value.runtime.snapshot()).toMatchObject({
+      status: "paused",
+      executionActive: false,
+      batch: {
+        status: "paused",
+        stopReason: "user-canceled",
+        resumeAvailable: true,
+        verificationScope: DEFAULT_SCOPE,
+        legacyPromotionRequired: false,
+      },
+    });
+    expect(value.verification.runSegment).not.toHaveBeenCalled();
+  });
+
+  it("keeps an old-generation V4 checkpoint as non-resumable history", async () => {
+    const stale = scopedCheckpoint({
+      verificationScope: { ...DEFAULT_SCOPE, generation: 2 },
+    });
+    const value = fixture({ latest: stale });
+
+    await value.runtime.initialize();
+
+    expect(value.runtime.snapshot().batch).toMatchObject({
+      verificationScope: { ...DEFAULT_SCOPE, generation: 2 },
+      legacyPromotionRequired: false,
+      resumeAvailable: false,
+    });
+  });
+
+  it("keeps an unlisted legacy V3 checkpoint visible but never resumable", async () => {
+    const value = fixture({
+      latest: pausedCheckpoint(),
+      verificationAuthority: authority(null),
+    });
+
+    await value.runtime.initialize();
+
+    expect(value.runtime.snapshot().batch).toMatchObject({
+      verificationScope: null,
+      legacyPromotionRequired: true,
+      resumeAvailable: false,
+    });
+  });
+
+  it("promotes an exactly adopted V3 before publishing a live execution", async () => {
+    let finishPromotion!: (value: LoadedLargeCatalogBatchV4) => void;
+    const promotionPromise = new Promise<LoadedLargeCatalogBatchV4>((resolve) => {
+      finishPromotion = resolve;
+    });
+    let finish!: (value: LargeCatalogVerificationSummary) => void;
+    const verificationRunPromise = new Promise<LargeCatalogVerificationSummary>((resolve) => {
+      finish = resolve;
+    });
+    const value = fixture({
+      latest: pausedCheckpoint(),
+      promotionPromise,
+      verificationRunPromise,
+    });
+    await value.runtime.initialize();
+
+    const running = value.runtime.resumeLargeVerification({
+      cloudRoot: "/Synthetic",
+      groupKeys: [GROUP_A],
+    });
+    await vi.waitFor(() => { expect(value.store.promoteAdoptedLegacyBatch).toHaveBeenCalledOnce(); });
+
+    expect(value.runtime.snapshot()).toMatchObject({
+      status: "paused",
+      executionActive: false,
+      batch: { legacyPromotionRequired: true },
+    });
+    expect(value.verification.runSegment).not.toHaveBeenCalled();
+    finishPromotion(promotedBatch());
+    await vi.waitFor(() => { expect(value.verification.runSegment).toHaveBeenCalledOnce(); });
+
+    expect(value.store.promoteAdoptedLegacyBatch.mock.invocationCallOrder[0])
+      .toBeLessThan(value.verification.runSegment.mock.invocationCallOrder[0]!);
+    expect(value.runtime.snapshot()).toMatchObject({
+      status: "scanning",
+      executionActive: true,
+      batch: { legacyPromotionRequired: false, verificationScope: DEFAULT_SCOPE },
+    });
+    value.runtime.cancelLargeVerification();
+    finish(verificationSummary({ status: "paused", stopReason: "user-canceled" }));
+    await running;
+    expect(value.runtime.snapshot().executionActive).toBe(false);
+  });
+
+  it("rejects reordered or replaced resume groups before legacy promotion or network", async () => {
+    const value = fixture({ latest: twoGroupPausedCheckpoint() });
+    await value.runtime.initialize();
+
+    expect(value.runtime.snapshot().batch?.selectedGroupKeys).toEqual([GROUP_A, GROUP_B]);
+    await expect(value.runtime.resumeLargeVerification({
+      cloudRoot: "/Synthetic",
+      groupKeys: [GROUP_B, GROUP_A],
+    })).rejects.toEqual(new HybridCatalogError("hybrid-batch-invalid"));
+    await expect(value.runtime.resumeLargeVerification({
+      cloudRoot: "/Synthetic",
+      groupKeys: [GROUP_A, "txt-root-items"],
+    })).rejects.toEqual(new HybridCatalogError("hybrid-batch-invalid"));
+
+    expect(value.store.promoteAdoptedLegacyBatch).not.toHaveBeenCalled();
+    expect(value.verification.runSegment).not.toHaveBeenCalled();
+  });
+
+  it("resumes an exact persisted V4 group order and detaches snapshot arrays", async () => {
+    const legacy = twoGroupPausedCheckpoint();
+    const latest = scopedCheckpoint({
+      selectedGroupCount: legacy.selectedGroupCount,
+      groups: legacy.groups,
+    });
+    const result = verificationSummary({
+      status: "complete",
+      stopReason: "complete",
+      selectedGroupCount: 2,
+      selectedGroupKeys: [GROUP_A, GROUP_B],
+      completedGroupCount: 2,
+      remainingGroupCount: 0,
+      currentGroupIndex: 2,
+      currentGroupKey: null,
+    });
+    const value = fixture({ latest, verificationResults: [result] });
+    await value.runtime.initialize();
+    const exposed = value.runtime.snapshot().batch!.selectedGroupKeys as string[];
+    exposed.reverse();
+    expect(value.runtime.snapshot().batch?.selectedGroupKeys).toEqual([GROUP_A, GROUP_B]);
+
+    await value.runtime.resumeLargeVerification({
+      cloudRoot: "/Synthetic",
+      groupKeys: [GROUP_A, GROUP_B],
+    });
+
+    expect(value.verification.runSegment).toHaveBeenCalledWith(expect.objectContaining({
+      allowedGroupKeys: [GROUP_A, GROUP_B],
+    }));
+  });
+
+  it("proxies detached local-only authority and adoption revalidation without network", async () => {
+    const value = fixture();
+    const local = await value.runtime.prepareLegacyLocalVerificationAuthority();
+    const prepared = await value.runtime.prepareLegacyVerificationAdoption(DEFAULT_SCOPE);
+    await value.runtime.revalidatePreparedLegacyAdoption(prepared);
+
+    expect(local).toEqual({
+      kind: "legacy-local-only",
+      sourceImportSha256: HASH_A,
+      activeManifestSha256: "4".repeat(64),
+    });
+    expect(value.store.prepareLegacyVerificationAdoption).toHaveBeenCalledWith(DEFAULT_SCOPE);
+    expect(value.store.revalidatePreparedLegacyAdoption).toHaveBeenCalledWith(prepared);
+    expect(value.verification.start).not.toHaveBeenCalled();
+    expect(value.verification.runSegment).not.toHaveBeenCalled();
+  });
+
   it("initializes aggregate-only local state and a resumable batch without source or network calls", async () => {
     const value = fixture({ latest: pausedCheckpoint() });
 
@@ -832,6 +1313,31 @@ describe("HybridCatalogRuntimeService", () => {
     expect(value.runtime.snapshot()).toMatchObject({ status: "unavailable" });
   });
 
+  it("cannot revive from an initialize result that settles after dispose", async () => {
+    const value = fixture();
+    const initialCandidate = await value.store.loadActiveCandidateSummary();
+    let finishCandidate!: (candidateValue: typeof initialCandidate) => void;
+    const delayedCandidate = new Promise<typeof initialCandidate>((resolve) => {
+      finishCandidate = resolve;
+    });
+    value.store.loadActiveCandidateSummary.mockClear();
+    value.store.loadActiveCandidateSummary.mockImplementationOnce(async () => delayedCandidate);
+
+    const initializing = value.runtime.initialize();
+    await vi.waitFor(() => {
+      expect(value.store.loadActiveCandidateSummary).toHaveBeenCalledOnce();
+    });
+    value.runtime.dispose();
+    finishCandidate(initialCandidate);
+    await initializing;
+
+    expect(value.runtime.snapshot()).toEqual({
+      status: "unavailable",
+      executionActive: false,
+      messageCode: "catalog-unavailable",
+    });
+  });
+
   it("cancels an in-flight TXT import on dispose before projection rebuild", async () => {
     let finishImport!: (value: CandidateCatalogDescriptor) => void;
     const importPromise = new Promise<CandidateCatalogDescriptor>((resolve) => {
@@ -853,6 +1359,7 @@ describe("HybridCatalogRuntimeService", () => {
     expect(value.project.rebuild).not.toHaveBeenCalled();
     expect(value.runtime.snapshot()).toEqual({
       status: "unavailable",
+      executionActive: false,
       messageCode: "catalog-unavailable",
     });
   });
@@ -877,7 +1384,7 @@ describe("HybridCatalogRuntimeService", () => {
 
     const running = value.runtime.importTxt("/synthetic/private-inventory.txt");
     await vi.waitFor(() => { expect(value.project.rebuild).toHaveBeenCalledTimes(1); });
-    const signal = value.project.rebuild.mock.calls[0]?.[0];
+    const signal = value.project.rebuild.mock.calls[0]?.[1];
     value.runtime.dispose();
     finishProjection();
     await running;
@@ -887,6 +1394,7 @@ describe("HybridCatalogRuntimeService", () => {
     expect(value.store.restoreCatalogActivation).toHaveBeenCalledTimes(2);
     expect(value.runtime.snapshot()).toEqual({
       status: "unavailable",
+      executionActive: false,
       messageCode: "catalog-unavailable",
     });
   });
@@ -910,6 +1418,9 @@ describe("HybridCatalogRuntimeService", () => {
       messageCode: "hybrid-snapshot-corrupt",
     });
     expect(JSON.stringify(value.runtime.snapshot())).not.toContain("projection-write-failed");
+
+    await value.runtime.startLargeVerification({ cloudRoot: "/Synthetic", groupKeys: [GROUP_A] });
+    expect(value.verification.start.mock.calls[0]?.[0].authority).toEqual(authority(null));
   });
 
   it("maps native source failures to a fixed code without exposing path details", async () => {

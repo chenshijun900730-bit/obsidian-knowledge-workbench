@@ -22,6 +22,10 @@ import type { UnifiedCatalogSearchQuery } from "./unified-catalog-search-service
 import type { CloudDirectoryDiscoveryRuntime } from "./cloud-directory-discovery-service";
 import type { CloudDirectoryBrowserRuntime } from "./cloud-directory-browser";
 import type { CloudDirectoryLocatorRuntime } from "./cloud-directory-locator";
+import {
+  decodeCloudVerificationAuthority,
+  type CloudVerificationAuthority,
+} from "./cloud-verification-scope";
 
 const PAGE_SIZE = 50 as const;
 const STATUS_VALUES: readonly CatalogVerificationStatus[] = ["unverified", "verified", "difference"];
@@ -134,6 +138,8 @@ export interface CloudCatalogRuntime {
   readonly directoryDiscovery?: CloudDirectoryDiscoveryRuntime;
   readonly directoryBrowser?: CloudDirectoryBrowserRuntime;
   readonly directoryLocator?: CloudDirectoryLocatorRuntime;
+  /** Installs detached query authority before initialization or projection refresh. */
+  setVerificationAuthority?(authority: CloudVerificationAuthority | null): void;
   initialize(): Promise<void>;
   snapshot(): CloudCatalogViewModel;
   subscribe(listener: () => void): () => void;
@@ -252,6 +258,7 @@ export class CloudCatalogRuntimeService implements CloudCatalogRuntime {
   private recordsById = new Map<string, ActionRecord>();
   private readonly listeners = new Set<() => void>();
   private unsubscribeConnection: (() => void) | undefined;
+  private verificationAuthority: CloudVerificationAuthority | null = null;
   private disposed = false;
 
   constructor(
@@ -270,6 +277,22 @@ export class CloudCatalogRuntimeService implements CloudCatalogRuntime {
     this.directoryBrowser = directoryBrowser;
     this.directoryLocator = directoryLocator;
     this.unsubscribeConnection = connection?.subscribe(() => this.emit());
+  }
+
+  setVerificationAuthority(authority: CloudVerificationAuthority | null): void {
+    this.assertAvailable();
+    const detached = authority === null
+      ? null
+      : decodeCloudVerificationAuthority(structuredClone(authority));
+    this.hybrid?.setVerificationAuthority(
+      detached === null
+        ? null
+        : decodeCloudVerificationAuthority(structuredClone(detached)),
+    );
+    this.verificationAuthority = detached;
+    this.clearSearch();
+    this.viewModel = initialViewModel();
+    this.emit();
   }
 
   async initialize(): Promise<void> {
@@ -294,10 +317,16 @@ export class CloudCatalogRuntimeService implements CloudCatalogRuntime {
         includeCloudMissing: false,
         offset: 0,
         limit: PAGE_SIZE,
-      }, controller.signal) ?? null;
+      }, this.detachedVerificationAuthority(), controller.signal) ?? null;
       if (this.disposed || controller.signal.aborted || generation !== this.unifiedQueryGeneration) return;
       if (activeUnified !== null) {
         this.initializeUnified(activeUnified);
+        return;
+      }
+      if (this.verificationAuthority !== null) {
+        this.clearSearch();
+        this.viewModel = initialViewModel();
+        this.emit();
         return;
       }
       const active = await this.snapshots.loadActive();
@@ -538,7 +567,11 @@ export class CloudCatalogRuntimeService implements CloudCatalogRuntime {
     controller: AbortController,
   ): Promise<void> {
     try {
-      let result = await this.unified!.queryActiveUnified(query, controller.signal);
+      let result = await this.unified!.queryActiveUnified(
+        query,
+        this.detachedVerificationAuthority(),
+        controller.signal,
+      );
       if (result === null) throw new HybridCatalogError("hybrid-snapshot-corrupt");
       if (this.disposed || controller.signal.aborted || generation !== this.unifiedQueryGeneration) return;
       const maximum = result.page.total === 0 ? 0 : Math.floor((result.page.total - 1) / PAGE_SIZE);
@@ -547,7 +580,7 @@ export class CloudCatalogRuntimeService implements CloudCatalogRuntime {
         result = await this.unified!.queryActiveUnified({
           ...query,
           offset: maximum * PAGE_SIZE,
-        }, controller.signal);
+        }, this.detachedVerificationAuthority(), controller.signal);
         if (result === null) throw new HybridCatalogError("hybrid-snapshot-corrupt");
       }
       if (this.disposed || controller.signal.aborted || generation !== this.unifiedQueryGeneration) return;
@@ -619,6 +652,12 @@ export class CloudCatalogRuntimeService implements CloudCatalogRuntime {
     this.unifiedQueryController?.abort();
     this.unifiedQueryController = undefined;
     this.unifiedQueryGeneration += 1;
+  }
+
+  private detachedVerificationAuthority(): CloudVerificationAuthority | null {
+    return this.verificationAuthority === null
+      ? null
+      : decodeCloudVerificationAuthority(structuredClone(this.verificationAuthority));
   }
 
   private assertAvailable(): void {

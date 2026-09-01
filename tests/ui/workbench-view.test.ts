@@ -37,6 +37,9 @@ import {
   noOpWorkbenchActions,
   populatedWorkbenchModel,
   quickCaptureFixture,
+  TEST_HYBRID_ACTIVE_AUTHORITY,
+  TEST_INACTIVE_HYBRID_EXECUTION,
+  TEST_LARGE_BATCH_AUTHORITY,
   type ProjectionSchedulerDependency,
 } from "../helpers/ui-fixtures";
 import {
@@ -242,8 +245,10 @@ describe("workbench", () => {
       selectedVerificationGroupKeys: [groupKey],
       catalogConnection: { status: "authorized" as const },
       hybridCatalog: {
+        ...TEST_INACTIVE_HYBRID_EXECUTION,
         status: "ready" as const,
         active: {
+          ...TEST_HYBRID_ACTIVE_AUTHORITY,
           importedAt: 1,
           pdfCount: 1,
           unverifiedCount: 1,
@@ -310,7 +315,7 @@ describe("workbench", () => {
       activeTab: "verification" as const,
       verificationRoot: "/Synthetic/Existing",
       catalogConnection: { status: "authorized" as const },
-      hybridCatalog: { status: "ready" as const },
+      hybridCatalog: { ...TEST_INACTIVE_HYBRID_EXECUTION, status: "ready" as const },
     };
     const actions = noOpWorkbenchActions({
       onSetVerificationRoot,
@@ -342,7 +347,7 @@ describe("workbench", () => {
       activeTab: "verification" as const,
       verificationRoot: "/Synthetic/Existing",
       catalogConnection: { status: "authorized" as const },
-      hybridCatalog: { status: "ready" as const },
+      hybridCatalog: { ...TEST_INACTIVE_HYBRID_EXECUTION, status: "ready" as const },
     };
     const actions = noOpWorkbenchActions();
     renderWorkbench(root, model, actions);
@@ -414,6 +419,7 @@ describe("workbench", () => {
     document.body.append(root);
     const groupKey = `group:${"7".repeat(64)}`;
     const active = {
+      ...TEST_HYBRID_ACTIVE_AUTHORITY,
       importedAt: 1,
       pdfCount: 68_959,
       coveredCandidatePdfCount: 11_870,
@@ -435,6 +441,7 @@ describe("workbench", () => {
     const batch = (
       overrides: Partial<LargeCatalogBatchSummary> = {},
     ): LargeCatalogBatchSummary => ({
+      ...TEST_LARGE_BATCH_AUTHORITY,
       batchId: "batch-rerender",
       status: "scanning",
       stopReason: null,
@@ -465,7 +472,7 @@ describe("workbench", () => {
       verificationRoot: "/Synthetic",
       selectedVerificationGroupKeys: [groupKey],
       catalogConnection: { status: "authorized" as const },
-      hybridCatalog: { status: "scanning" as const, active, batch: batch() },
+      hybridCatalog: { ...TEST_INACTIVE_HYBRID_EXECUTION, status: "scanning" as const, active, batch: batch() },
     };
     renderWorkbench(root, firstModel, noOpWorkbenchActions());
     const details = root.querySelector<HTMLDetailsElement>('[data-verification-run-details]')!;
@@ -476,6 +483,7 @@ describe("workbench", () => {
     const nextSegmentModel = {
       ...firstModel,
       hybridCatalog: {
+        ...TEST_INACTIVE_HYBRID_EXECUTION,
         status: "scanning" as const,
         active,
         batch: batch({
@@ -515,7 +523,7 @@ describe("workbench", () => {
       activeTab: "verification" as const,
       verificationRoot: "",
       catalogConnection: { status: "authorized" as const },
-      hybridCatalog: { status: "ready" as const },
+      hybridCatalog: { ...TEST_INACTIVE_HYBRID_EXECUTION, status: "ready" as const },
     };
     let actions = noOpWorkbenchActions();
     const selection: CloudDirectorySelection = {
@@ -556,6 +564,7 @@ describe("workbench", () => {
     }
     const groupKey = `group:${"e".repeat(64)}`;
     const active = {
+      ...TEST_HYBRID_ACTIVE_AUTHORITY,
       importedAt: 1,
       pdfCount: 1,
       unverifiedCount: 1,
@@ -575,6 +584,7 @@ describe("workbench", () => {
       }],
     };
     const pausedBatch = {
+      ...TEST_LARGE_BATCH_AUTHORITY,
       ...INACTIVE_AUTO_RESUME,
       batchId: "batch-paused",
       status: "paused" as const,
@@ -695,6 +705,7 @@ describe("workbench", () => {
     }
     const groupKey = `group:${"f".repeat(64)}`;
     const active = {
+      ...TEST_HYBRID_ACTIVE_AUTHORITY,
       importedAt: 1,
       pdfCount: 1,
       unverifiedCount: 1,
@@ -717,6 +728,7 @@ describe("workbench", () => {
       status: "paused",
       active,
       batch: {
+        ...TEST_LARGE_BATCH_AUTHORITY,
         ...INACTIVE_AUTO_RESUME,
         batchId: "batch-malformed-root",
         status: "paused",
@@ -2180,6 +2192,7 @@ describe("workbench", () => {
     const hybrid = new FakeHybridCatalogRuntime({
       status: "ready",
       active: {
+        ...TEST_HYBRID_ACTIVE_AUTHORITY,
         importedAt: 1,
         pdfCount: 4,
         unverifiedCount: 4,

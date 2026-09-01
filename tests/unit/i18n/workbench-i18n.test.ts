@@ -113,4 +113,40 @@ describe("workbench i18n", () => {
       expect(en.t(key, params), `${key} en`).toBe(expectedEn);
     }
   });
+
+  it("provides paired titles and descriptions for every library workflow state", () => {
+    const zh = createWorkbenchI18n("zh-CN");
+    const en = createWorkbenchI18n("en");
+    const messages: readonly [WorkbenchMessageKey, string, string][] = [
+      ["workflow.needsTxt.title", "选择目录数据", "Choose catalog data"],
+      ["workflow.needsTxt.description", "请选择目录 TXT；不会扫描本机其他文件。", "Choose a catalog TXT file. Other local files will not be scanned."],
+      ["workflow.confirmTxtImport.title", "确认新的目录数据", "Confirm new catalog data"],
+      ["workflow.confirmTxtImport.description", "导入前，旧活动目录保持可用。", "The current catalog remains available until import completes."],
+      ["workflow.needsConnection.title", "连接百度网盘", "Connect Baidu Netdisk"],
+      ["workflow.needsConnection.description", "AppKey、SecretKey 和授权码仍由你在本地输入。", "Enter the AppKey, SecretKey, and authorization code locally."],
+      ["workflow.needsLibrary.title", "选择科学文库文件夹", "Choose the science library folder"],
+      ["workflow.needsLibrary.description", "请准确选择一次书库位置；不会从最近目录自动猜测。", "Choose the exact library location once. Recent folders are never used to guess it."],
+      ["workflow.ready.title", "检查推荐分类", "Check the recommended category"],
+      ["workflow.ready.description", "只读取目录信息，不下载 PDF，不修改笔记。", "Only directory metadata is read. PDFs are not downloaded and notes are not changed."],
+      ["workflow.running.title", "正在检查当前分类", "Checking the current category"],
+      ["workflow.running.description", "完整提交的进度会持续保存。", "Durably committed progress is saved continuously."],
+      ["workflow.paused.title", "进度已保存", "Progress saved"],
+      ["workflow.paused.description", "可以从已保存的位置继续检查。", "Continue checking from the saved position."],
+      ["workflow.repairConnection.title", "请重新连接百度网盘", "Reconnect Baidu Netdisk"],
+      ["workflow.repairConnection.description", "本地搜索和旧核验结果继续可用。", "Local search and prior verification results remain available."],
+      ["workflow.repairLibrary.title", "请重新选择书库", "Choose the library again"],
+      ["workflow.repairLibrary.description", "现有活动目录保持不变，不使用手工 API 路径恢复。", "The active catalog remains unchanged. Recovery does not use a manually entered API path."],
+      ["workflow.retryLater.title", "任务已安全停止", "Task stopped safely"],
+      ["workflow.retryLater.description", "检查点已保存；请稍后继续。", "The checkpoint is saved. Continue later."],
+      ["workflow.complete.title", "文库检查完成", "Library check complete"],
+      ["workflow.complete.description", "可以返回文库继续搜索。", "Return to the library and continue searching."],
+      ["workflow.unavailable.title", "当前版本不提供云端检查", "Cloud checking is unavailable in this build"],
+      ["workflow.unavailable.description", "本地文库仍可使用。", "The local library remains available."],
+    ];
+
+    for (const [key, expectedZh, expectedEn] of messages) {
+      expect(zh.t(key), `${key} zh-CN`).toBe(expectedZh);
+      expect(en.t(key), `${key} en`).toBe(expectedEn);
+    }
+  });
 });

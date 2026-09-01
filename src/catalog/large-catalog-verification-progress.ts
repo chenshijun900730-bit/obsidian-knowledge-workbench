@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
+import type { CloudVerificationScope } from "./cloud-verification-scope";
 import type {
-  LargeCatalogBatchCheckpointV3,
+  LargeCatalogBatchCheckpoint,
   LargeCatalogStopReason,
 } from "./hybrid-catalog-types";
 
@@ -15,10 +16,13 @@ export interface LargeVerificationProgressMarker {
 
 export interface LargeCatalogVerificationSummary {
   readonly batchId: string;
+  readonly verificationScope: CloudVerificationScope | null;
+  readonly legacyPromotionRequired: boolean;
   readonly status: "scanning" | "complete" | "paused" | "partial";
   readonly stopReason: LargeCatalogStopReason | null;
   readonly runOrdinal: number;
   readonly selectedGroupCount: number;
+  readonly selectedGroupKeys: readonly string[];
   readonly completedGroupCount: number;
   readonly remainingGroupCount: number;
   readonly currentGroupIndex: number;
@@ -48,7 +52,7 @@ export interface LargeVerificationProgressEvent {
   readonly recoveredFromScanning: boolean;
 }
 
-const pendingStateHash = (checkpoint: LargeCatalogBatchCheckpointV3): string => {
+const pendingStateHash = (checkpoint: LargeCatalogBatchCheckpoint): string => {
   const state = checkpoint.groups.map((group) => ({
     key: group.groupKey,
     status: group.status,
@@ -58,7 +62,7 @@ const pendingStateHash = (checkpoint: LargeCatalogBatchCheckpointV3): string => 
 };
 
 export const summarizeLargeCatalogVerification = (
-  checkpoint: LargeCatalogBatchCheckpointV3,
+  checkpoint: LargeCatalogBatchCheckpoint,
   committedPdfCount: number,
 ): LargeCatalogVerificationSummary => {
   const completedGroupCount = checkpoint.groups.filter((group) => group.status === "complete").length;
@@ -85,10 +89,15 @@ export const summarizeLargeCatalogVerification = (
   };
   return {
     batchId: checkpoint.batchId,
+    verificationScope: checkpoint.schemaVersion === 4
+      ? { ...checkpoint.verificationScope }
+      : null,
+    legacyPromotionRequired: checkpoint.schemaVersion === 3,
     status: checkpoint.status,
     stopReason: checkpoint.stopReason,
     runOrdinal: checkpoint.runOrdinal,
     selectedGroupCount: checkpoint.selectedGroupCount,
+    selectedGroupKeys: checkpoint.groups.map((group) => group.groupKey),
     completedGroupCount,
     remainingGroupCount: checkpoint.selectedGroupCount - completedGroupCount,
     currentGroupIndex: checkpoint.currentGroupIndex,

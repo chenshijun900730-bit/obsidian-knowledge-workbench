@@ -8,10 +8,22 @@ import { CatalogReconciliationService } from "../../src/catalog/catalog-reconcil
 import type { BaiduListEntry } from "../../src/catalog/catalog-types";
 import { LargeCatalogVerificationService } from "../../src/catalog/large-catalog-verification-service";
 import { UnifiedCatalogProjectionService } from "../../src/catalog/unified-catalog-projection-service";
+import { deriveCloudVerificationScope } from "../../src/catalog/cloud-verification-scope";
 
 const roots: string[] = [];
 const SOURCE_HASH = "a".repeat(64);
 const GROUP = `group:${"b".repeat(64)}`;
+const SCOPE = deriveCloudVerificationScope({
+  schemaVersion: 1,
+  path: "/Library",
+  sourceImportSha256: SOURCE_HASH,
+  verificationGeneration: 1,
+})!;
+const AUTHORITY = {
+  kind: "scoped" as const,
+  scope: SCOPE,
+  legacyAllowlist: null,
+};
 
 afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
@@ -48,7 +60,7 @@ describe("large catalog verification integration", () => {
         maxDepth: 2,
       },
     });
-    await new UnifiedCatalogProjectionService(adapter, { now: () => 1 }).rebuild();
+    await new UnifiedCatalogProjectionService(adapter, { now: () => 1 }).rebuild(AUTHORITY);
     const requests: Array<Readonly<{ path: string; start: number }>> = [];
     const entry: BaiduListEntry = {
       fsId: "7",
@@ -75,16 +87,17 @@ describe("large catalog verification integration", () => {
     const result = await service.start({
       batchId: "batch-integration",
       sourceImportSha256: SOURCE_HASH,
+      authority: AUTHORITY,
       cloudRoot: "/Library",
       groups: [{ groupKey: GROUP, rootRelativePath: "Synthetic", mode: "recursive" }],
     });
 
     expect(result).toMatchObject({ status: "complete", pdfCount: 1 });
     expect(requests).toEqual([{ path: "/Library/Synthetic", start: 0 }]);
-    expect((await adapter.loadActiveOverlays())[0]?.records).toEqual([
+    expect((await adapter.loadActiveOverlays(AUTHORITY))[0]?.records).toEqual([
       expect.objectContaining({ catalogId: "baidu:7", verificationStatus: "verified" }),
     ]);
-    expect((await adapter.loadActiveUnified())?.records).toEqual([
+    expect((await adapter.loadActiveUnified(AUTHORITY))?.records).toEqual([
       expect.objectContaining({ catalogId: "baidu:7", verificationStatus: "verified" }),
     ]);
     expect(await adapter.loadBatchReceipt("batch-integration")).toMatchObject({

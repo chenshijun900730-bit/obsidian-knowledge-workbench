@@ -9,7 +9,11 @@ import {
   FakeCloudCatalogRuntime,
   FakeHybridCatalogRuntime,
 } from "../fakes/fake-cloud-catalog-runtime";
-import { controllerFixture } from "../helpers/ui-fixtures";
+import {
+  controllerFixture,
+  TEST_HYBRID_ACTIVE_AUTHORITY,
+  TEST_LARGE_BATCH_AUTHORITY,
+} from "../helpers/ui-fixtures";
 import type { WorkbenchLocale } from "../../src/i18n/workbench-i18n";
 import { LARGE_CATALOG_AUTO_CHAIN_MAX_SEGMENTS } from "../../src/catalog/hybrid-catalog-types";
 
@@ -226,6 +230,7 @@ describe("large catalog scan confirmation", () => {
     const hybrid = new FakeHybridCatalogRuntime({
       status: "paused",
       active: {
+        ...TEST_HYBRID_ACTIVE_AUTHORITY,
         importedAt: 1,
         pdfCount: 30,
         unverifiedCount: 30,
@@ -245,6 +250,7 @@ describe("large catalog scan confirmation", () => {
         }],
       },
       batch: {
+        ...TEST_LARGE_BATCH_AUTHORITY,
         ...INACTIVE_AUTO_RESUME,
         batchId: "batch-confirmation",
         status: "paused",
@@ -309,6 +315,7 @@ describe("large catalog scan confirmation", () => {
     const hybrid = new FakeHybridCatalogRuntime({
       status: "ready",
       active: {
+        ...TEST_HYBRID_ACTIVE_AUTHORITY,
         importedAt: 1,
         pdfCount: 30,
         unverifiedCount: 30,
@@ -350,6 +357,7 @@ describe("large catalog scan confirmation", () => {
     const hybrid = new FakeHybridCatalogRuntime({
       status: "ready",
       active: {
+        ...TEST_HYBRID_ACTIVE_AUTHORITY,
         importedAt: 1,
         pdfCount: 8,
         unverifiedCount: 8,
