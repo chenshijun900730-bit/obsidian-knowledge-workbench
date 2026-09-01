@@ -277,6 +277,10 @@ const defaultSettings = (): PluginSettings => ({
   aiModel: "",
   secretId: "",
   recentCloudDirectories: EMPTY_RECENT_CLOUD_DIRECTORIES,
+  boundCloudLibrary: null,
+  cloudVerificationGeneration: 0,
+  verificationBatchTombstones: { schemaVersion: 1, state: "valid", batchIds: [] } as const,
+  legacyVerificationAdoption: { schemaVersion: 1, state: "none" } as const,
 });
 
 const defaultOperational = (): OperationalState => ({ pins: {}, dismissals: {}, lastOpened: {}, journals: [] });

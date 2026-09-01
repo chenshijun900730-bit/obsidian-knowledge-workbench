@@ -240,6 +240,10 @@ const acceptanceSettings = (): PluginSettings => Object.defineProperties({
   folderRules: [],
   excludedPrefixes: ["Generated/Archive"],
   recentCloudDirectories: EMPTY_RECENT_CLOUD_DIRECTORIES,
+  boundCloudLibrary: null,
+  cloudVerificationGeneration: 0,
+  verificationBatchTombstones: { schemaVersion: 1, state: "valid", batchIds: [] } as const,
+  legacyVerificationAdoption: { schemaVersion: 1, state: "none" } as const,
 }, {
   writeEnabled: { get: () => { throw new Error("must not inspect writeEnabled"); } },
   writePreviewAcknowledged: {

@@ -1,6 +1,8 @@
 import type { DocumentRecord } from "../core/types";
 import type { WorkbenchLocale } from "../i18n/workbench-i18n";
+import type { LegacyVerificationAdoptionV1 } from "./legacy-verification-adoption";
 import type { RecentCloudDirectoriesV1 } from "./recent-cloud-directories";
+import type { VerificationBatchTombstonesV1 } from "./verification-batch-tombstones";
 
 export interface FolderRule {
   readonly prefix: string;
@@ -15,6 +17,13 @@ export interface FolderRuleProposal {
   readonly samplePaths: readonly string[];
 }
 
+export interface BoundCloudLibraryV1 {
+  readonly schemaVersion: 1;
+  readonly path: string;
+  readonly sourceImportSha256: string;
+  readonly verificationGeneration: number;
+}
+
 export interface PluginSettings {
   readonly locale: WorkbenchLocale;
   readonly writeEnabled: boolean;
@@ -27,7 +36,24 @@ export interface PluginSettings {
   readonly aiModel: string;
   readonly secretId: string;
   readonly recentCloudDirectories: RecentCloudDirectoriesV1;
+  readonly boundCloudLibrary: BoundCloudLibraryV1 | null;
+  readonly cloudVerificationGeneration: number;
+  readonly verificationBatchTombstones: VerificationBatchTombstonesV1;
+  readonly legacyVerificationAdoption: LegacyVerificationAdoptionV1;
 }
+
+export type CloudVerificationSettings = Pick<
+  PluginSettings,
+  | "boundCloudLibrary"
+  | "cloudVerificationGeneration"
+  | "verificationBatchTombstones"
+  | "legacyVerificationAdoption"
+>;
+
+export type CloudVerificationTransitionIntent = Readonly<{
+  kind: "library-binding" | "identity-replacement" | "txt-source-replacement";
+  currentWorkflowBatchId: string | null;
+}>;
 
 export interface ActiveIndex {
   readonly builtAt: number;

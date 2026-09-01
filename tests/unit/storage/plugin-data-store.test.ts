@@ -64,6 +64,56 @@ const unsafeHistoricalData = (): unknown => ({
   operational: { pins: {}, dismissals: {}, lastOpened: {}, journals: [] },
 });
 
+const HASH_A = "a".repeat(64);
+const HASH_B = "2597dd278b71c490ebebf6dafad25c1662fae588bcfb0a067b0a37b9916413e8";
+const HASH_C = "c".repeat(64);
+const HASH_D = "d".repeat(64);
+const HASH_E = "e".repeat(64);
+const HASH_F = "f".repeat(64);
+const GROUP_KEY_A = `group:${"7".repeat(64)}`;
+
+const boundCloudLibraryFixture = () => ({
+  schemaVersion: 1 as const,
+  path: "/Synthetic/Library",
+  sourceImportSha256: HASH_A,
+  verificationGeneration: 1,
+});
+
+const adoptedLegacyVerificationFixture = () => ({
+  schemaVersion: 1 as const,
+  state: "adopted" as const,
+  verificationGeneration: 1,
+  sourceImportSha256: HASH_A,
+  cloudRootSha256: HASH_B,
+  candidate: {
+    importId: "candidate-import-1",
+    manifestSha256: HASH_C,
+    descriptorSha256: HASH_D,
+  },
+  overlays: [{
+    overlayId: "overlay-1",
+    groupKey: GROUP_KEY_A,
+    descriptorSha256: HASH_E,
+  }],
+  unified: {
+    snapshotId: "unified-1",
+    descriptorSha256: HASH_F,
+  },
+  resumableBatch: {
+    batchId: "batch-1",
+    checkpointSha256: "1".repeat(64),
+    sourceImportSha256: HASH_A,
+    cloudRootSha256: HASH_B,
+  },
+});
+
+const cloudVerificationSettings = (settings: PluginSettings) => ({
+  boundCloudLibrary: settings.boundCloudLibrary,
+  cloudVerificationGeneration: settings.cloudVerificationGeneration,
+  verificationBatchTombstones: settings.verificationBatchTombstones,
+  legacyVerificationAdoption: settings.legacyVerificationAdoption,
+});
+
 describe("PluginDataStore", () => {
   it.each([
     ["missing locale", { openAtStartup: true }],
@@ -213,6 +263,729 @@ describe("PluginDataStore", () => {
           lastUsedAt: "2026-08-23T00:00:00.000Z",
         }],
       },
+    });
+    expect(store.activeIndex()).toBeNull();
+  });
+
+  it("distinguishes new-install defaults from a known legacy settings object", async () => {
+    const newInstall = new PluginDataStore(new MemoryPluginDataPort());
+    await newInstall.load();
+
+    expect(newInstall.settings()).toMatchObject({
+      boundCloudLibrary: null,
+      cloudVerificationGeneration: 0,
+      verificationBatchTombstones: { schemaVersion: 1, state: "valid", batchIds: [] },
+      legacyVerificationAdoption: { schemaVersion: 1, state: "none" },
+    });
+
+    const upgradedInstall = new PluginDataStore(new MemoryPluginDataPort({
+      schemaVersion: 1,
+      settings: { locale: "en", openAtStartup: true },
+      activeIndex: null,
+      staging: null,
+      operational: { pins: {}, dismissals: {}, lastOpened: {}, journals: [] },
+    }));
+    await upgradedInstall.load();
+
+    expect(upgradedInstall.settings()).toMatchObject({
+      locale: "en",
+      openAtStartup: true,
+      boundCloudLibrary: null,
+      cloudVerificationGeneration: 0,
+      verificationBatchTombstones: { schemaVersion: 1, state: "valid", batchIds: [] },
+      legacyVerificationAdoption: { schemaVersion: 1, state: "pending" },
+    });
+  });
+
+  it("round-trips a source-bound library, generation, tombstones, and adopted lineage", async () => {
+    const port = new MemoryPluginDataPort({
+      schemaVersion: 1,
+      settings: {
+        locale: "en",
+        openAtStartup: true,
+        cloudVerificationGeneration: 1,
+        boundCloudLibrary: boundCloudLibraryFixture(),
+        verificationBatchTombstones: {
+          schemaVersion: 1,
+          state: "valid",
+          batchIds: ["batch-old"],
+        },
+        legacyVerificationAdoption: adoptedLegacyVerificationFixture(),
+      },
+      activeIndex: null,
+      staging: null,
+      operational: { pins: {}, dismissals: {}, lastOpened: {}, journals: [] },
+    });
+    const store = new PluginDataStore(port);
+
+    await store.load();
+    await store.saveSettings(store.settings());
+    await store.reload();
+
+    expect(store.settings()).toMatchObject({
+      locale: "en",
+      openAtStartup: true,
+      cloudVerificationGeneration: 1,
+      boundCloudLibrary: boundCloudLibraryFixture(),
+      verificationBatchTombstones: {
+        schemaVersion: 1,
+        state: "valid",
+        batchIds: ["batch-old"],
+      },
+      legacyVerificationAdoption: adoptedLegacyVerificationFixture(),
+    });
+  });
+
+  it.each([
+    ["a path-only string", "/Synthetic/Library", 1],
+    ["a binding missing its source", { schemaVersion: 1, path: "/Synthetic/Library", verificationGeneration: 1 }, 1],
+    ["a root binding", { ...boundCloudLibraryFixture(), path: "/" }, 1],
+    ["a generation-mismatched binding", boundCloudLibraryFixture(), 2],
+    ["a generation-zero binding", boundCloudLibraryFixture(), 0],
+    ["an unsafe settings generation", boundCloudLibraryFixture(), Number.MAX_SAFE_INTEGER + 1],
+  ])("fails closed for %s without resetting unrelated settings", async (_, boundCloudLibrary, generation) => {
+    const store = new PluginDataStore(new MemoryPluginDataPort({
+      schemaVersion: 1,
+      settings: {
+        locale: "en",
+        openAtStartup: true,
+        cloudVerificationGeneration: generation,
+        boundCloudLibrary,
+      },
+      activeIndex: null,
+      staging: null,
+      operational: { pins: {}, dismissals: {}, lastOpened: {}, journals: [] },
+    }));
+
+    await store.load();
+
+    expect(store.settings()).toMatchObject({ locale: "en", openAtStartup: true });
+    expect(store.settings().boundCloudLibrary).toBeNull();
+    expect(store.settings().cloudVerificationGeneration).toBe(
+      Number.isSafeInteger(generation) && generation >= 0 ? generation : 0,
+    );
+  });
+
+  it("never promotes a recent directory into a trusted cloud library", async () => {
+    const store = new PluginDataStore(new MemoryPluginDataPort({
+      schemaVersion: 1,
+      settings: {
+        recentCloudDirectories: {
+          schemaVersion: 1,
+          items: [{
+            path: "/Synthetic/Library",
+            filename: "Library",
+            lastUsedAt: "2026-08-23T00:00:00.000Z",
+          }],
+        },
+      },
+      activeIndex: null,
+      staging: null,
+      operational: { pins: {}, dismissals: {}, lastOpened: {}, journals: [] },
+    }));
+
+    await store.load();
+
+    expect(store.settings().recentCloudDirectories.items[0]?.path).toBe("/Synthetic/Library");
+    expect(store.settings().boundCloudLibrary).toBeNull();
+    expect(store.settings().cloudVerificationGeneration).toBe(0);
+  });
+
+  it("keeps malformed tombstones and adoption sticky across unrelated settings writes", async () => {
+    const port = new MemoryPluginDataPort({
+      schemaVersion: 1,
+      settings: {
+        locale: "zh-CN",
+        verificationBatchTombstones: {
+          schemaVersion: 1,
+          state: "valid",
+          batchIds: Array.from({ length: 17 }, (_, index) => `batch-${index}`),
+        },
+        legacyVerificationAdoption: {
+          schemaVersion: 1,
+          state: "pending",
+          extra: true,
+        },
+      },
+      activeIndex: { builtAt: 7, records: [] },
+      staging: { scanId: "scan-1", completedPaths: [], records: [] },
+      operational: {
+        pins: { kept: 1 },
+        dismissals: {},
+        lastOpened: {},
+        journals: [{ id: "journal-1", status: "planned" }],
+      },
+    });
+    const store = new PluginDataStore(port);
+    await store.load();
+
+    expect(store.settings()).toMatchObject({
+      verificationBatchTombstones: { schemaVersion: 1, state: "invalid" },
+      legacyVerificationAdoption: { schemaVersion: 1, state: "invalid" },
+    });
+
+    await store.saveSettings({
+      ...store.settings(),
+      locale: "en",
+      openAtStartup: true,
+      verificationBatchTombstones: { schemaVersion: 1, state: "valid", batchIds: [] },
+      legacyVerificationAdoption: { schemaVersion: 1, state: "none" },
+    });
+    await store.reload();
+
+    expect(store.settings()).toMatchObject({
+      locale: "en",
+      openAtStartup: true,
+      verificationBatchTombstones: { schemaVersion: 1, state: "invalid" },
+      legacyVerificationAdoption: { schemaVersion: 1, state: "invalid" },
+    });
+    expect(store.activeIndex()).toEqual({ builtAt: 7, records: [] });
+    expect(store.staging()).toEqual({ scanId: "scan-1", completedPaths: [], records: [] });
+    expect(store.operational()).toMatchObject({
+      pins: { kept: 1 },
+      journals: [{ id: "journal-1", status: "planned" }],
+    });
+  });
+
+  it("does not let a general settings write seal a pending legacy adoption", async () => {
+    const store = new PluginDataStore(new MemoryPluginDataPort({
+      schemaVersion: 1,
+      settings: { locale: "zh-CN" },
+      activeIndex: null,
+      staging: null,
+      operational: { pins: {}, dismissals: {}, lastOpened: {}, journals: [] },
+    }));
+    await store.load();
+    expect(store.settings().legacyVerificationAdoption).toEqual({ schemaVersion: 1, state: "pending" });
+
+    await store.updateSettings((settings) => ({
+      ...settings,
+      locale: "en",
+      legacyVerificationAdoption: adoptedLegacyVerificationFixture(),
+    }));
+
+    expect(store.settings().locale).toBe("en");
+    expect(store.settings().legacyVerificationAdoption).toEqual({ schemaVersion: 1, state: "pending" });
+  });
+
+  it("allows one explicit first-binding transaction to adopt pending legacy lineage without losing a concurrent locale write", async () => {
+    const store = new PluginDataStore(new MemoryPluginDataPort({
+      schemaVersion: 1,
+      settings: {
+        locale: "zh-CN",
+        verificationBatchTombstones: { schemaVersion: 1, state: "invalid" },
+      },
+      activeIndex: null,
+      staging: null,
+      operational: { pins: {}, dismissals: {}, lastOpened: {}, journals: [] },
+    }));
+    await store.load();
+
+    await Promise.all([
+      store.updateSettings((settings) => ({ ...settings, locale: "en" })),
+      store.updateCloudVerificationSettings({
+        ...cloudVerificationSettings(store.settings()),
+        cloudVerificationGeneration: 1,
+        boundCloudLibrary: boundCloudLibraryFixture(),
+        verificationBatchTombstones: {
+          schemaVersion: 1,
+          state: "valid",
+          batchIds: [],
+        },
+        legacyVerificationAdoption: adoptedLegacyVerificationFixture(),
+      }, {
+        kind: "library-binding",
+        currentWorkflowBatchId: null,
+      }),
+    ]);
+
+    expect(store.settings()).toMatchObject({
+      locale: "en",
+      cloudVerificationGeneration: 1,
+      boundCloudLibrary: boundCloudLibraryFixture(),
+      verificationBatchTombstones: {
+        schemaVersion: 1,
+        state: "valid",
+        batchIds: [],
+      },
+      legacyVerificationAdoption: adoptedLegacyVerificationFixture(),
+    });
+  });
+
+  it("rejects an authority mutation without an explicit transition intent", async () => {
+    const port = new MemoryPluginDataPort({
+      schemaVersion: 1,
+      settings: {
+        locale: "zh-CN",
+        verificationBatchTombstones: { schemaVersion: 1, state: "invalid" },
+      },
+      activeIndex: null,
+      staging: null,
+      operational: { pins: {}, dismissals: {}, lastOpened: {}, journals: [] },
+    });
+    const store = new PluginDataStore(port);
+    await store.load();
+
+    await expect(
+      // @ts-expect-error Cloud authority mutations require an explicit transition intent.
+      store.updateCloudVerificationSettings({
+        ...cloudVerificationSettings(store.settings()),
+        cloudVerificationGeneration: 1,
+        boundCloudLibrary: boundCloudLibraryFixture(),
+        verificationBatchTombstones: { schemaVersion: 1, state: "valid", batchIds: [] },
+        legacyVerificationAdoption: adoptedLegacyVerificationFixture(),
+      }),
+    ).rejects.toThrow(/transition|intent|authority/iu);
+
+    expect(port.saveCalls).toHaveLength(0);
+    expect(store.settings()).toMatchObject({
+      cloudVerificationGeneration: 0,
+      boundCloudLibrary: null,
+      verificationBatchTombstones: { schemaVersion: 1, state: "invalid" },
+      legacyVerificationAdoption: { schemaVersion: 1, state: "pending" },
+    });
+  });
+
+  it("rejects a first-binding transaction that omits its declared workflow batch tombstone", async () => {
+    const port = new MemoryPluginDataPort({
+      schemaVersion: 1,
+      settings: {
+        locale: "zh-CN",
+        verificationBatchTombstones: { schemaVersion: 1, state: "invalid" },
+      },
+      activeIndex: null,
+      staging: null,
+      operational: { pins: {}, dismissals: {}, lastOpened: {}, journals: [] },
+    });
+    const store = new PluginDataStore(port);
+    await store.load();
+
+    await expect(store.updateCloudVerificationSettings({
+      ...cloudVerificationSettings(store.settings()),
+      cloudVerificationGeneration: 1,
+      boundCloudLibrary: boundCloudLibraryFixture(),
+      verificationBatchTombstones: { schemaVersion: 1, state: "valid", batchIds: [] },
+      legacyVerificationAdoption: adoptedLegacyVerificationFixture(),
+    }, {
+      kind: "library-binding",
+      currentWorkflowBatchId: "batch-current",
+    })).rejects.toThrow(/tombstone|batch/iu);
+
+    expect(port.saveCalls).toHaveLength(0);
+    expect(store.settings().verificationBatchTombstones).toEqual({
+      schemaVersion: 1,
+      state: "invalid",
+    });
+  });
+
+  it("rejects a first-binding transaction that erases existing tombstones when no current batch is declared", async () => {
+    const port = new MemoryPluginDataPort({
+      schemaVersion: 1,
+      settings: {
+        locale: "zh-CN",
+        verificationBatchTombstones: {
+          schemaVersion: 1,
+          state: "valid",
+          batchIds: ["batch-old"],
+        },
+      },
+      activeIndex: null,
+      staging: null,
+      operational: { pins: {}, dismissals: {}, lastOpened: {}, journals: [] },
+    });
+    const store = new PluginDataStore(port);
+    await store.load();
+
+    await expect(store.updateCloudVerificationSettings({
+      ...cloudVerificationSettings(store.settings()),
+      cloudVerificationGeneration: 1,
+      boundCloudLibrary: boundCloudLibraryFixture(),
+      verificationBatchTombstones: { schemaVersion: 1, state: "valid", batchIds: [] },
+      legacyVerificationAdoption: adoptedLegacyVerificationFixture(),
+    }, {
+      kind: "library-binding",
+      currentWorkflowBatchId: null,
+    })).rejects.toThrow(/tombstone|batch/iu);
+
+    expect(port.saveCalls).toHaveLength(0);
+    expect(store.settings().verificationBatchTombstones).toEqual({
+      schemaVersion: 1,
+      state: "valid",
+      batchIds: ["batch-old"],
+    });
+  });
+
+  it.each([
+    {
+      name: "create adoption from none",
+      current: { schemaVersion: 1 as const, state: "none" as const },
+      next: adoptedLegacyVerificationFixture(),
+    },
+    {
+      name: "replace an adopted lineage",
+      current: adoptedLegacyVerificationFixture(),
+      next: {
+        ...adoptedLegacyVerificationFixture(),
+        unified: {
+          ...adoptedLegacyVerificationFixture().unified,
+          descriptorSha256: "9".repeat(64),
+        },
+      },
+    },
+  ])("rejects $name after generation zero has already been left", async ({ current, next }) => {
+    const port = new MemoryPluginDataPort({
+      schemaVersion: 1,
+      settings: {
+        locale: "zh-CN",
+        cloudVerificationGeneration: 1,
+        boundCloudLibrary: boundCloudLibraryFixture(),
+        verificationBatchTombstones: {
+          schemaVersion: 1,
+          state: "valid",
+          batchIds: ["batch-old"],
+        },
+        legacyVerificationAdoption: current,
+      },
+      activeIndex: null,
+      staging: null,
+      operational: { pins: {}, dismissals: {}, lastOpened: {}, journals: [] },
+    });
+    const store = new PluginDataStore(port);
+    await store.load();
+
+    await expect(store.updateCloudVerificationSettings({
+      ...cloudVerificationSettings(store.settings()),
+      legacyVerificationAdoption: next,
+    }, {
+      kind: "library-binding",
+      currentWorkflowBatchId: null,
+    })).rejects.toThrow(/adoption|generation/iu);
+
+    expect(port.saveCalls).toHaveLength(0);
+    expect(store.settings().legacyVerificationAdoption).toEqual(current);
+  });
+
+  it("rejects an adopted lineage whose cloud root hash does not match the bound path", async () => {
+    const port = new MemoryPluginDataPort({
+      schemaVersion: 1,
+      settings: {
+        locale: "zh-CN",
+        verificationBatchTombstones: { schemaVersion: 1, state: "invalid" },
+      },
+      activeIndex: null,
+      staging: null,
+      operational: { pins: {}, dismissals: {}, lastOpened: {}, journals: [] },
+    });
+    const store = new PluginDataStore(port);
+    await store.load();
+
+    await expect(store.updateCloudVerificationSettings({
+      ...cloudVerificationSettings(store.settings()),
+      cloudVerificationGeneration: 1,
+      boundCloudLibrary: boundCloudLibraryFixture(),
+      verificationBatchTombstones: { schemaVersion: 1, state: "valid", batchIds: [] },
+      legacyVerificationAdoption: {
+        ...adoptedLegacyVerificationFixture(),
+        cloudRootSha256: "b".repeat(64),
+        resumableBatch: {
+          ...adoptedLegacyVerificationFixture().resumableBatch,
+          cloudRootSha256: "b".repeat(64),
+        },
+      },
+    }, {
+      kind: "library-binding",
+      currentWorkflowBatchId: null,
+    })).rejects.toThrow(/root|scope|bound/iu);
+
+    expect(port.saveCalls).toHaveLength(0);
+  });
+
+  it("freezes the detached binding request before it enters the settings queue", async () => {
+    const store = new PluginDataStore(new MemoryPluginDataPort({
+      schemaVersion: 1,
+      settings: {
+        locale: "zh-CN",
+        verificationBatchTombstones: { schemaVersion: 1, state: "invalid" },
+      },
+      activeIndex: null,
+      staging: null,
+      operational: { pins: {}, dismissals: {}, lastOpened: {}, journals: [] },
+    }));
+    await store.load();
+    const requested = {
+      ...cloudVerificationSettings(store.settings()),
+      cloudVerificationGeneration: 1,
+      boundCloudLibrary: boundCloudLibraryFixture(),
+      verificationBatchTombstones: { schemaVersion: 1 as const, state: "valid" as const, batchIds: [] },
+      legacyVerificationAdoption: adoptedLegacyVerificationFixture(),
+    };
+
+    const pending = store.updateCloudVerificationSettings(requested, {
+      kind: "library-binding",
+      currentWorkflowBatchId: null,
+    });
+    requested.boundCloudLibrary = { ...requested.boundCloudLibrary, path: "/Synthetic/Changed" };
+    requested.legacyVerificationAdoption = {
+      ...requested.legacyVerificationAdoption,
+      sourceImportSha256: "9".repeat(64),
+    };
+    await pending;
+
+    expect(store.settings()).toMatchObject({
+      boundCloudLibrary: boundCloudLibraryFixture(),
+      legacyVerificationAdoption: adoptedLegacyVerificationFixture(),
+    });
+  });
+
+  it("rejects a queued authority request when an earlier authority transaction changed its basis", async () => {
+    const store = new PluginDataStore(new MemoryPluginDataPort({
+      schemaVersion: 1,
+      settings: {
+        locale: "zh-CN",
+        verificationBatchTombstones: { schemaVersion: 1, state: "invalid" },
+      },
+      activeIndex: null,
+      staging: null,
+      operational: { pins: {}, dismissals: {}, lastOpened: {}, journals: [] },
+    }));
+    await store.load();
+    const requested = {
+      ...cloudVerificationSettings(store.settings()),
+      cloudVerificationGeneration: 1,
+      boundCloudLibrary: boundCloudLibraryFixture(),
+      verificationBatchTombstones: { schemaVersion: 1 as const, state: "valid" as const, batchIds: [] },
+      legacyVerificationAdoption: adoptedLegacyVerificationFixture(),
+    };
+    const intent = { kind: "library-binding" as const, currentWorkflowBatchId: null };
+
+    const first = store.updateCloudVerificationSettings(requested, intent);
+    const stale = store.updateCloudVerificationSettings(requested, intent);
+
+    await expect(first).resolves.toBeUndefined();
+    await expect(stale).rejects.toThrow(/stale|changed|basis|generation/iu);
+  });
+
+  it("clears only the binding when a different TXT source is activated", async () => {
+    const store = new PluginDataStore(new MemoryPluginDataPort({
+      schemaVersion: 1,
+      settings: {
+        locale: "zh-CN",
+        cloudVerificationGeneration: 1,
+        boundCloudLibrary: boundCloudLibraryFixture(),
+        verificationBatchTombstones: { schemaVersion: 1, state: "valid", batchIds: ["batch-old"] },
+        legacyVerificationAdoption: adoptedLegacyVerificationFixture(),
+      },
+      activeIndex: null,
+      staging: null,
+      operational: { pins: {}, dismissals: {}, lastOpened: {}, journals: [] },
+    }));
+    await store.load();
+
+    await store.updateCloudVerificationSettings({
+      ...cloudVerificationSettings(store.settings()),
+      boundCloudLibrary: null,
+    }, {
+      kind: "txt-source-replacement",
+      currentWorkflowBatchId: null,
+    });
+
+    expect(store.settings()).toMatchObject({
+      cloudVerificationGeneration: 1,
+      boundCloudLibrary: null,
+      verificationBatchTombstones: { schemaVersion: 1, state: "valid", batchIds: ["batch-old"] },
+      legacyVerificationAdoption: adoptedLegacyVerificationFixture(),
+    });
+  });
+
+  it("lets explicit identity replacement leave an invalid adoption in a reachable fresh state", async () => {
+    const store = new PluginDataStore(new MemoryPluginDataPort({
+      schemaVersion: 1,
+      settings: {
+        locale: "zh-CN",
+        cloudVerificationGeneration: 1,
+        boundCloudLibrary: boundCloudLibraryFixture(),
+        verificationBatchTombstones: { schemaVersion: 1, state: "invalid" },
+        legacyVerificationAdoption: { schemaVersion: 1, state: "invalid" },
+      },
+      activeIndex: null,
+      staging: null,
+      operational: { pins: {}, dismissals: {}, lastOpened: {}, journals: [] },
+    }));
+    await store.load();
+
+    await store.updateCloudVerificationSettings({
+      ...cloudVerificationSettings(store.settings()),
+      cloudVerificationGeneration: 2,
+      boundCloudLibrary: null,
+      verificationBatchTombstones: {
+        schemaVersion: 1,
+        state: "valid",
+        batchIds: ["batch-current"],
+      },
+      legacyVerificationAdoption: { schemaVersion: 1, state: "ineligible" },
+    }, {
+      kind: "identity-replacement",
+      currentWorkflowBatchId: "batch-current",
+    });
+
+    expect(store.settings()).toMatchObject({
+      cloudVerificationGeneration: 2,
+      boundCloudLibrary: null,
+      verificationBatchTombstones: {
+        schemaVersion: 1,
+        state: "valid",
+        batchIds: ["batch-current"],
+      },
+      legacyVerificationAdoption: { schemaVersion: 1, state: "ineligible" },
+    });
+  });
+
+  it("keeps an older adopted lineage as history when a later generation binds again", async () => {
+    const historicalAdoption = adoptedLegacyVerificationFixture();
+    const store = new PluginDataStore(new MemoryPluginDataPort({
+      schemaVersion: 1,
+      settings: {
+        locale: "zh-CN",
+        cloudVerificationGeneration: 2,
+        boundCloudLibrary: null,
+        verificationBatchTombstones: { schemaVersion: 1, state: "valid", batchIds: ["batch-old"] },
+        legacyVerificationAdoption: historicalAdoption,
+      },
+      activeIndex: null,
+      staging: null,
+      operational: { pins: {}, dismissals: {}, lastOpened: {}, journals: [] },
+    }));
+    await store.load();
+    const nextBinding = {
+      ...boundCloudLibraryFixture(),
+      sourceImportSha256: "9".repeat(64),
+      verificationGeneration: 2,
+    };
+
+    await store.updateCloudVerificationSettings({
+      ...cloudVerificationSettings(store.settings()),
+      boundCloudLibrary: nextBinding,
+    }, {
+      kind: "library-binding",
+      currentWorkflowBatchId: null,
+    });
+
+    expect(store.settings()).toMatchObject({
+      cloudVerificationGeneration: 2,
+      boundCloudLibrary: nextBinding,
+      legacyVerificationAdoption: historicalAdoption,
+    });
+  });
+
+  it("keeps an adopted lineage as history when a root change rotates generation", async () => {
+    const historicalAdoption = adoptedLegacyVerificationFixture();
+    const store = new PluginDataStore(new MemoryPluginDataPort({
+      schemaVersion: 1,
+      settings: {
+        locale: "zh-CN",
+        cloudVerificationGeneration: 1,
+        boundCloudLibrary: boundCloudLibraryFixture(),
+        verificationBatchTombstones: { schemaVersion: 1, state: "valid", batchIds: ["batch-old"] },
+        legacyVerificationAdoption: historicalAdoption,
+      },
+      activeIndex: null,
+      staging: null,
+      operational: { pins: {}, dismissals: {}, lastOpened: {}, journals: [] },
+    }));
+    await store.load();
+    const nextBinding = {
+      ...boundCloudLibraryFixture(),
+      path: "/Synthetic/Other",
+      verificationGeneration: 2,
+    };
+
+    await store.updateCloudVerificationSettings({
+      ...cloudVerificationSettings(store.settings()),
+      cloudVerificationGeneration: 2,
+      boundCloudLibrary: nextBinding,
+      verificationBatchTombstones: {
+        schemaVersion: 1,
+        state: "valid",
+        batchIds: ["batch-old", "batch-current"],
+      },
+    }, {
+      kind: "library-binding",
+      currentWorkflowBatchId: "batch-current",
+    });
+
+    expect(store.settings()).toMatchObject({
+      cloudVerificationGeneration: 2,
+      boundCloudLibrary: nextBinding,
+      verificationBatchTombstones: {
+        schemaVersion: 1,
+        state: "valid",
+        batchIds: ["batch-old", "batch-current"],
+      },
+      legacyVerificationAdoption: historicalAdoption,
+    });
+  });
+
+  it.each([
+    { schemaVersion: 1, state: "none" },
+    { schemaVersion: 1, state: "pending" },
+    { schemaVersion: 1, state: "ineligible" },
+    { schemaVersion: 1, state: "invalid" },
+    adoptedLegacyVerificationFixture(),
+  ])("preserves independently safe cloud authority fields across an unknown outer schema", async (adoption) => {
+    const tombstones = adoption.state === "invalid"
+      ? { schemaVersion: 1, state: "invalid" }
+      : { schemaVersion: 1, state: "valid", batchIds: ["batch-old"] };
+    const store = new PluginDataStore(new MemoryPluginDataPort({
+      schemaVersion: 999,
+      settings: {
+        locale: "en",
+        openAtStartup: true,
+        writeEnabled: true,
+        writePreviewAcknowledged: true,
+        aiEnabled: true,
+        aiEndpoint: "https://example.test/v1",
+        aiModel: "model",
+        secretId: "secret-id",
+        cloudVerificationGeneration: 1,
+        boundCloudLibrary: boundCloudLibraryFixture(),
+        verificationBatchTombstones: tombstones,
+        legacyVerificationAdoption: adoption,
+      },
+      activeIndex: { unsafe: true },
+    }));
+
+    await store.load();
+
+    expect(store.settings()).toMatchObject({
+      locale: "en",
+      openAtStartup: true,
+      writeEnabled: false,
+      writePreviewAcknowledged: false,
+      aiEnabled: false,
+      cloudVerificationGeneration: 1,
+      boundCloudLibrary: boundCloudLibraryFixture(),
+      verificationBatchTombstones: tombstones,
+      legacyVerificationAdoption: adoption,
+    });
+    expect(store.activeIndex()).toBeNull();
+  });
+
+  it("does not infer pending legacy adoption when an unknown outer schema omits the field", async () => {
+    const store = new PluginDataStore(new MemoryPluginDataPort({
+      schemaVersion: 999,
+      settings: {
+        locale: "en",
+        cloudVerificationGeneration: 0,
+        verificationBatchTombstones: { schemaVersion: 1, state: "valid", batchIds: [] },
+      },
+      activeIndex: { unsafe: true },
+    }));
+
+    await store.load();
+
+    expect(store.settings().legacyVerificationAdoption).toEqual({
+      schemaVersion: 1,
+      state: "invalid",
     });
     expect(store.activeIndex()).toBeNull();
   });

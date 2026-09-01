@@ -103,6 +103,10 @@ const expectedSeed = {
 const expectedRuntimeSettings = {
   ...expectedSeed.settings,
   recentCloudDirectories: EMPTY_RECENT_CLOUD_DIRECTORIES,
+  boundCloudLibrary: null,
+  cloudVerificationGeneration: 0,
+  verificationBatchTombstones: { schemaVersion: 1, state: "valid", batchIds: [] },
+  legacyVerificationAdoption: { schemaVersion: 1, state: "pending" },
 } as const;
 
 function requireRecord(value: unknown, label: string): JsonRecord {

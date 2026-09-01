@@ -54,6 +54,10 @@ const makeTab = (options: Readonly<{ fail?: Error }> = {}) => {
       folderRules: [], excludedPrefixes: [], aiEnabled: true,
       aiEndpoint: "https://example.test/v1", aiModel: "model", secretId: "",
       recentCloudDirectories: EMPTY_RECENT_CLOUD_DIRECTORIES,
+      boundCloudLibrary: null,
+      cloudVerificationGeneration: 0,
+      verificationBatchTombstones: { schemaVersion: 1, state: "valid", batchIds: [] } as const,
+      legacyVerificationAdoption: { schemaVersion: 1, state: "none" } as const,
     }),
     folderRuleProposals: () => [],
     previewSampleChange: () => undefined,
@@ -101,6 +105,10 @@ describe("AI settings", () => {
         aiModel: "",
         secretId: "",
         recentCloudDirectories: EMPTY_RECENT_CLOUD_DIRECTORIES,
+        boundCloudLibrary: null,
+        cloudVerificationGeneration: 0,
+        verificationBatchTombstones: { schemaVersion: 1, state: "valid", batchIds: [] } as const,
+        legacyVerificationAdoption: { schemaVersion: 1, state: "none" } as const,
       }),
       folderRuleProposals: () => [],
       previewSampleChange: () => undefined,
@@ -166,6 +174,10 @@ describe("AI settings", () => {
         folderRules: [], excludedPrefixes: [], aiEnabled: true,
         aiEndpoint: "https://example.test/v1", aiModel: "model", secretId: "secret-id",
         recentCloudDirectories: EMPTY_RECENT_CLOUD_DIRECTORIES,
+        boundCloudLibrary: null,
+        cloudVerificationGeneration: 0,
+        verificationBatchTombstones: { schemaVersion: 1, state: "valid", batchIds: [] } as const,
+        legacyVerificationAdoption: { schemaVersion: 1, state: "none" } as const,
       }),
       folderRuleProposals: () => [],
       previewSampleChange: calls.sample,
@@ -280,6 +292,10 @@ describe("hybrid catalog settings", () => {
     folderRules: [], excludedPrefixes: [], aiEnabled: false,
     aiEndpoint: "", aiModel: "", secretId: "",
     recentCloudDirectories: EMPTY_RECENT_CLOUD_DIRECTORIES,
+    boundCloudLibrary: null,
+    cloudVerificationGeneration: 0,
+    verificationBatchTombstones: { schemaVersion: 1, state: "valid", batchIds: [] } as const,
+    legacyVerificationAdoption: { schemaVersion: 1, state: "none" } as const,
   };
   const group = (index: number) => ({
     groupKey: `group:${String(index).repeat(64)}`,
@@ -748,6 +764,10 @@ describe("cloud catalog settings", () => {
       folderRules: [], excludedPrefixes: [], aiEnabled: false,
       aiEndpoint: "", aiModel: "", secretId: "",
       recentCloudDirectories: EMPTY_RECENT_CLOUD_DIRECTORIES,
+      boundCloudLibrary: null,
+      cloudVerificationGeneration: 0,
+      verificationBatchTombstones: { schemaVersion: 1, state: "valid", batchIds: [] } as const,
+      legacyVerificationAdoption: { schemaVersion: 1, state: "none" } as const,
     };
     const calls = {
       connect: [] as Array<Readonly<{ appKey: string; secretKey: string }>>,
@@ -853,6 +873,10 @@ describe("cloud catalog settings", () => {
       folderRules: [], excludedPrefixes: [], aiEnabled: false,
       aiEndpoint: "", aiModel: "", secretId: "",
       recentCloudDirectories: EMPTY_RECENT_CLOUD_DIRECTORIES,
+      boundCloudLibrary: null,
+      cloudVerificationGeneration: 0,
+      verificationBatchTombstones: { schemaVersion: 1, state: "valid", batchIds: [] } as const,
+      legacyVerificationAdoption: { schemaVersion: 1, state: "none" } as const,
     };
     let connection: CloudCatalogConnectionViewModel = { status: "authorized" };
     let notify = (): void => undefined;
@@ -966,6 +990,10 @@ describe("cloud catalog settings", () => {
         folderRules: [], excludedPrefixes: [], aiEnabled: false,
         aiEndpoint: "", aiModel: "", secretId: "",
         recentCloudDirectories: EMPTY_RECENT_CLOUD_DIRECTORIES,
+        boundCloudLibrary: null,
+        cloudVerificationGeneration: 0,
+        verificationBatchTombstones: { schemaVersion: 1, state: "valid", batchIds: [] } as const,
+        legacyVerificationAdoption: { schemaVersion: 1, state: "none" } as const,
       };
       const cancelAuthorization = vi.fn();
       let connection: Readonly<{
