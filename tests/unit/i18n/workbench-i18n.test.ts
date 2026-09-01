@@ -149,4 +149,29 @@ describe("workbench i18n", () => {
       expect(en.t(key), `${key} en`).toBe(expectedEn);
     }
   });
+
+  it("provides fixed bilingual TXT and cloud-authority guidance", () => {
+    const zh = createWorkbenchI18n("zh-CN");
+    const en = createWorkbenchI18n("en");
+    const messages: readonly [WorkbenchMessageKey, string, string][] = [
+      ["task.txtContentUnchanged", "目录 TXT 内容没有变化，已保留当前书库绑定。", "The catalog TXT content is unchanged; the current library binding was preserved."],
+      ["task.txtImportFailed", "目录 TXT 未导入；现有目录保持不变。", "The catalog TXT was not imported; the current catalog remains unchanged."],
+      ["cloudAuthority.repairSameAccount", "请使用原来的百度账号重新授权；如需更换账号，请使用“更换账号”。", "Reconnect with the original Baidu account. To use another account, choose Replace account."],
+      ["cloudAuthority.replaceIdentity", "更换账号或凭据后，需要重新选择书库；旧核验结果仅保留为历史。", "After replacing the account or credentials, choose the library again; prior verification results remain history only."],
+      ["cloudAuthority.verificationMustPause", "请先暂停当前核验，再执行此操作。", "Pause the current verification before this action."],
+      ["cloudAuthority.scanMustCancel", "请先取消当前云端扫描，再执行此操作。", "Cancel the current cloud scan before this action."],
+      ["cloudAuthority.operationBusy", "另一项云端安全操作正在进行；请等待完成后重试。", "Another cloud-authority operation is in progress. Try again after it finishes."],
+      ["cloudAuthority.authorizationAttemptUnavailable", "本次授权已失效，请从对应的重新连接或更换账号操作重新开始。", "This authorization attempt is no longer valid. Restart the matching reconnect or replace-account action."],
+      ["settings.surface.repairSameAccount", "重新连接原账号（请使用原来的百度账号）", "Reconnect the original account (use the original Baidu account)"],
+      ["settings.surface.replaceIdentity", "更换账号或 AppKey/SecretKey", "Replace account or AppKey/SecretKey"],
+      ["settings.error.verificationMustPause", "请先暂停当前核验，再修改百度网盘授权。", "Pause the current verification before changing Baidu Netdisk authorization."],
+      ["settings.error.scanMustCancel", "请先取消当前云端扫描，再修改百度网盘授权。", "Cancel the current cloud scan before changing Baidu Netdisk authorization."],
+      ["settings.error.cloudAuthorityBusy", "另一项百度网盘权限操作正在进行，请稍后再试。", "Another Baidu Netdisk authority operation is in progress. Try again later."],
+    ];
+
+    for (const [key, expectedZh, expectedEn] of messages) {
+      expect(zh.t(key), `${key} zh-CN`).toBe(expectedZh);
+      expect(en.t(key), `${key} en`).toBe(expectedEn);
+    }
+  });
 });

@@ -40,6 +40,10 @@ import type {
   CloudDirectoryPickerPurpose,
   CloudDirectorySelection,
 } from "../catalog/cloud-directory-selection";
+import type {
+  LibraryWorkflowState,
+  PendingCatalogTxtDraft,
+} from "./library-workflow-state";
 
 export type { WorkbenchTab } from "./workbench-shell";
 export type { StartSection } from "./start-page";
@@ -61,6 +65,10 @@ export interface WorkbenchViewModel {
   readonly catalog: CloudCatalogViewModel;
   readonly catalogConnection?: CloudCatalogConnectionViewModel;
   readonly hybridCatalog?: HybridCatalogViewModel;
+  readonly pendingCatalogTxt: PendingCatalogTxtDraft | null;
+  readonly taskActionPending: boolean;
+  readonly taskActionRevision: number;
+  readonly workflow: LibraryWorkflowState;
   readonly verificationRoot: string;
   readonly verificationRootLocked: boolean;
   readonly verificationDirectorySelection?: CloudDirectorySelection;
@@ -159,6 +167,12 @@ const STATUS_MESSAGE_KEYS: Readonly<Record<string, WorkbenchMessageKey>> = {
   "History cleared": "host.status.historyCleared",
   "Map calculation failed": "host.status.mapFailed",
   "Workbench projection refresh failed": "host.status.projectionFailed",
+  "task.txtContentUnchanged": "task.txtContentUnchanged",
+  "task.txtImportFailed": "task.txtImportFailed",
+  "verification-must-pause": "cloudAuthority.verificationMustPause",
+  "scan-must-cancel": "cloudAuthority.scanMustCancel",
+  "cloud-authority-operation-busy": "cloudAuthority.operationBusy",
+  "authorization-attempt-unavailable": "cloudAuthority.authorizationAttemptUnavailable",
 };
 
 const verificationPageSurfaces = new WeakMap<HTMLElement, VerificationPageSurface>();

@@ -42,8 +42,14 @@ export interface SettingsController {
   setSessionAiSecret?(secret: string): void;
   catalogConnection?(): CloudCatalogConnectionViewModel | undefined;
   subscribeCatalogConnection?(listener: () => void): () => void;
-  connectCatalog?(credentials: Readonly<{ appKey: string; secretKey: string }>): Promise<void>;
-  submitCatalogAuthorizationCode?(code: string): Promise<void>;
+  connectCatalog?(
+    credentials: Readonly<{ appKey: string; secretKey: string }>,
+    intent?: CatalogAuthorizationIntent,
+  ): Promise<void>;
+  submitCatalogAuthorizationCode?(
+    code: string,
+    expectedIntent?: CatalogAuthorizationIntent,
+  ): Promise<void>;
   cancelCatalogAuthorization?(): void;
   revokeCatalog?(): Promise<void>;
   validateCatalogScanRoot?(rootPath: string): string;
@@ -70,6 +76,8 @@ export interface SettingsController {
   ): Promise<void>;
   cancelLargeCatalogVerification?(): void;
 }
+
+export type CatalogAuthorizationIntent = "repair-same-account" | "replace-identity";
 
 export interface SecretComponentLike {
   setValue(value: string): this;
@@ -195,6 +203,7 @@ export function createSettingsSectionsSurface(
     private catalogAppKeyDraft = "";
     private catalogSecretKeyDraft = "";
     private catalogAuthorizationCodeDraft = "";
+    private catalogAuthorizationIntent: CatalogAuthorizationIntent | null = null;
     private catalogScanRootDraft = "";
     private catalogScanDirectorySelection: CloudDirectorySelection | undefined;
     private catalogTxtPathDraft = "";
@@ -231,6 +240,13 @@ export function createSettingsSectionsSurface(
           Record<string, WorkbenchMessageKey>
         >)[value];
         return i18n.t(key ?? "settings.status.unknown");
+      };
+      const localizedOr = (key: string, fallback: string): string => {
+        try {
+          return i18n.t(key as WorkbenchMessageKey);
+        } catch {
+          return fallback;
+        }
       };
       const isCurrent = (): boolean => !this.disposed && this.renderGeneration === generation;
       const listen = (
@@ -339,12 +355,34 @@ export function createSettingsSectionsSurface(
           await operation();
           if (!isCurrent()) return;
           status.textContent = i18n.t("settings.save.success", { label });
-        } catch {
+        } catch (error) {
           if (!isCurrent()) return;
           onError?.();
-          status.textContent = safeErrorKey === undefined
+          const authorityGuidance = error instanceof Error
+            ? ({
+                "verification-must-pause": localizedOr(
+                  "settings.error.verificationMustPause",
+                  locale === "zh-CN"
+                    ? "请先暂停当前核验，再修改百度网盘授权。"
+                    : "Pause the current verification before changing Baidu authorization.",
+                ),
+                "scan-must-cancel": localizedOr(
+                  "settings.error.scanMustCancel",
+                  locale === "zh-CN"
+                    ? "请先取消当前云端扫描，再修改百度网盘授权。"
+                    : "Cancel the current cloud scan before changing Baidu authorization.",
+                ),
+                "cloud-authority-operation-busy": localizedOr(
+                  "settings.error.cloudAuthorityBusy",
+                  locale === "zh-CN"
+                    ? "另一项百度网盘权限操作正在进行，请稍后再试。"
+                    : "Another Baidu authority operation is in progress. Try again later.",
+                ),
+              } as Readonly<Record<string, string>>)[error.message]
+            : undefined;
+          status.textContent = authorityGuidance ?? (safeErrorKey === undefined
             ? i18n.t("settings.save.failure")
-            : i18n.t(safeErrorKey);
+            : i18n.t(safeErrorKey));
         }
       };
 
@@ -625,7 +663,8 @@ export function createSettingsSectionsSurface(
 
         const connectionActions = doc.createElement("div");
         connectionActions.className = "knowledge-workbench__settings-row";
-        const connect = button(i18n.t("settings.surface.connect"), () => {
+        const beginAuthorization = (intent: CatalogAuthorizationIntent): void => {
+          this.catalogAuthorizationIntent = null;
           const credentials = { appKey: appKey.value, secretKey: secretKey.value };
           appKey.value = "";
           secretKey.value = "";
@@ -637,21 +676,42 @@ export function createSettingsSectionsSurface(
           void run(
             "settings.save.cloudConnection",
             async () => {
-              await connectCatalog(credentials);
+              await connectCatalog(credentials, intent);
               if (!isCurrent()) return;
+              this.catalogAuthorizationIntent = intent;
               scheduleAuthorizationExpiry(
                 controller.catalogConnection?.()?.authorizationExpiresAt,
               );
             },
             connectionActions,
-            undefined,
+            () => {
+              if (this.catalogAuthorizationIntent === intent) {
+                this.catalogAuthorizationIntent = null;
+              }
+            },
             "settings.error.cloudUnavailable",
           );
-        });
+        };
+        const connect = button(
+          localizedOr(
+            "settings.surface.repairSameAccount",
+            locale === "zh-CN" ? "使用原账号重新连接" : "Reconnect original account",
+          ),
+          () => beginAuthorization("repair-same-account"),
+        );
         connect.dataset.action = "catalog-connect";
+        const replaceIdentity = button(
+          localizedOr(
+            "settings.surface.replaceIdentity",
+            locale === "zh-CN" ? "更换账号或凭据" : "Change account or credentials",
+          ),
+          () => beginAuthorization("replace-identity"),
+        );
+        replaceIdentity.dataset.action = "catalog-replace-identity";
         const revoke = button(i18n.t("settings.surface.removeCredentials"), () => {
           authorizationCode.value = "";
           this.catalogAuthorizationCodeDraft = "";
+          this.catalogAuthorizationIntent = null;
           this.clearCatalogAuthorizationExpiryTimer();
           void run(
             "settings.save.cloudAuthorization",
@@ -662,7 +722,7 @@ export function createSettingsSectionsSurface(
           );
         });
         revoke.dataset.action = "catalog-revoke";
-        connectionActions.append(connect, revoke);
+        connectionActions.append(connect, replaceIdentity, revoke);
 
         const authorizationCodeLabel = doc.createElement("label");
         authorizationCodeLabel.className = "knowledge-workbench__settings-row";
@@ -692,6 +752,7 @@ export function createSettingsSectionsSurface(
             this.catalogAuthorizationExpiryTimer = null;
             authorizationCode.value = "";
             this.catalogAuthorizationCodeDraft = "";
+            this.catalogAuthorizationIntent = null;
             cancelCatalogAuthorization();
             status.textContent = i18n.t("settings.surface.authorizationExpired");
             authorizationActions.insertAdjacentElement("afterend", status);
@@ -699,12 +760,18 @@ export function createSettingsSectionsSurface(
         };
         const submitAuthorization = button(i18n.t("settings.surface.submitAuthorization"), () => {
           const code = authorizationCode.value;
+          const expectedIntent = this.catalogAuthorizationIntent ?? undefined;
           authorizationCode.value = "";
           this.catalogAuthorizationCodeDraft = "";
           this.clearCatalogAuthorizationExpiryTimer();
           void run(
             "settings.save.cloudAuthorization",
-            () => submitCatalogAuthorizationCode(code),
+            async () => {
+              await submitCatalogAuthorizationCode(code, expectedIntent);
+              if (this.catalogAuthorizationIntent === expectedIntent) {
+                this.catalogAuthorizationIntent = null;
+              }
+            },
             authorizationActions,
             undefined,
             "settings.error.cloudUnavailable",
@@ -714,6 +781,7 @@ export function createSettingsSectionsSurface(
         const cancelAuthorization = button(i18n.t("settings.surface.cancelAuthorization"), () => {
           authorizationCode.value = "";
           this.catalogAuthorizationCodeDraft = "";
+          this.catalogAuthorizationIntent = null;
           this.clearCatalogAuthorizationExpiryTimer();
           cancelCatalogAuthorization();
           status.textContent = i18n.t("settings.surface.authorizationCanceled");
@@ -1418,6 +1486,7 @@ export function createSettingsSectionsSurface(
       this.catalogAppKeyDraft = "";
       this.catalogSecretKeyDraft = "";
       this.catalogAuthorizationCodeDraft = "";
+      this.catalogAuthorizationIntent = null;
       this.catalogScanRootDraft = "";
       this.catalogScanDirectorySelection = undefined;
       this.catalogTxtPathDraft = "";

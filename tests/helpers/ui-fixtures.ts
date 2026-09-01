@@ -13,7 +13,12 @@ import type { IncrementalIndexQueue } from "../../src/indexing/incremental-index
 import type { IndexService, ScanProgress } from "../../src/indexing/index-service";
 import type { FocusMapInput, FocusedMap, MapSearchResult, MapService } from "../../src/map/map-service";
 import type { PluginDataStore } from "../../src/storage/plugin-data-store";
-import type { OperationalState, PluginSettings } from "../../src/storage/plugin-data";
+import type {
+  CloudVerificationSettings,
+  CloudVerificationTransitionIntent,
+  OperationalState,
+  PluginSettings,
+} from "../../src/storage/plugin-data";
 import { EMPTY_RECENT_CLOUD_DIRECTORIES } from "../../src/storage/recent-cloud-directories";
 import { TodayService } from "../../src/today/today-service";
 import { SuggestionService, type RationaleEnhancer } from "../../src/suggestions/suggestion-service";
@@ -32,6 +37,7 @@ import type {
   HybridCatalogActiveSummary,
   LargeCatalogBatchSummary,
 } from "../../src/catalog/hybrid-catalog-runtime";
+import type { LibraryWorkflowState } from "../../src/ui/library-workflow-state";
 
 export const TEST_SOURCE_IMPORT_SHA256 = "a".repeat(64);
 
@@ -55,6 +61,15 @@ export const TEST_LARGE_BATCH_AUTHORITY = {
 export const TEST_INACTIVE_HYBRID_EXECUTION = {
   executionActive: false,
 } as const;
+
+export const TEST_NEEDS_TXT_WORKFLOW = {
+  kind: "needs-txt",
+  primaryAction: "choose-txt",
+  titleKey: "workflow.needsTxt.title",
+  descriptionKey: "workflow.needsTxt.description",
+  recommendedGroup: null,
+  canShowTechnicalDetails: false,
+} as const satisfies LibraryWorkflowState;
 
 /** Structural contract for the production dependency that Task 2 will expose. */
 export interface ProjectionSchedulerDependency {
@@ -159,6 +174,10 @@ export function populatedWorkbenchModel(): WorkbenchViewModel {
       total: 0,
       items: [],
     },
+    pendingCatalogTxt: null,
+    taskActionPending: false,
+    taskActionRevision: 1,
+    workflow: TEST_NEEDS_TXT_WORKFLOW,
     verificationRoot: "",
     verificationRootLocked: false,
     selectedVerificationGroupKeys: [],
@@ -316,9 +335,15 @@ const detached = <T>(value: T): T => structuredClone(value);
 class FixtureStore {
   failNext: Error | null = null;
   readonly saveSettingsCalls: PluginSettings[] = [];
+  readonly cloudVerificationSettingsCalls: Array<Readonly<{
+    settings: CloudVerificationSettings;
+    transition: CloudVerificationTransitionIntent;
+  }>> = [];
   private settingsValue = defaultSettings();
   private operationalValue = defaultOperational();
   private active: { builtAt: number; records: readonly DocumentRecord[] } | null;
+  private nextCloudVerificationUpdateGate: Promise<void> | null = null;
+  private resumeCloudVerificationUpdateGate: (() => void) | null = null;
 
   constructor(active: boolean, private readonly records: readonly DocumentRecord[] = RECORDS) {
     this.active = active ? { builtAt: 1, records: detached(records) } : null;
@@ -334,11 +359,52 @@ class FixtureStore {
   async saveSettings(settings: PluginSettings): Promise<void> {
     this.saveSettingsCalls.push(detached(settings));
     this.throwIfFailing();
-    this.settingsValue = detached(settings);
+    this.settingsValue = detached({
+      ...settings,
+      ...this.cloudVerificationSettings(),
+    });
   }
 
   async updateSettings(change: (settings: PluginSettings) => PluginSettings): Promise<void> {
     await this.saveSettings(change(this.settings()));
+  }
+
+  pauseNextCloudVerificationUpdate(): void {
+    if (this.nextCloudVerificationUpdateGate !== null) {
+      throw new Error("A cloud verification settings update is already paused");
+    }
+    this.nextCloudVerificationUpdateGate = new Promise<void>((resolve) => {
+      this.resumeCloudVerificationUpdateGate = resolve;
+    });
+  }
+
+  resumeCloudVerificationUpdate(): void {
+    this.resumeCloudVerificationUpdateGate?.();
+    this.resumeCloudVerificationUpdateGate = null;
+  }
+
+  async updateCloudVerificationSettings(
+    settings: CloudVerificationSettings,
+    transition: CloudVerificationTransitionIntent,
+  ): Promise<void> {
+    const expectedCurrent = this.cloudVerificationSettings();
+    const requestedSettings = detached(settings);
+    const requestedTransition = detached(transition);
+    this.cloudVerificationSettingsCalls.push({
+      settings: requestedSettings,
+      transition: requestedTransition,
+    });
+    const gate = this.nextCloudVerificationUpdateGate;
+    this.nextCloudVerificationUpdateGate = null;
+    if (gate !== null) await gate;
+    this.throwIfFailing();
+    if (JSON.stringify(this.cloudVerificationSettings()) !== JSON.stringify(expectedCurrent)) {
+      throw new RangeError("Cloud verification authority changed before the transaction committed");
+    }
+    this.settingsValue = detached({
+      ...this.settingsValue,
+      ...requestedSettings,
+    });
   }
 
   async setPin(id: string, pinnedAt: number | null): Promise<void> {
@@ -370,6 +436,15 @@ class FixtureStore {
     const error = this.failNext;
     this.failNext = null;
     throw error;
+  }
+
+  private cloudVerificationSettings(): CloudVerificationSettings {
+    return detached({
+      boundCloudLibrary: this.settingsValue.boundCloudLibrary,
+      cloudVerificationGeneration: this.settingsValue.cloudVerificationGeneration,
+      verificationBatchTombstones: this.settingsValue.verificationBatchTombstones,
+      legacyVerificationAdoption: this.settingsValue.legacyVerificationAdoption,
+    });
   }
 }
 
@@ -565,11 +640,13 @@ export interface ControllerFixtureOptions {
   readonly catalogConfirmation?: CatalogScanConfirmationPresenter;
   readonly catalogTxtImportConfirmation?: CatalogTxtImportConfirmationPresenter;
   readonly catalogLargeScanConfirmation?: CatalogLargeScanConfirmationPresenter;
+  readonly pauseCloudVerificationUpdate?: boolean;
 }
 
 export function controllerFixture(options: ControllerFixtureOptions = {}) {
   const records = options.records ?? RECORDS;
   const store = new FixtureStore(options.activeIndex ?? false, records);
+  if (options.pauseCloudVerificationUpdate === true) store.pauseNextCloudVerificationUpdate();
   if (options.historicalWriteEnabled !== undefined || options.historicalAiEnabled !== undefined) {
     store.setSettingsForTest({
       ...store.settings(),

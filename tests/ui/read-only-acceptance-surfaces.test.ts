@@ -23,6 +23,7 @@ import {
   type WorkbenchTab,
   type WorkbenchViewModel,
 } from "../../src/ui/workbench-view";
+import { TEST_NEEDS_TXT_WORKFLOW } from "../helpers/ui-fixtures";
 
 const ACCEPTANCE_BANNER = "Read-only acceptance build. Quick Capture, organization writes, Undo, and AI are unavailable. Derived index data is stored in the plugin's data file.";
 const ZH_ACCEPTANCE_BANNER = "只读验收版本。快速记录、整理写入、撤销和 AI 均不可用。派生索引数据保存在插件数据文件中。";
@@ -84,6 +85,10 @@ const modelFor = (activeTab: WorkbenchTab): WorkbenchViewModel => ({
     items: [],
     messageCode: "catalog-unavailable",
   },
+  pendingCatalogTxt: null,
+  taskActionPending: false,
+  taskActionRevision: 1,
+  workflow: TEST_NEEDS_TXT_WORKFLOW,
   verificationRoot: "",
   verificationRootLocked: false,
   selectedVerificationGroupKeys: [],

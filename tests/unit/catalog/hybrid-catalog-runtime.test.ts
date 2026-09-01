@@ -31,6 +31,7 @@ import type {
 
 const HASH_A = "a".repeat(64);
 const HASH_B = "b".repeat(64);
+const HASH_C = "c".repeat(64);
 const HASH_D = "d".repeat(64);
 const GROUP_A = `group:${"1".repeat(64)}`;
 const GROUP_B = `group:${"2".repeat(64)}`;
@@ -59,12 +60,12 @@ const summary = (sourceSha256 = HASH_A): CatalogTxtImportSummary => ({
   maxDepth: 2,
 });
 
-const descriptor = (): CandidateCatalogDescriptor => ({
+const descriptor = (sourceSha256 = HASH_A): CandidateCatalogDescriptor => ({
   schemaVersion: 1,
   importId: "import-1",
   importedAt: 100,
   candidateSha256: "c".repeat(64),
-  ...summary(),
+  ...summary(sourceSha256),
 });
 
 const candidate = (
@@ -263,8 +264,10 @@ const fixture = (options: Readonly<{
   verificationAuthority?: CloudVerificationAuthority | null;
   openError?: Error;
   importPromise?: Promise<CandidateCatalogDescriptor>;
+  importDescriptors?: readonly CandidateCatalogDescriptor[];
   projectPromise?: Promise<void>;
   projectError?: Error;
+  projectErrors?: readonly (Error | null)[];
   verificationResults?: readonly LargeCatalogVerificationSummary[];
   verificationStarts?: readonly LargeCatalogVerificationSummary[];
   verificationRecoveries?: readonly boolean[];
@@ -314,6 +317,8 @@ const fixture = (options: Readonly<{
   };
   const openCalls: string[] = [];
   const previewSummaries = [...(options.previewSummaries ?? [summary(), summary()])];
+  const importDescriptors = [...(options.importDescriptors ?? [])];
+  const projectErrors = [...(options.projectErrors ?? [])];
   const latestCheckpointSha256 = HASH_B;
   const selectedAuthority = options.verificationAuthority === undefined
     ? authority(options.latest?.schemaVersion === 3 ? {
@@ -335,8 +340,9 @@ const fixture = (options: Readonly<{
   const imports = {
     preview: vi.fn(async () => previewSummaries.shift() ?? summary()),
     import: vi.fn(async (_source, _signal?: AbortSignal) => {
-      const imported = await (options.importPromise ?? Promise.resolve(descriptor()));
-      activeCandidates = { descriptor: descriptor(), records: candidates };
+      const imported = await (options.importPromise
+        ?? Promise.resolve(importDescriptors.shift() ?? descriptor()));
+      activeCandidates = { descriptor: imported, records: candidates };
       return imported;
     }),
   };
@@ -459,14 +465,28 @@ const fixture = (options: Readonly<{
       if (options.latest?.schemaVersion !== 3) throw new Error("no-legacy-batch");
       return promotedBatch();
     }),
-    restoreCatalogActivation: vi.fn(async (_input: HybridCatalogActivationSnapshot) => undefined),
+    restoreCatalogActivation: vi.fn(async (input: HybridCatalogActivationSnapshot) => {
+      activeCandidates = input.candidate === null
+        ? null
+        : { descriptor: input.candidate, records: candidates };
+      activeUnified = input.unified === null
+        ? null
+        : {
+            descriptor: input.unified as NonNullable<typeof activeUnified>["descriptor"],
+            records: activeUnified?.records ?? [],
+            differences: [],
+          };
+    }),
   };
   const project = {
     rebuild: vi.fn(async (_authority?: CloudVerificationAuthority | null, _signal?: AbortSignal) => {
       await options.projectPromise;
-      if (options.projectError !== undefined) throw options.projectError;
+      const projectError = projectErrors.shift() ?? options.projectError;
+      if (projectError !== undefined && projectError !== null) throw projectError;
       activeUnified = activeUnified === null ? null : { ...activeUnified, descriptor: {
         ...activeUnified.descriptor,
+        sourceImportSha256: activeCandidates?.descriptor.sourceSha256
+          ?? activeUnified.descriptor.sourceImportSha256,
         completedAt: activeUnified.descriptor.completedAt + 1,
       } };
       return activeUnified;
@@ -1021,34 +1041,91 @@ describe("HybridCatalogRuntimeService", () => {
     expect(value.verification.runSegment).not.toHaveBeenCalled();
   });
 
-  it("previews without writes and imports only after a fresh matching hash", async () => {
-    const value = fixture();
+  it("returns a detached preview and consumes identical active bytes without writes", async () => {
+    const sourceSummary = summary(HASH_A);
+    const value = fixture({
+      latest: scopedCheckpoint({ status: "paused", stopReason: "list-request-limit" }),
+      previewSummaries: [sourceSummary, sourceSummary],
+    });
     await value.runtime.initialize();
 
-    await value.runtime.previewTxt("/synthetic/private-inventory.txt");
+    const preview = await value.runtime.previewTxt("/synthetic/private-inventory.txt");
+    expect(preview).toEqual(sourceSummary);
+    expect(preview).not.toBe(sourceSummary);
+    expect(preview).not.toBe(value.runtime.snapshot().candidate);
     expect(value.runtime.snapshot()).toMatchObject({ status: "previewed", candidate: summary() });
     expect(value.imports.import).not.toHaveBeenCalled();
     expect(value.project.rebuild).not.toHaveBeenCalled();
 
-    await value.runtime.importTxt("/synthetic/private-inventory.txt");
+    await expect(value.runtime.consumeTxtPreview({
+      path: "/synthetic/private-inventory.txt",
+      expectedSourceSha256: HASH_A,
+    })).resolves.toEqual({ kind: "unchanged", sourceSha256: HASH_A });
     expect(value.openCalls).toEqual([
-      "/synthetic/private-inventory.txt",
       "/synthetic/private-inventory.txt",
       "/synthetic/private-inventory.txt",
     ]);
     expect(value.imports.preview).toHaveBeenCalledTimes(2);
-    expect(value.imports.import).toHaveBeenCalledTimes(1);
-    expect(value.project.rebuild).toHaveBeenCalledTimes(1);
-    expect(value.runtime.snapshot()).toMatchObject({ status: "ready" });
+    expect(value.imports.import).not.toHaveBeenCalled();
+    expect(value.project.rebuild).not.toHaveBeenCalled();
+    expect(value.store.restoreCatalogActivation).not.toHaveBeenCalled();
+    expect(value.runtime.snapshot()).toMatchObject({
+      status: "paused",
+      active: { sourceImportSha256: HASH_A },
+      batch: { status: "paused", stopReason: "list-request-limit" },
+    });
     expect(value.runtime.snapshot()).not.toHaveProperty("candidate");
     expect(JSON.stringify(value.runtime.snapshot())).not.toContain("private-inventory");
   });
 
-  it("rejects a changed source before creating an import", async () => {
-    const value = fixture({ previewSummaries: [summary(HASH_A), summary(HASH_B)] });
+  it("activates a different freshly re-read preview and consumes the candidate", async () => {
+    const value = fixture({
+      previewSummaries: [summary(HASH_B), summary(HASH_B)],
+      importPromise: Promise.resolve(descriptor(HASH_B)),
+    });
+    await value.runtime.initialize();
     await value.runtime.previewTxt("/synthetic/inventory.txt");
 
-    await expect(value.runtime.importTxt("/synthetic/inventory.txt"))
+    await expect(value.runtime.consumeTxtPreview({
+      path: "/synthetic/inventory.txt",
+      expectedSourceSha256: HASH_B,
+    })).resolves.toEqual({ kind: "activated", sourceSha256: HASH_B });
+
+    expect(value.imports.import).toHaveBeenCalledTimes(1);
+    expect(value.project.rebuild).toHaveBeenCalledTimes(1);
+    expect(value.runtime.snapshot()).toMatchObject({
+      status: "ready",
+      active: { sourceImportSha256: HASH_B },
+    });
+    expect(value.runtime.snapshot()).not.toHaveProperty("candidate");
+  });
+
+  it("keeps the legacy import entry as a delegation to the one-use consume boundary", async () => {
+    const value = fixture({
+      previewSummaries: [summary(HASH_B), summary(HASH_B)],
+      importPromise: Promise.resolve(descriptor(HASH_B)),
+    });
+    await value.runtime.initialize();
+    await value.runtime.previewTxt("/synthetic/inventory.txt");
+    const consume = vi.spyOn(value.runtime, "consumeTxtPreview");
+
+    await value.runtime.importTxt("/synthetic/inventory.txt");
+
+    expect(consume).toHaveBeenCalledWith({
+      path: "/synthetic/inventory.txt",
+      expectedSourceSha256: HASH_B,
+    });
+    expect(value.runtime.snapshot()).not.toHaveProperty("candidate");
+  });
+
+  it("rejects changed bytes on atomic re-read and clears only the stale candidate", async () => {
+    const value = fixture({ previewSummaries: [summary(HASH_B), summary(HASH_A)] });
+    await value.runtime.previewTxt("/synthetic/inventory.txt");
+
+    await expect(value.runtime.consumeTxtPreview({
+      path: "/synthetic/inventory.txt",
+      expectedSourceSha256: HASH_B,
+    }))
       .rejects.toEqual(new HybridCatalogError("txt-source-invalid"));
 
     expect(value.imports.import).not.toHaveBeenCalled();
@@ -1056,6 +1133,69 @@ describe("HybridCatalogRuntimeService", () => {
     expect(value.runtime.snapshot()).toMatchObject({
       status: "error",
       messageCode: "txt-source-invalid",
+    });
+    expect(value.runtime.snapshot()).not.toHaveProperty("candidate");
+  });
+
+  it("rejects a stale expected hash before opening the path and preserves the newer candidate", async () => {
+    const value = fixture({ previewSummaries: [summary(HASH_B)] });
+    await value.runtime.previewTxt("/synthetic/inventory.txt");
+    value.openCalls.length = 0;
+
+    await expect(value.runtime.consumeTxtPreview({
+      path: "/must-not-open.txt",
+      expectedSourceSha256: HASH_A,
+    })).rejects.toEqual(new HybridCatalogError("txt-source-invalid"));
+
+    expect(value.openCalls).toEqual([]);
+    expect(value.runtime.snapshot()).toMatchObject({
+      status: "previewed",
+      candidate: { sourceSha256: HASH_B },
+    });
+  });
+
+  it("serializes the complete preview operation so overlapping paths cannot race", async () => {
+    let finishPreview!: (value: CatalogTxtImportSummary) => void;
+    const delayedPreview = new Promise<CatalogTxtImportSummary>((resolve) => {
+      finishPreview = resolve;
+    });
+    const value = fixture();
+    value.imports.preview.mockImplementationOnce(async () => delayedPreview);
+
+    const first = value.runtime.previewTxt("/synthetic/first.txt");
+    await vi.waitFor(() => { expect(value.imports.preview).toHaveBeenCalledOnce(); });
+    await expect(value.runtime.previewTxt("/synthetic/second.txt"))
+      .rejects.toEqual(new HybridCatalogError("hybrid-batch-unavailable"));
+    expect(value.openCalls).toEqual(["/synthetic/first.txt"]);
+
+    finishPreview(summary(HASH_B));
+    await expect(first).resolves.toEqual(summary(HASH_B));
+    expect(value.runtime.snapshot()).toMatchObject({
+      status: "previewed",
+      candidate: { sourceSha256: HASH_B },
+    });
+  });
+
+  it("does not publish a preview that settles after dispose", async () => {
+    let finishPreview!: (value: CatalogTxtImportSummary) => void;
+    const delayedPreview = new Promise<CatalogTxtImportSummary>((resolve) => {
+      finishPreview = resolve;
+    });
+    const value = fixture();
+    value.imports.preview.mockImplementationOnce(async () => delayedPreview);
+
+    const running = value.runtime.previewTxt("/synthetic/private-inventory.txt");
+    await vi.waitFor(() => { expect(value.imports.preview).toHaveBeenCalledOnce(); });
+    value.runtime.dispose();
+    finishPreview(summary(HASH_B));
+    await expect(running).rejects.toEqual(
+      new HybridCatalogError("hybrid-batch-unavailable"),
+    );
+
+    expect(value.runtime.snapshot()).toEqual({
+      status: "unavailable",
+      executionActive: false,
+      messageCode: "catalog-unavailable",
     });
   });
 
@@ -1301,7 +1441,12 @@ describe("HybridCatalogRuntimeService", () => {
     value.runtime.dispose();
 
     await value.runtime.initialize();
-    await value.runtime.previewTxt("/must-not-open.txt");
+    await expect(value.runtime.previewTxt("/must-not-open.txt"))
+      .rejects.toEqual(new HybridCatalogError("hybrid-batch-unavailable"));
+    await expect(value.runtime.consumeTxtPreview({
+      path: "/must-not-open.txt",
+      expectedSourceSha256: HASH_A,
+    })).rejects.toEqual(new HybridCatalogError("hybrid-batch-unavailable"));
     await value.runtime.importTxt("/must-not-open.txt");
     await value.runtime.startLargeVerification({ cloudRoot: "/NoCall", groupKeys: [GROUP_A] });
     await value.runtime.resumeLargeVerification({ cloudRoot: "/NoCall", groupKeys: [GROUP_A] });
@@ -1338,21 +1483,58 @@ describe("HybridCatalogRuntimeService", () => {
     });
   });
 
+  it("holds the busy permit across the complete consume transaction", async () => {
+    let finishImport!: (value: CandidateCatalogDescriptor) => void;
+    const importPromise = new Promise<CandidateCatalogDescriptor>((resolve) => {
+      finishImport = resolve;
+    });
+    const value = fixture({
+      previewSummaries: [summary(HASH_B), summary(HASH_B)],
+      importPromise,
+    });
+    await value.runtime.initialize();
+    await value.runtime.previewTxt("/synthetic/private-inventory.txt");
+
+    const running = value.runtime.consumeTxtPreview({
+      path: "/synthetic/private-inventory.txt",
+      expectedSourceSha256: HASH_B,
+    });
+    await vi.waitFor(() => { expect(value.imports.import).toHaveBeenCalledOnce(); });
+
+    await expect(value.runtime.previewTxt("/synthetic/other.txt"))
+      .rejects.toEqual(new HybridCatalogError("hybrid-batch-unavailable"));
+    await expect(value.runtime.consumeTxtPreview({
+      path: "/synthetic/private-inventory.txt",
+      expectedSourceSha256: HASH_B,
+    })).rejects.toEqual(new HybridCatalogError("hybrid-batch-unavailable"));
+
+    finishImport(descriptor(HASH_B));
+    await expect(running).resolves.toEqual({ kind: "activated", sourceSha256: HASH_B });
+  });
+
   it("cancels an in-flight TXT import on dispose before projection rebuild", async () => {
     let finishImport!: (value: CandidateCatalogDescriptor) => void;
     const importPromise = new Promise<CandidateCatalogDescriptor>((resolve) => {
       finishImport = resolve;
     });
-    const value = fixture({ importPromise });
+    const value = fixture({
+      previewSummaries: [summary(HASH_B), summary(HASH_B)],
+      importPromise,
+    });
     await value.runtime.initialize();
     await value.runtime.previewTxt("/synthetic/private-inventory.txt");
 
-    const running = value.runtime.importTxt("/synthetic/private-inventory.txt");
+    const running = value.runtime.consumeTxtPreview({
+      path: "/synthetic/private-inventory.txt",
+      expectedSourceSha256: HASH_B,
+    });
     await vi.waitFor(() => { expect(value.imports.import).toHaveBeenCalledTimes(1); });
     const signal = value.imports.import.mock.calls[0]?.[1];
     value.runtime.dispose();
-    finishImport(descriptor());
-    await running;
+    finishImport(descriptor(HASH_B));
+    await expect(running).rejects.toEqual(
+      new HybridCatalogError("hybrid-batch-unavailable"),
+    );
 
     expect(signal).toBeInstanceOf(AbortSignal);
     expect(signal?.aborted).toBe(true);
@@ -1367,7 +1549,11 @@ describe("HybridCatalogRuntimeService", () => {
   it("restores the prior candidate and projection when disposed during projection rebuild", async () => {
     let finishProjection!: () => void;
     const projectPromise = new Promise<void>((resolve) => { finishProjection = resolve; });
-    const value = fixture({ projectPromise });
+    const value = fixture({
+      previewSummaries: [summary(HASH_B), summary(HASH_B)],
+      importPromise: Promise.resolve(descriptor(HASH_B)),
+      projectPromise,
+    });
     const priorCandidate = (await value.store.loadActiveCandidates())?.descriptor;
     const priorUnified = (await value.store.loadActiveUnified())?.descriptor;
     let restoreAttempt = 0;
@@ -1382,12 +1568,17 @@ describe("HybridCatalogRuntimeService", () => {
     await value.runtime.initialize();
     await value.runtime.previewTxt("/synthetic/private-inventory.txt");
 
-    const running = value.runtime.importTxt("/synthetic/private-inventory.txt");
+    const running = value.runtime.consumeTxtPreview({
+      path: "/synthetic/private-inventory.txt",
+      expectedSourceSha256: HASH_B,
+    });
     await vi.waitFor(() => { expect(value.project.rebuild).toHaveBeenCalledTimes(1); });
     const signal = value.project.rebuild.mock.calls[0]?.[1];
     value.runtime.dispose();
     finishProjection();
-    await running;
+    await expect(running).rejects.toEqual(
+      new HybridCatalogError("hybrid-batch-unavailable"),
+    );
 
     expect(signal).toBeInstanceOf(AbortSignal);
     expect(signal?.aborted).toBe(true);
@@ -1400,13 +1591,20 @@ describe("HybridCatalogRuntimeService", () => {
   });
 
   it("restores the prior activation when projection rebuild fails", async () => {
-    const value = fixture({ projectError: new Error("projection-write-failed") });
+    const value = fixture({
+      previewSummaries: [summary(HASH_B), summary(HASH_B)],
+      importPromise: Promise.resolve(descriptor(HASH_B)),
+      projectError: new Error("projection-write-failed"),
+    });
     const priorCandidate = (await value.store.loadActiveCandidates())?.descriptor;
     const priorUnified = (await value.store.loadActiveUnified())?.descriptor;
     await value.runtime.initialize();
     await value.runtime.previewTxt("/synthetic/private-inventory.txt");
 
-    await expect(value.runtime.importTxt("/synthetic/private-inventory.txt"))
+    await expect(value.runtime.consumeTxtPreview({
+      path: "/synthetic/private-inventory.txt",
+      expectedSourceSha256: HASH_B,
+    }))
       .rejects.toEqual(new HybridCatalogError("hybrid-snapshot-corrupt"));
 
     expect(value.store.restoreCatalogActivation).toHaveBeenCalledWith({
@@ -1416,11 +1614,78 @@ describe("HybridCatalogRuntimeService", () => {
     expect(value.runtime.snapshot()).toMatchObject({
       status: "error",
       messageCode: "hybrid-snapshot-corrupt",
+      candidate: { sourceSha256: HASH_B },
     });
     expect(JSON.stringify(value.runtime.snapshot())).not.toContain("projection-write-failed");
 
     await value.runtime.startLargeVerification({ cloudRoot: "/Synthetic", groupKeys: [GROUP_A] });
     expect(value.verification.start.mock.calls[0]?.[0].authority).toEqual(authority(null));
+  });
+
+  it("clears the candidate when both activation restore attempts fail", async () => {
+    const value = fixture({
+      previewSummaries: [summary(HASH_B), summary(HASH_B)],
+      importPromise: Promise.resolve(descriptor(HASH_B)),
+      projectError: new Error("projection-write-failed"),
+    });
+    value.store.restoreCatalogActivation.mockRejectedValue(new Error("restore-failed"));
+    await value.runtime.initialize();
+    await value.runtime.previewTxt("/synthetic/private-inventory.txt");
+
+    await expect(value.runtime.consumeTxtPreview({
+      path: "/synthetic/private-inventory.txt",
+      expectedSourceSha256: HASH_B,
+    })).rejects.toEqual(new HybridCatalogError("hybrid-snapshot-corrupt"));
+
+    expect(value.store.restoreCatalogActivation).toHaveBeenCalledTimes(2);
+    expect(value.runtime.snapshot()).toMatchObject({
+      status: "error",
+      messageCode: "hybrid-snapshot-corrupt",
+    });
+    expect(value.runtime.snapshot()).not.toHaveProperty("candidate");
+  });
+
+  it("restores the immediately previous activation after a later replacement fails", async () => {
+    const value = fixture({
+      previewSummaries: [
+        summary(HASH_B),
+        summary(HASH_B),
+        summary(HASH_C),
+        summary(HASH_C),
+      ],
+      importDescriptors: [descriptor(HASH_B), descriptor(HASH_C)],
+      projectErrors: [null, new Error("second-projection-failed")],
+    });
+    await value.runtime.initialize();
+    await value.runtime.previewTxt("/synthetic/replacement-b.txt");
+    await value.runtime.consumeTxtPreview({
+      path: "/synthetic/replacement-b.txt",
+      expectedSourceSha256: HASH_B,
+    });
+    expect(value.runtime.snapshot()).toMatchObject({
+      active: { sourceImportSha256: HASH_B },
+    });
+
+    await value.runtime.previewTxt("/synthetic/replacement-c.txt");
+    await expect(value.runtime.consumeTxtPreview({
+      path: "/synthetic/replacement-c.txt",
+      expectedSourceSha256: HASH_C,
+    })).rejects.toEqual(new HybridCatalogError("hybrid-snapshot-corrupt"));
+
+    const restored = value.store.restoreCatalogActivation.mock.calls.at(-1)?.[0];
+    expect(restored?.candidate).toMatchObject({ sourceSha256: HASH_B });
+    expect(restored?.unified).toMatchObject({ sourceImportSha256: HASH_B });
+    await expect(value.store.loadActiveCandidateDescriptor()).resolves.toMatchObject({
+      sourceSha256: HASH_B,
+    });
+    await expect(value.store.loadActiveUnifiedSummary()).resolves.toMatchObject({
+      descriptor: { sourceImportSha256: HASH_B },
+    });
+    expect(value.runtime.snapshot()).toMatchObject({
+      active: { sourceImportSha256: HASH_B },
+      candidate: { sourceSha256: HASH_C },
+      status: "error",
+    });
   });
 
   it("maps native source failures to a fixed code without exposing path details", async () => {

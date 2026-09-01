@@ -179,6 +179,108 @@ describe("shared grouped settings surface", () => {
     expect(root.querySelector('[data-ai-enabled="true"]')).toBeNull();
   });
 
+  it("dispatches repair and identity replacement as distinct authorization intents", async () => {
+    const connectCatalog = vi.fn(async () => undefined);
+    const submitCatalogAuthorizationCode = vi.fn(async () => undefined);
+    const revokeCatalog = vi.fn(async () => undefined);
+    const controller = connectedControllerFixture({
+      catalogConnection: () => ({ status: "configured" }),
+      connectCatalog,
+      submitCatalogAuthorizationCode,
+      revokeCatalog,
+    });
+    const root = createTestDiv();
+    createSettingsSectionsSurface({
+      app: {} as App, controller, policy: NORMAL_RUNTIME_POLICY,
+    }).render(root, "zh-CN");
+
+    expect(connectCatalog).not.toHaveBeenCalled();
+    expect(submitCatalogAuthorizationCode).not.toHaveBeenCalled();
+    expect(revokeCatalog).not.toHaveBeenCalled();
+
+    const appKey = root.querySelector<HTMLInputElement>('[data-catalog-app-key="true"]')!;
+    const secretKey = root.querySelector<HTMLInputElement>('[data-catalog-secret-key="true"]')!;
+    appKey.value = "repair-app";
+    secretKey.value = "repair-secret";
+    root.querySelector<HTMLButtonElement>('[data-action="catalog-connect"]')!.click();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(connectCatalog).toHaveBeenNthCalledWith(
+      1,
+      { appKey: "repair-app", secretKey: "repair-secret" },
+      "repair-same-account",
+    );
+    const code = root.querySelector<HTMLInputElement>(
+      '[data-catalog-authorization-code="true"]',
+    )!;
+    code.value = "repair-code";
+    root.querySelector<HTMLButtonElement>(
+      '[data-action="catalog-submit-authorization-code"]',
+    )!.click();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(submitCatalogAuthorizationCode).toHaveBeenNthCalledWith(
+      1,
+      "repair-code",
+      "repair-same-account",
+    );
+
+    appKey.value = "replacement-app";
+    secretKey.value = "replacement-secret";
+    root.querySelector<HTMLButtonElement>(
+      '[data-action="catalog-replace-identity"]',
+    )!.click();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(connectCatalog).toHaveBeenNthCalledWith(
+      2,
+      { appKey: "replacement-app", secretKey: "replacement-secret" },
+      "replace-identity",
+    );
+    code.value = "replacement-code";
+    root.querySelector<HTMLButtonElement>(
+      '[data-action="catalog-submit-authorization-code"]',
+    )!.click();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(submitCatalogAuthorizationCode).toHaveBeenNthCalledWith(
+      2,
+      "replacement-code",
+      "replace-identity",
+    );
+
+    root.querySelector<HTMLButtonElement>('[data-action="catalog-revoke"]')!.click();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(revokeCatalog).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    ["verification-must-pause", "请先暂停当前核验，再修改百度网盘授权。"],
+    ["scan-must-cancel", "请先取消当前云端扫描，再修改百度网盘授权。"],
+    ["cloud-authority-operation-busy", "另一项百度网盘权限操作正在进行，请稍后再试。"],
+  ] as const)("maps native Settings authorization error %s to safe guidance", async (
+    errorCode,
+    expected,
+  ) => {
+    const controller = connectedControllerFixture({
+      catalogConnection: () => ({ status: "configured" }),
+      connectCatalog: async () => { throw new Error(errorCode); },
+    });
+    const root = createTestDiv();
+    createSettingsSectionsSurface({
+      app: {} as App, controller, policy: NORMAL_RUNTIME_POLICY,
+    }).render(root, "zh-CN");
+
+    root.querySelector<HTMLButtonElement>('[data-action="catalog-connect"]')!.click();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(root.querySelector<HTMLElement>('[role="status"]')?.textContent).toBe(expected);
+    expect(root.textContent).not.toContain(errorCode);
+  });
+
   it("routes both hosts through the same controller contract", async () => {
     const startup = vi.fn(async () => undefined);
     let activeLocale: "zh-CN" | "en" = "zh-CN";

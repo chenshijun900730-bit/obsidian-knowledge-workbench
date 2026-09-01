@@ -126,11 +126,20 @@ export interface HybridCatalogVerificationInput {
   readonly groupKeys: readonly string[];
 }
 
+export type ConsumeTxtPreviewResult = Readonly<{
+  kind: "unchanged" | "activated";
+  sourceSha256: string;
+}>;
+
 export interface HybridCatalogRuntime {
   initialize(): Promise<void>;
   snapshot(): HybridCatalogViewModel;
   subscribe(listener: () => void): () => void;
-  previewTxt(path: string): Promise<void>;
+  previewTxt(path: string): Promise<CatalogTxtImportSummary>;
+  consumeTxtPreview(input: Readonly<{
+    path: string;
+    expectedSourceSha256: string;
+  }>): Promise<ConsumeTxtPreviewResult>;
   importTxt(path: string): Promise<void>;
   setVerificationAuthority(authority: CloudVerificationAuthority | null): void;
   prepareLegacyLocalVerificationAuthority(): Promise<Extract<
@@ -261,6 +270,10 @@ const safeError = (
 ): HybridCatalogError => error instanceof HybridCatalogError
   ? new HybridCatalogError(error.code)
   : new HybridCatalogError(fallback);
+
+const rejectCanceledTxtOperation = (): never => {
+  throw new HybridCatalogError("hybrid-batch-unavailable");
+};
 
 const RETRYABLE_PARTIAL_REASONS = new Set<LargeCatalogStopReason>([
   "baidu-rate-limited",
@@ -517,30 +530,58 @@ export class HybridCatalogRuntimeService implements HybridCatalogRuntime {
     }
   }
 
-  async previewTxt(path: string): Promise<void> {
-    if (this.disposed) return;
+  async previewTxt(path: string): Promise<CatalogTxtImportSummary> {
+    if (this.disposed) return rejectCanceledTxtOperation();
     this.assertIdle();
+    this.busy = true;
+    const controller = new AbortController();
+    this.importController = controller;
+    const isCurrent = (): boolean => (
+      !this.disposed
+      && this.importController === controller
+      && !controller.signal.aborted
+    );
     try {
       const source = await this.dependencies.source.open(path);
+      if (!isCurrent()) return rejectCanceledTxtOperation();
       const candidate = await this.dependencies.imports.preview(source);
-      if (this.disposed) return;
+      if (!isCurrent()) return rejectCanceledTxtOperation();
+      const detached = cloneCandidateSummary(candidate);
       this.viewModel = {
         ...this.viewModel,
         status: "previewed",
-        candidate: cloneCandidateSummary(candidate),
+        candidate: cloneCandidateSummary(detached),
         messageCode: undefined,
       };
       this.emit();
+      return detached;
     } catch (error) {
-      this.fail(error, "txt-source-unavailable");
+      if (!isCurrent()) return rejectCanceledTxtOperation();
+      return this.fail(error, "txt-source-unavailable");
+    } finally {
+      if (this.importController === controller) this.importController = null;
+      if (!this.disposed) this.busy = false;
     }
   }
 
   async importTxt(path: string): Promise<void> {
     if (this.disposed) return;
-    this.assertIdle();
     const preview = this.viewModel.candidate;
     if (preview === undefined) throw new HybridCatalogError("txt-source-invalid");
+    await this.consumeTxtPreview({ path, expectedSourceSha256: preview.sourceSha256 });
+  }
+
+  async consumeTxtPreview(input: Readonly<{
+    path: string;
+    expectedSourceSha256: string;
+  }>): Promise<ConsumeTxtPreviewResult> {
+    if (this.disposed) return rejectCanceledTxtOperation();
+    this.assertIdle();
+    const preview = this.viewModel.candidate;
+    if (
+      preview === undefined
+      || preview.sourceSha256 !== input.expectedSourceSha256
+    ) throw new HybridCatalogError("txt-source-invalid");
     this.busy = true;
     const controller = new AbortController();
     this.importController = controller;
@@ -553,21 +594,47 @@ export class HybridCatalogRuntimeService implements HybridCatalogRuntime {
     this.emit();
     let activationChanged = false;
     let activationRestored = false;
+    let activationRestoreAttempts = 0;
+    let staleCandidate = false;
     let priorActivation: HybridCatalogActivationSnapshot | null = null;
     const priorAuthority = this.verificationAuthority;
     const restorePriorActivation = async (): Promise<void> => {
       if (!activationChanged || activationRestored || priorActivation === null) return;
-      for (let attempt = 0; attempt < 2; attempt += 1) {
+      while (activationRestoreAttempts < 2) {
+        activationRestoreAttempts += 1;
         try {
           await this.dependencies.store.restoreCatalogActivation(priorActivation);
           activationRestored = true;
           return;
         } catch {
-          if (attempt === 1) throw new HybridCatalogError("hybrid-snapshot-corrupt");
+          if (activationRestoreAttempts === 2) {
+            throw new HybridCatalogError("hybrid-snapshot-corrupt");
+          }
         }
       }
+      throw new HybridCatalogError("hybrid-snapshot-corrupt");
     };
     try {
+      const verificationSource = await this.dependencies.source.open(input.path);
+      if (!isCurrent()) return rejectCanceledTxtOperation();
+      const verified = await this.dependencies.imports.preview(verificationSource);
+      if (!isCurrent()) return rejectCanceledTxtOperation();
+      if (verified.sourceSha256 !== input.expectedSourceSha256) {
+        staleCandidate = true;
+        throw new HybridCatalogError("txt-source-invalid");
+      }
+      if (verified.sourceSha256 === this.activeSourceSha256) {
+        const active = this.viewModel.active;
+        const batch = this.viewModel.batch;
+        this.viewModel = {
+          status: statusForBatch(active, batch),
+          executionActive: false,
+          ...(active === undefined ? {} : { active }),
+          ...(batch === undefined ? {} : { batch }),
+        };
+        this.emit();
+        return { kind: "unchanged", sourceSha256: verified.sourceSha256 };
+      }
       const [priorCandidate, priorUnified] = await Promise.all([
         this.dependencies.store.loadActiveCandidateDescriptor(this.verificationAuthority),
         this.dependencies.store.loadActiveUnifiedSummary(this.verificationAuthority),
@@ -576,23 +643,16 @@ export class HybridCatalogRuntimeService implements HybridCatalogRuntime {
         candidate: priorCandidate,
         unified: priorUnified?.descriptor ?? null,
       };
-      if (!isCurrent()) return;
-      const verificationSource = await this.dependencies.source.open(path);
-      if (!isCurrent()) return;
-      const verified = await this.dependencies.imports.preview(verificationSource);
-      if (!isCurrent()) return;
-      if (verified.sourceSha256 !== preview.sourceSha256) {
-        throw new HybridCatalogError("txt-source-invalid");
-      }
-      const importSource = await this.dependencies.source.open(path);
-      if (!isCurrent()) return;
+      if (!isCurrent()) return rejectCanceledTxtOperation();
+      const importSource = await this.dependencies.source.open(input.path);
+      if (!isCurrent()) return rejectCanceledTxtOperation();
       const imported = await this.dependencies.imports.import(importSource, controller.signal);
       activationChanged = true;
       if (!isCurrent()) {
         await restorePriorActivation();
-        return;
+        return rejectCanceledTxtOperation();
       }
-      if (imported.sourceSha256 !== preview.sourceSha256) {
+      if (imported.sourceSha256 !== input.expectedSourceSha256) {
         throw new HybridCatalogError("hybrid-snapshot-corrupt");
       }
       this.replaceVerificationAuthorityWithoutPublishing(null);
@@ -601,13 +661,13 @@ export class HybridCatalogRuntimeService implements HybridCatalogRuntime {
       if (!isCurrent()) {
         await restorePriorActivation();
         if (!this.disposed) this.replaceVerificationAuthorityWithoutPublishing(priorAuthority);
-        return;
+        return rejectCanceledTxtOperation();
       }
       const active = await this.loadActive(null, importedAuthorityRevision);
       if (!isCurrent()) {
         await restorePriorActivation();
         if (!this.disposed) this.replaceVerificationAuthorityWithoutPublishing(priorAuthority);
-        return;
+        return rejectCanceledTxtOperation();
       }
       activationChanged = false;
       this.currentBatchId = null;
@@ -617,6 +677,7 @@ export class HybridCatalogRuntimeService implements HybridCatalogRuntime {
         ...(active === undefined ? {} : { active }),
       };
       this.emit();
+      return { kind: "activated", sourceSha256: imported.sourceSha256 };
     } catch (error) {
       try {
         await restorePriorActivation();
@@ -624,11 +685,14 @@ export class HybridCatalogRuntimeService implements HybridCatalogRuntime {
           this.replaceVerificationAuthorityWithoutPublishing(priorAuthority);
         }
       } catch {
-        if (!this.disposed) this.fail(new HybridCatalogError("hybrid-snapshot-corrupt"), "hybrid-snapshot-corrupt");
-        return;
+        return this.failWithoutCandidate(
+          new HybridCatalogError("hybrid-snapshot-corrupt"),
+          "hybrid-snapshot-corrupt",
+        );
       }
-      if (!isCurrent()) return;
-      this.fail(error, "hybrid-snapshot-corrupt");
+      if (!isCurrent()) return rejectCanceledTxtOperation();
+      if (staleCandidate) return this.failWithoutCandidate(error, "txt-source-invalid");
+      return this.fail(error, "hybrid-snapshot-corrupt");
     } finally {
       if (this.importController === controller) this.importController = null;
       if (!this.disposed) this.busy = false;
@@ -1098,6 +1162,23 @@ export class HybridCatalogRuntimeService implements HybridCatalogRuntime {
   private fail(error: unknown, fallback: HybridCatalogErrorCode): never {
     const fixed = safeError(error, fallback);
     if (!this.disposed) this.setFailure(fixed);
+    throw fixed;
+  }
+
+  private failWithoutCandidate(error: unknown, fallback: HybridCatalogErrorCode): never {
+    const fixed = safeError(error, fallback);
+    if (!this.disposed) {
+      const active = this.viewModel.active;
+      const batch = this.viewModel.batch;
+      this.viewModel = {
+        status: "error",
+        executionActive: false,
+        ...(active === undefined ? {} : { active }),
+        ...(batch === undefined ? {} : { batch }),
+        messageCode: fixed.code,
+      };
+      this.emit();
+    }
     throw fixed;
   }
 

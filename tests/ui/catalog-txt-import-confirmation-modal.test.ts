@@ -102,8 +102,9 @@ describe("catalog TXT import confirmation", () => {
     await expect(closeResult).resolves.toBe(false);
   });
 
-  it("makes preview separate and clears the path before an explicitly confirmed import", async () => {
+  it("consumes the one-use preview before clearing the path after explicit confirmation", async () => {
     const hybrid = new FakeHybridCatalogRuntime({ status: "previewed", candidate: aggregate });
+    hybrid.previewSummary = aggregate;
     const catalog = new FakeCloudCatalogRuntime({}, undefined, hybrid);
     const confirmation = { request: vi.fn(async () => true) };
     const controller = controllerFixture({
@@ -111,7 +112,7 @@ describe("catalog TXT import confirmation", () => {
       catalogTxtImportConfirmation: confirmation,
     }).controller;
     const events: string[] = [];
-    hybrid.beforeImport = () => { events.push("import"); };
+    hybrid.beforeConsumeTxtPreview = () => { events.push("consume"); };
 
     await controller.previewCatalogTxt("/synthetic/inventory.txt");
     await controller.requestCatalogTxtImport(
@@ -121,9 +122,13 @@ describe("catalog TXT import confirmation", () => {
 
     expect(hybrid.previewPaths).toEqual(["/synthetic/inventory.txt"]);
     expect(confirmation.request).toHaveBeenCalledWith(aggregate);
-    expect(hybrid.importPaths).toEqual(["/synthetic/inventory.txt"]);
+    expect(hybrid.consumeTxtPreviewInputs).toEqual([{
+      path: "/synthetic/inventory.txt",
+      expectedSourceSha256: aggregate.sourceSha256,
+    }]);
+    expect(hybrid.importPaths).toEqual([]);
     expect(catalog.initializeCalls).toBe(1);
-    expect(events).toEqual(["clear", "import"]);
+    expect(events).toEqual(["consume", "clear"]);
 
     const canceledHybrid = new FakeHybridCatalogRuntime({ status: "previewed", candidate: aggregate });
     const canceledController = controllerFixture({
@@ -131,6 +136,7 @@ describe("catalog TXT import confirmation", () => {
       catalogTxtImportConfirmation: { request: async () => false },
     }).controller;
     await canceledController.requestCatalogTxtImport("/synthetic/inventory.txt");
+    expect(canceledHybrid.consumeTxtPreviewInputs).toEqual([]);
     expect(canceledHybrid.importPaths).toEqual([]);
   });
 });

@@ -23,6 +23,17 @@ import type {
 import { deriveCloudVerificationScope } from "../../src/catalog/cloud-verification-scope";
 
 const SOURCE_HASH = "a".repeat(64);
+const TXT_PREVIEW_HASH = "b".repeat(64);
+
+const deferred = <T = void>() => {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (error?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+};
 
 describe("WorkbenchController catalog authority bootstrap", () => {
   it("installs a detached scoped authority before catalog initialization", async () => {
@@ -235,6 +246,779 @@ describe("WorkbenchController catalog authority bootstrap", () => {
       legacyAllowlist: null,
     }]);
     expect(catalog.initializeCalls).toBe(1);
+    fixture.controller.dispose();
+  });
+});
+
+describe("WorkbenchController task TXT and cloud authority operations", () => {
+  const taskGroupKey = `group:${"7".repeat(64)}`;
+  const taskGroup = {
+    groupKey: taskGroupKey,
+    rootRelativePath: "Literature",
+    label: "Literature",
+    pdfCount: 8,
+    mode: "recursive" as const,
+    verificationStatus: "unverified" as const,
+  };
+  const active = (sourceImportSha256 = SOURCE_HASH) => ({
+    sourceImportSha256,
+    importedAt: 1,
+    pdfCount: 8,
+    unverifiedCount: 8,
+    verifiedCount: 0,
+    differenceCount: 0,
+    cloudMissingCount: 0,
+    groupCount: 1,
+    verifiedGroupCount: 0,
+    coveredCandidatePdfCount: 0,
+    groups: [taskGroup],
+  });
+
+  it("rejects a stale TXT task before reading and retains only a successful detached preview", async () => {
+    const hybrid = new FakeHybridCatalogRuntime({ status: "empty" });
+    hybrid.previewSummary = { ...hybrid.previewSummary, sourceSha256: TXT_PREVIEW_HASH };
+    const fixture = controllerFixture({
+      catalog: new FakeCloudCatalogRuntime({}, undefined, hybrid),
+    });
+    const revision = fixture.controller.snapshot().taskActionRevision;
+
+    await expect(fixture.controller.previewTaskCatalogTxt("/Synthetic/stale.txt", revision + 1))
+      .rejects.toThrow("task-action-stale");
+    expect(hybrid.previewPaths).toEqual([]);
+
+    await fixture.controller.previewTaskCatalogTxt("/Synthetic/catalog.txt", revision);
+    expect(fixture.controller.snapshot()).toMatchObject({
+      pendingCatalogTxt: {
+        path: "/Synthetic/catalog.txt",
+        sourceSha256: TXT_PREVIEW_HASH,
+      },
+      taskActionPending: false,
+      workflow: { kind: "confirm-txt-import" },
+    });
+    expect(fixture.controller.snapshot().taskActionRevision).toBe(revision + 1);
+    fixture.controller.dispose();
+  });
+
+  it("fails fast instead of allowing overlapping TXT previews to race", async () => {
+    const gate = deferred();
+    const hybrid = new FakeHybridCatalogRuntime({ status: "empty" });
+    hybrid.beforePreview = async (path) => {
+      if (path.endsWith("first.txt")) await gate.promise;
+    };
+    const fixture = controllerFixture({
+      catalog: new FakeCloudCatalogRuntime({}, undefined, hybrid),
+    });
+    const revision = fixture.controller.snapshot().taskActionRevision;
+    const first = fixture.controller.previewTaskCatalogTxt("/Synthetic/first.txt", revision);
+    await Promise.resolve();
+
+    await expect(fixture.controller.previewTaskCatalogTxt("/Synthetic/second.txt", revision))
+      .rejects.toThrow("task-action-busy");
+    expect(hybrid.previewPaths).toEqual(["/Synthetic/first.txt"]);
+    gate.resolve();
+    await first;
+    expect(fixture.controller.snapshot().pendingCatalogTxt?.path).toBe("/Synthetic/first.txt");
+    fixture.controller.dispose();
+  });
+
+  it("keeps preview A usable when a later preview B fails before replacing the candidate", async () => {
+    const hybrid = new FakeHybridCatalogRuntime({ status: "empty" });
+    hybrid.previewSummary = { ...hybrid.previewSummary, sourceSha256: TXT_PREVIEW_HASH };
+    const fixture = controllerFixture({
+      catalog: new FakeCloudCatalogRuntime({}, undefined, hybrid),
+    });
+
+    await fixture.controller.previewTaskCatalogTxt(
+      "/Synthetic/a.txt",
+      fixture.controller.snapshot().taskActionRevision,
+    );
+    hybrid.beforePreview = (path) => {
+      if (path.endsWith("b.txt")) throw new Error("preview-b-failed");
+    };
+
+    await expect(fixture.controller.previewTaskCatalogTxt(
+      "/Synthetic/b.txt",
+      fixture.controller.snapshot().taskActionRevision,
+    )).rejects.toThrow("preview-b-failed");
+    expect(fixture.controller.snapshot().pendingCatalogTxt).toEqual({
+      path: "/Synthetic/a.txt",
+      sourceSha256: TXT_PREVIEW_HASH,
+    });
+    expect(hybrid.snapshot().candidate?.sourceSha256).toBe(TXT_PREVIEW_HASH);
+    fixture.controller.dispose();
+  });
+
+  it("keeps a preview draft and authority unchanged when import confirmation is canceled", async () => {
+    const hybrid = new FakeHybridCatalogRuntime({ status: "ready", active: active() });
+    hybrid.previewSummary = { ...hybrid.previewSummary, sourceSha256: TXT_PREVIEW_HASH };
+    const catalog = new FakeCloudCatalogRuntime({}, undefined, hybrid);
+    const fixture = controllerFixture({
+      catalog,
+      catalogTxtImportConfirmation: { request: async () => false },
+    });
+    const binding = {
+      schemaVersion: 1 as const,
+      path: "/Synthetic",
+      sourceImportSha256: SOURCE_HASH,
+      verificationGeneration: 1,
+    };
+    fixture.store.setSettingsForTest({
+      ...fixture.store.settings(),
+      boundCloudLibrary: binding,
+      cloudVerificationGeneration: 1,
+    });
+    await fixture.controller.previewTaskCatalogTxt(
+      "/Synthetic/catalog.txt",
+      fixture.controller.snapshot().taskActionRevision,
+    );
+
+    await fixture.controller.importPreviewedTaskCatalogTxt();
+
+    expect(fixture.controller.snapshot().pendingCatalogTxt).toEqual({
+      path: "/Synthetic/catalog.txt",
+      sourceSha256: TXT_PREVIEW_HASH,
+    });
+    expect(hybrid.consumeTxtPreviewInputs).toEqual([]);
+    expect(fixture.store.settings().boundCloudLibrary).toEqual(binding);
+    expect(catalog.verificationAuthorities).toEqual([]);
+    fixture.controller.dispose();
+  });
+
+  it("drops a stale TXT draft before attempting an import with a different candidate hash", async () => {
+    const hybrid = new FakeHybridCatalogRuntime({ status: "empty" });
+    hybrid.previewSummary = { ...hybrid.previewSummary, sourceSha256: TXT_PREVIEW_HASH };
+    const fixture = controllerFixture({
+      catalog: new FakeCloudCatalogRuntime({}, undefined, hybrid),
+      catalogTxtImportConfirmation: { request: async () => true },
+    });
+    await fixture.controller.previewTaskCatalogTxt(
+      "/Synthetic/catalog.txt",
+      fixture.controller.snapshot().taskActionRevision,
+    );
+    hybrid.setSnapshot({
+      status: "previewed",
+      candidate: { ...hybrid.previewSummary, sourceSha256: "c".repeat(64) },
+    });
+
+    await expect(fixture.controller.importPreviewedTaskCatalogTxt())
+      .rejects.toThrow("txt-source-invalid");
+    expect(fixture.controller.snapshot().pendingCatalogTxt).toBeNull();
+    expect(hybrid.consumeTxtPreviewInputs).toEqual([]);
+    fixture.controller.dispose();
+  });
+
+  it("consumes an unchanged TXT preview without clearing the current binding", async () => {
+    const connection = new FakeCloudCatalogConnectionRuntime({ status: "authorized" });
+    const hybrid = new FakeHybridCatalogRuntime({ status: "ready", active: active(TXT_PREVIEW_HASH) });
+    hybrid.previewSummary = { ...hybrid.previewSummary, sourceSha256: TXT_PREVIEW_HASH };
+    hybrid.consumeTxtPreviewResult = { kind: "unchanged", sourceSha256: TXT_PREVIEW_HASH };
+    const catalog = new FakeCloudCatalogRuntime({}, connection, hybrid);
+    const fixture = controllerFixture({
+      catalog,
+      catalogTxtImportConfirmation: { request: async () => true },
+    });
+    const binding = {
+      schemaVersion: 1 as const,
+      path: "/Synthetic",
+      sourceImportSha256: TXT_PREVIEW_HASH,
+      verificationGeneration: 1,
+    };
+    fixture.store.setSettingsForTest({
+      ...fixture.store.settings(),
+      boundCloudLibrary: binding,
+      cloudVerificationGeneration: 1,
+    });
+
+    await fixture.controller.previewTaskCatalogTxt(
+      "/Synthetic/catalog.txt",
+      fixture.controller.snapshot().taskActionRevision,
+    );
+    await fixture.controller.importPreviewedTaskCatalogTxt();
+
+    expect(hybrid.consumeTxtPreviewInputs).toEqual([{
+      path: "/Synthetic/catalog.txt",
+      expectedSourceSha256: TXT_PREVIEW_HASH,
+    }]);
+    expect(fixture.controller.snapshot().pendingCatalogTxt).toBeNull();
+    expect(fixture.controller.snapshot().statusMessage).toBe("task.txtContentUnchanged");
+    expect(fixture.store.settings().boundCloudLibrary).toEqual(binding);
+    expect(fixture.store.cloudVerificationSettingsCalls).toEqual([]);
+    expect(catalog.initializeCalls).toBe(0);
+    fixture.controller.dispose();
+  });
+
+  it("consumes a changed TXT before clearing authority and rebuilding candidate-only", async () => {
+    const connection = new FakeCloudCatalogConnectionRuntime({ status: "authorized" });
+    const hybrid = new FakeHybridCatalogRuntime({ status: "ready", active: active() });
+    hybrid.previewSummary = { ...hybrid.previewSummary, sourceSha256: TXT_PREVIEW_HASH };
+    hybrid.consumeTxtPreviewResult = { kind: "activated", sourceSha256: TXT_PREVIEW_HASH };
+    const catalog = new FakeCloudCatalogRuntime({}, connection, hybrid);
+    const fixture = controllerFixture({
+      catalog,
+      catalogTxtImportConfirmation: { request: async () => true },
+    });
+    fixture.store.setSettingsForTest({
+      ...fixture.store.settings(),
+      recentCloudDirectories: {
+        schemaVersion: 1,
+        items: [{ path: "/Recent/Kept", filename: "Kept", lastUsedAt: "1970-01-01T00:00:00.001Z" }],
+      },
+      boundCloudLibrary: {
+        schemaVersion: 1,
+        path: "/Synthetic",
+        sourceImportSha256: SOURCE_HASH,
+        verificationGeneration: 1,
+      },
+      cloudVerificationGeneration: 1,
+    });
+
+    await fixture.controller.previewTaskCatalogTxt(
+      "/Synthetic/catalog.txt",
+      fixture.controller.snapshot().taskActionRevision,
+    );
+    await fixture.controller.importPreviewedTaskCatalogTxt();
+
+    expect(fixture.controller.snapshot().pendingCatalogTxt).toBeNull();
+    expect(fixture.store.cloudVerificationSettingsCalls).toHaveLength(1);
+    expect(fixture.store.cloudVerificationSettingsCalls[0]).toMatchObject({
+      settings: { boundCloudLibrary: null, cloudVerificationGeneration: 1 },
+      transition: { kind: "txt-source-replacement", currentWorkflowBatchId: null },
+    });
+    expect(fixture.store.settings().recentCloudDirectories.items).toHaveLength(1);
+    expect(catalog.verificationAuthorities.at(-1)).toBeNull();
+    expect(hybrid.rebuildVerificationProjectionCalls).toBe(1);
+    expect(catalog.initializeCalls).toBe(1);
+    expect(fixture.controller.snapshot().workflow.kind).toBe("needs-library");
+    fixture.controller.dispose();
+  });
+
+  it("stays fail-closed after TXT activation when authority cleanup persistence fails", async () => {
+    const connection = new FakeCloudCatalogConnectionRuntime({ status: "authorized" });
+    const hybrid = new FakeHybridCatalogRuntime({ status: "ready", active: active() });
+    hybrid.previewSummary = { ...hybrid.previewSummary, sourceSha256: TXT_PREVIEW_HASH };
+    hybrid.consumeTxtPreviewResult = { kind: "activated", sourceSha256: TXT_PREVIEW_HASH };
+    const catalog = new FakeCloudCatalogRuntime({}, connection, hybrid);
+    const fixture = controllerFixture({
+      catalog,
+      catalogTxtImportConfirmation: { request: async () => true },
+    });
+    fixture.store.setSettingsForTest({
+      ...fixture.store.settings(),
+      boundCloudLibrary: {
+        schemaVersion: 1,
+        path: "/Synthetic",
+        sourceImportSha256: SOURCE_HASH,
+        verificationGeneration: 1,
+      },
+      cloudVerificationGeneration: 1,
+    });
+    await fixture.controller.previewTaskCatalogTxt(
+      "/Synthetic/catalog.txt",
+      fixture.controller.snapshot().taskActionRevision,
+    );
+    fixture.store.failNext = new Error("cleanup-failed");
+
+    await expect(fixture.controller.importPreviewedTaskCatalogTxt())
+      .rejects.toThrow("cleanup-failed");
+    expect(hybrid.snapshot()).toMatchObject({
+      status: "ready",
+      active: { sourceImportSha256: TXT_PREVIEW_HASH },
+    });
+    expect(hybrid.snapshot().candidate).toBeUndefined();
+    expect(fixture.controller.snapshot().pendingCatalogTxt).toBeNull();
+    expect(catalog.verificationAuthorities.at(-1)).toBeNull();
+    expect(hybrid.rebuildVerificationProjectionCalls).toBe(0);
+    expect(fixture.controller.snapshot().workflow.kind).toBe("needs-library");
+    fixture.controller.dispose();
+  });
+
+  it("keeps the cleared binding authoritative when candidate-only rebuild fails", async () => {
+    const connection = new FakeCloudCatalogConnectionRuntime({ status: "authorized" });
+    const hybrid = new FakeHybridCatalogRuntime({ status: "ready", active: active() });
+    hybrid.previewSummary = { ...hybrid.previewSummary, sourceSha256: TXT_PREVIEW_HASH };
+    hybrid.consumeTxtPreviewResult = { kind: "activated", sourceSha256: TXT_PREVIEW_HASH };
+    hybrid.beforeRebuildVerificationProjection = () => { throw new Error("rebuild-failed"); };
+    const catalog = new FakeCloudCatalogRuntime({}, connection, hybrid);
+    const fixture = controllerFixture({
+      catalog,
+      catalogTxtImportConfirmation: { request: async () => true },
+    });
+    fixture.store.setSettingsForTest({
+      ...fixture.store.settings(),
+      boundCloudLibrary: {
+        schemaVersion: 1,
+        path: "/Synthetic",
+        sourceImportSha256: SOURCE_HASH,
+        verificationGeneration: 1,
+      },
+      cloudVerificationGeneration: 1,
+    });
+    await fixture.controller.previewTaskCatalogTxt(
+      "/Synthetic/catalog.txt",
+      fixture.controller.snapshot().taskActionRevision,
+    );
+
+    await expect(fixture.controller.importPreviewedTaskCatalogTxt())
+      .rejects.toThrow("rebuild-failed");
+    expect(fixture.store.settings().boundCloudLibrary).toBeNull();
+    expect(fixture.controller.snapshot().pendingCatalogTxt).toBeNull();
+    expect(catalog.verificationAuthorities.at(-1)).toBeNull();
+    expect(catalog.initializeCalls).toBe(0);
+    expect(fixture.controller.snapshot().workflow.kind).toBe("needs-library");
+    fixture.controller.dispose();
+  });
+
+  it("keeps the cleared binding authoritative when the final catalog refresh fails", async () => {
+    const connection = new FakeCloudCatalogConnectionRuntime({ status: "authorized" });
+    const hybrid = new FakeHybridCatalogRuntime({ status: "ready", active: active() });
+    hybrid.previewSummary = { ...hybrid.previewSummary, sourceSha256: TXT_PREVIEW_HASH };
+    hybrid.consumeTxtPreviewResult = { kind: "activated", sourceSha256: TXT_PREVIEW_HASH };
+    class RefreshFailingCatalog extends FakeCloudCatalogRuntime {
+      override async initialize(): Promise<void> {
+        this.initializeCalls += 1;
+        throw new Error("refresh-failed");
+      }
+    }
+    const catalog = new RefreshFailingCatalog({}, connection, hybrid);
+    const fixture = controllerFixture({
+      catalog,
+      catalogTxtImportConfirmation: { request: async () => true },
+    });
+    fixture.store.setSettingsForTest({
+      ...fixture.store.settings(),
+      boundCloudLibrary: {
+        schemaVersion: 1,
+        path: "/Synthetic",
+        sourceImportSha256: SOURCE_HASH,
+        verificationGeneration: 1,
+      },
+      cloudVerificationGeneration: 1,
+    });
+    await fixture.controller.previewTaskCatalogTxt(
+      "/Synthetic/catalog.txt",
+      fixture.controller.snapshot().taskActionRevision,
+    );
+
+    await expect(fixture.controller.importPreviewedTaskCatalogTxt())
+      .rejects.toThrow("catalog-unavailable");
+    expect(fixture.store.settings().boundCloudLibrary).toBeNull();
+    expect(fixture.controller.snapshot().pendingCatalogTxt).toBeNull();
+    expect(catalog.verificationAuthorities.at(-1)).toBeNull();
+    expect(hybrid.rebuildVerificationProjectionCalls).toBe(1);
+    expect(catalog.initializeCalls).toBe(1);
+    expect(fixture.controller.snapshot().workflow.kind).toBe("needs-library");
+    fixture.controller.dispose();
+  });
+
+  it("does not advance the task revision for count-only refreshes and separates runtime messages", () => {
+    const connection = new FakeCloudCatalogConnectionRuntime({ status: "authorized" });
+    const hybrid = new FakeHybridCatalogRuntime({ status: "ready", active: active() });
+    const fixture = controllerFixture({
+      catalog: new FakeCloudCatalogRuntime({}, connection, hybrid),
+    });
+    const initialRevision = fixture.controller.snapshot().taskActionRevision;
+
+    hybrid.setSnapshot({
+      status: "ready",
+      active: { ...active(), pdfCount: 9, unverifiedCount: 9 },
+    });
+    expect(fixture.controller.snapshot().taskActionRevision).toBe(initialRevision);
+
+    hybrid.setSnapshot({
+      status: "ready",
+      active: { ...active(), pdfCount: 9, unverifiedCount: 9 },
+      messageCode: "catalog-unavailable",
+    });
+    const hybridMessageRevision = fixture.controller.snapshot().taskActionRevision;
+    expect(hybridMessageRevision).toBe(initialRevision + 1);
+
+    connection.setSnapshot({ status: "authorized", messageCode: "catalog-unavailable" });
+    expect(fixture.controller.snapshot().taskActionRevision).toBe(hybridMessageRevision + 1);
+    connection.setSnapshot({ status: "authorized", messageCode: "catalog-unavailable" });
+    expect(fixture.controller.snapshot().taskActionRevision).toBe(hybridMessageRevision + 1);
+    fixture.controller.dispose();
+  });
+
+  it("clears first-configuration directory sessions before saving credentials", async () => {
+    const order: string[] = [];
+    const connection = new FakeCloudCatalogConnectionRuntime({ status: "unconfigured" });
+    connection.beforeSaveApplicationCredentials = () => { order.push("save"); };
+    const discovery = {
+      clear: () => { order.push("discovery"); },
+    } as unknown as CloudDirectoryDiscoveryRuntime;
+    const browser = {
+      clear: () => { order.push("browser"); },
+    } as unknown as CloudDirectoryBrowserRuntime;
+    const locator = {
+      cancel: () => { order.push("locator"); },
+    } as unknown as CloudDirectoryLocatorRuntime;
+    const fixture = controllerFixture({
+      catalog: new FakeCloudCatalogRuntime(
+        {},
+        connection,
+        undefined,
+        discovery,
+        browser,
+        locator,
+      ),
+    });
+
+    await fixture.controller.connectCatalog(
+      { appKey: "initial-app", secretKey: "initial-secret" },
+      "repair-same-account",
+    );
+
+    expect(order).toEqual(["locator", "discovery", "browser", "save"]);
+    expect(connection.savedCredentials).toEqual([{
+      appKey: "initial-app",
+      secretKey: "initial-secret",
+    }]);
+    fixture.controller.dispose();
+  });
+
+  it("reports live scan guidance before generic permit busy and lets cancel bypass the permit", async () => {
+    const entered = deferred();
+    const gate = deferred();
+    const connection = new FakeCloudCatalogConnectionRuntime({ status: "authorized" });
+    connection.beforeStartScan = async () => {
+      connection.setSnapshot({ status: "scanning" });
+      entered.resolve();
+      await gate.promise;
+    };
+    const fixture = controllerFixture({
+      catalog: new FakeCloudCatalogRuntime({}, connection),
+      catalogConfirmation: { request: async () => true },
+    });
+
+    const scanning = fixture.controller.requestCatalogScan("/Synthetic");
+    await entered.promise;
+    await expect(fixture.controller.connectCatalog(
+      { appKey: "same-app", secretKey: "same-secret" },
+      "repair-same-account",
+    )).rejects.toThrow("scan-must-cancel");
+    expect(fixture.controller.snapshot().statusMessage).toBe("scan-must-cancel");
+    fixture.controller.cancelCatalogScan();
+    expect(connection.cancelScanCalls).toBe(1);
+    gate.resolve();
+    await scanning;
+    fixture.controller.dispose();
+  });
+
+  it("reports live verification guidance before generic permit busy and lets cancel bypass", async () => {
+    const entered = deferred();
+    const gate = deferred();
+    const connection = new FakeCloudCatalogConnectionRuntime({ status: "authorized" });
+    const hybrid = new FakeHybridCatalogRuntime({ status: "ready", active: active() });
+    hybrid.beforeStart = async () => {
+      hybrid.setSnapshot({ status: "scanning", executionActive: true, active: active() });
+      entered.resolve();
+      await gate.promise;
+    };
+    const fixture = controllerFixture({
+      catalog: new FakeCloudCatalogRuntime({}, connection, hybrid),
+      catalogLargeScanConfirmation: { request: async () => true },
+    });
+    fixture.store.setSettingsForTest({
+      ...fixture.store.settings(),
+      boundCloudLibrary: {
+        schemaVersion: 1,
+        path: "/Synthetic",
+        sourceImportSha256: SOURCE_HASH,
+        verificationGeneration: 1,
+      },
+      cloudVerificationGeneration: 1,
+    });
+
+    const verification = fixture.controller.requestLargeCatalogVerification(
+      "/Synthetic",
+      [taskGroupKey],
+    );
+    await entered.promise;
+    await expect(fixture.controller.connectCatalog(
+      { appKey: "same-app", secretKey: "same-secret" },
+      "repair-same-account",
+    )).rejects.toThrow("verification-must-pause");
+    expect(fixture.controller.snapshot().statusMessage).toBe("verification-must-pause");
+    fixture.controller.cancelSelectedVerification();
+    expect(hybrid.cancelCalls).toBe(1);
+    gate.resolve();
+    await verification;
+    fixture.controller.dispose();
+  });
+
+  it("serializes TXT binding and identity replacement in both directions", async () => {
+    const confirmationEntered = deferred();
+    const confirmationGate = deferred<boolean>();
+    const connection = new FakeCloudCatalogConnectionRuntime({ status: "authorized" });
+    const hybrid = new FakeHybridCatalogRuntime({ status: "ready", active: active() });
+    hybrid.previewSummary = { ...hybrid.previewSummary, sourceSha256: TXT_PREVIEW_HASH };
+    const fixture = controllerFixture({
+      catalog: new FakeCloudCatalogRuntime({}, connection, hybrid),
+      catalogTxtImportConfirmation: {
+        request: () => {
+          confirmationEntered.resolve();
+          return confirmationGate.promise;
+        },
+      },
+    });
+    fixture.store.setSettingsForTest({
+      ...fixture.store.settings(),
+      boundCloudLibrary: {
+        schemaVersion: 1,
+        path: "/Synthetic",
+        sourceImportSha256: SOURCE_HASH,
+        verificationGeneration: 1,
+      },
+      cloudVerificationGeneration: 1,
+    });
+    await fixture.controller.previewTaskCatalogTxt(
+      "/Synthetic/catalog.txt",
+      fixture.controller.snapshot().taskActionRevision,
+    );
+
+    const importing = fixture.controller.importPreviewedTaskCatalogTxt();
+    await confirmationEntered.promise;
+    await expect(fixture.controller.connectCatalog(
+      { appKey: "new-app", secretKey: "new-secret" },
+      "replace-identity",
+    )).rejects.toThrow("cloud-authority-operation-busy");
+    confirmationGate.resolve(false);
+    await importing;
+
+    fixture.store.pauseNextCloudVerificationUpdate();
+    const replacing = fixture.controller.connectCatalog(
+      { appKey: "new-app", secretKey: "new-secret" },
+      "replace-identity",
+    );
+    await Promise.resolve();
+    await expect(fixture.controller.importPreviewedTaskCatalogTxt())
+      .rejects.toThrow("cloud-authority-operation-busy");
+    fixture.store.resumeCloudVerificationUpdate();
+    await replacing;
+    fixture.controller.dispose();
+  });
+
+  it("does not mutate credentials or authority when identity generation overflows", async () => {
+    const connection = new FakeCloudCatalogConnectionRuntime({ status: "authorized" });
+    const hybrid = new FakeHybridCatalogRuntime({ status: "ready", active: active() });
+    const catalog = new FakeCloudCatalogRuntime({}, connection, hybrid);
+    const fixture = controllerFixture({ catalog });
+    fixture.store.setSettingsForTest({
+      ...fixture.store.settings(),
+      cloudVerificationGeneration: Number.MAX_SAFE_INTEGER,
+    });
+
+    await expect(fixture.controller.connectCatalog(
+      { appKey: "new-app", secretKey: "new-secret" },
+      "replace-identity",
+    )).rejects.toThrow("cloud-verification-generation-overflow");
+    expect(fixture.store.cloudVerificationSettingsCalls).toEqual([]);
+    expect(connection.savedCredentials).toEqual([]);
+    expect(catalog.verificationAuthorities).toEqual([]);
+    expect(hybrid.rebuildVerificationProjectionCalls).toBe(0);
+    fixture.controller.dispose();
+  });
+
+  it("does not mutate credentials or authority when identity CAS persistence fails", async () => {
+    const connection = new FakeCloudCatalogConnectionRuntime({ status: "authorized" });
+    const hybrid = new FakeHybridCatalogRuntime({ status: "ready", active: active() });
+    const catalog = new FakeCloudCatalogRuntime({}, connection, hybrid);
+    const fixture = controllerFixture({ catalog });
+    fixture.store.failNext = new Error("identity-write-failed");
+
+    await expect(fixture.controller.connectCatalog(
+      { appKey: "new-app", secretKey: "new-secret" },
+      "replace-identity",
+    )).rejects.toThrow("identity-write-failed");
+    expect(connection.savedCredentials).toEqual([]);
+    expect(catalog.verificationAuthorities).toEqual([]);
+    expect(hybrid.rebuildVerificationProjectionCalls).toBe(0);
+    fixture.controller.dispose();
+  });
+
+  it("does not save replacement credentials when candidate-only identity rebuild fails", async () => {
+    const connection = new FakeCloudCatalogConnectionRuntime({ status: "authorized" });
+    const hybrid = new FakeHybridCatalogRuntime({ status: "ready", active: active() });
+    hybrid.beforeRebuildVerificationProjection = () => { throw new Error("identity-rebuild-failed"); };
+    const catalog = new FakeCloudCatalogRuntime({}, connection, hybrid);
+    const fixture = controllerFixture({ catalog });
+    fixture.store.setSettingsForTest({
+      ...fixture.store.settings(),
+      boundCloudLibrary: {
+        schemaVersion: 1,
+        path: "/Synthetic",
+        sourceImportSha256: SOURCE_HASH,
+        verificationGeneration: 1,
+      },
+      cloudVerificationGeneration: 1,
+    });
+
+    await expect(fixture.controller.connectCatalog(
+      { appKey: "new-app", secretKey: "new-secret" },
+      "replace-identity",
+    )).rejects.toThrow("identity-rebuild-failed");
+    expect(fixture.store.settings()).toMatchObject({
+      boundCloudLibrary: null,
+      cloudVerificationGeneration: 2,
+    });
+    expect(catalog.verificationAuthorities.at(-1)).toBeNull();
+    expect(connection.savedCredentials).toEqual([]);
+    expect(connection.beginAuthorizationCalls).toBe(0);
+    fixture.controller.dispose();
+  });
+
+  it("rotates authority and tombstones a resumable batch before revoking credentials", async () => {
+    const connection = new FakeCloudCatalogConnectionRuntime({ status: "authorized" });
+    const hybrid = new FakeHybridCatalogRuntime({
+      status: "paused",
+      active: active(),
+      batch: {
+        batchId: "batch-revoke",
+        status: "paused",
+        resumeAvailable: true,
+      },
+    });
+    const catalog = new FakeCloudCatalogRuntime({}, connection, hybrid);
+    const fixture = controllerFixture({ catalog });
+    fixture.store.setSettingsForTest({
+      ...fixture.store.settings(),
+      boundCloudLibrary: {
+        schemaVersion: 1,
+        path: "/Synthetic",
+        sourceImportSha256: SOURCE_HASH,
+        verificationGeneration: 1,
+      },
+      cloudVerificationGeneration: 1,
+    });
+
+    await fixture.controller.revokeCatalog();
+
+    expect(fixture.store.settings()).toMatchObject({
+      boundCloudLibrary: null,
+      cloudVerificationGeneration: 2,
+      verificationBatchTombstones: {
+        state: "valid",
+        batchIds: ["batch-revoke"],
+      },
+    });
+    expect(catalog.verificationAuthorities.at(-1)).toBeNull();
+    expect(hybrid.rebuildVerificationProjectionCalls).toBe(1);
+    expect(connection.revokeCalls).toBe(1);
+    fixture.controller.dispose();
+  });
+
+  it("rejects an authorization code if the prepared generation changed", async () => {
+    const connection = new FakeCloudCatalogConnectionRuntime({ status: "configured" });
+    const fixture = controllerFixture({
+      catalog: new FakeCloudCatalogRuntime({}, connection),
+    });
+    fixture.store.setSettingsForTest({
+      ...fixture.store.settings(),
+      cloudVerificationGeneration: 1,
+    });
+    await fixture.controller.connectCatalog(
+      { appKey: "ignored", secretKey: "ignored" },
+      "repair-same-account",
+    );
+    fixture.store.setSettingsForTest({
+      ...fixture.store.settings(),
+      cloudVerificationGeneration: 2,
+    });
+
+    await expect(fixture.controller.submitCatalogAuthorizationCode(
+      "stale-code",
+      "repair-same-account",
+    )).rejects.toThrow("authorization-attempt-unavailable");
+    expect(connection.submittedAuthorizationCodes).toEqual([]);
+    expect(connection.savedCredentials).toEqual([]);
+    fixture.controller.dispose();
+  });
+
+  it("serializes verification launch and identity replacement in both directions", async () => {
+    const presenterGate = deferred<boolean>();
+    const connection = new FakeCloudCatalogConnectionRuntime({ status: "authorized" });
+    const hybrid = new FakeHybridCatalogRuntime({ status: "ready", active: active() });
+    const fixture = controllerFixture({
+      catalog: new FakeCloudCatalogRuntime({}, connection, hybrid),
+      catalogLargeScanConfirmation: { request: () => presenterGate.promise },
+      pauseCloudVerificationUpdate: true,
+    });
+    fixture.store.setSettingsForTest({
+      ...fixture.store.settings(),
+      boundCloudLibrary: {
+        schemaVersion: 1,
+        path: "/Synthetic",
+        sourceImportSha256: SOURCE_HASH,
+        verificationGeneration: 1,
+      },
+      cloudVerificationGeneration: 1,
+    });
+
+    const launch = fixture.controller.requestLargeCatalogVerification(
+      "/Synthetic",
+      [taskGroupKey],
+    );
+    await Promise.resolve();
+    await expect(fixture.controller.connectCatalog(
+      { appKey: "new-app", secretKey: "new-secret" },
+      "replace-identity",
+    )).rejects.toThrow("cloud-authority-operation-busy");
+    expect(fixture.store.cloudVerificationSettingsCalls).toEqual([]);
+    presenterGate.resolve(false);
+    await launch;
+
+    const replacement = fixture.controller.connectCatalog(
+      { appKey: "new-app", secretKey: "new-secret" },
+      "replace-identity",
+    );
+    await Promise.resolve();
+    expect(fixture.store.cloudVerificationSettingsCalls).toHaveLength(1);
+    let secondPresenterCalls = 0;
+    const internals = fixture.controller as unknown as {
+      readonly dependencies: { catalogLargeScanConfirmation?: { request(): Promise<boolean> } };
+    };
+    internals.dependencies.catalogLargeScanConfirmation = {
+      request: async () => { secondPresenterCalls += 1; return true; },
+    };
+    await expect(fixture.controller.requestLargeCatalogVerification(
+      "/Synthetic",
+      [taskGroupKey],
+    )).rejects.toThrow("cloud-authority-operation-busy");
+    expect(secondPresenterCalls).toBe(0);
+    fixture.store.resumeCloudVerificationUpdate();
+    await replacement;
+    expect(connection.savedCredentials).toEqual([{ appKey: "new-app", secretKey: "new-secret" }]);
+    expect(hybrid.startInputs).toEqual([]);
+    fixture.controller.dispose();
+  });
+
+  it("keeps same-account repair separate and fails closed for live work", async () => {
+    const connection = new FakeCloudCatalogConnectionRuntime({ status: "authorized" });
+    const hybrid = new FakeHybridCatalogRuntime({
+      status: "scanning",
+      executionActive: true,
+      active: active(),
+    });
+    const fixture = controllerFixture({ catalog: new FakeCloudCatalogRuntime({}, connection, hybrid) });
+
+    await expect(fixture.controller.connectCatalog(
+      { appKey: "same-app", secretKey: "same-secret" },
+      "repair-same-account",
+    )).rejects.toThrow("verification-must-pause");
+    expect(connection.savedCredentials).toEqual([]);
+    expect(fixture.store.cloudVerificationSettingsCalls).toEqual([]);
+
+    hybrid.setSnapshot({ status: "ready", executionActive: false, active: active() });
+    await fixture.controller.connectCatalog(
+      { appKey: "same-app", secretKey: "same-secret" },
+      "repair-same-account",
+    );
+    await expect(fixture.controller.submitCatalogAuthorizationCode("code", "replace-identity"))
+      .rejects.toThrow("authorization-attempt-unavailable");
+    await fixture.controller.submitCatalogAuthorizationCode("code", "repair-same-account");
+    expect(connection.submittedAuthorizationCodes).toEqual(["code"]);
+    expect(connection.savedCredentials).toEqual([]);
+    expect(fixture.store.cloudVerificationSettingsCalls).toEqual([]);
     fixture.controller.dispose();
   });
 });
@@ -652,6 +1436,357 @@ describe("WorkbenchController verification page state", () => {
     mode: "recursive" as const,
     verificationStatus: "unverified" as const,
   };
+  const installCurrentVerificationScope = (
+    fixture: ReturnType<typeof controllerFixture>,
+    hybrid: FakeHybridCatalogRuntime,
+    root: string,
+    groupKeys: readonly string[] = [groupKey],
+  ): void => {
+    const snapshot = hybrid.snapshot();
+    const sourceImportSha256 = snapshot.active?.sourceImportSha256;
+    if (sourceImportSha256 === undefined) throw new Error("test-active-catalog-required");
+    const binding = {
+      schemaVersion: 1 as const,
+      path: root,
+      sourceImportSha256,
+      verificationGeneration: 1,
+    };
+    const scope = deriveCloudVerificationScope(binding)!;
+    fixture.store.setSettingsForTest({
+      ...fixture.store.settings(),
+      boundCloudLibrary: binding,
+      cloudVerificationGeneration: 1,
+      verificationBatchTombstones: { schemaVersion: 1, state: "valid", batchIds: [] },
+      legacyVerificationAdoption: { schemaVersion: 1, state: "none" },
+    });
+    if (snapshot.batch !== undefined) {
+      hybrid.setSnapshot({
+        ...snapshot,
+        batch: {
+          ...snapshot.batch,
+          verificationScope: scope,
+          legacyPromotionRequired: false,
+          selectedGroupCount: groupKeys.length,
+          selectedGroupKeys: [...groupKeys],
+        },
+      });
+    }
+  };
+  const resumableHybrid = (): FakeHybridCatalogRuntime => new FakeHybridCatalogRuntime({
+    status: "paused",
+    active: {
+      importedAt: 1,
+      pdfCount: 12,
+      unverifiedCount: 12,
+      verifiedCount: 0,
+      differenceCount: 0,
+      cloudMissingCount: 0,
+      groupCount: 1,
+      verifiedGroupCount: 0,
+      coveredCandidatePdfCount: 0,
+      groups: [group],
+    },
+    batch: {
+      ...INACTIVE_AUTO_RESUME,
+      batchId: "batch-resume-guard",
+      status: "paused",
+      stopReason: "time-limit",
+      resumeAvailable: true,
+      runOrdinal: 1,
+      remainingGroupCount: 1,
+      pdfCount: 0,
+      directoryCount: 0,
+      ignoredFileCount: 0,
+      listRequestCount: 1,
+      cumulativeListRequestCount: 1,
+      selectedGroupCount: 1,
+      selectedGroupKeys: [groupKey],
+      completedGroupCount: 0,
+      currentGroupIndex: 0,
+      currentGroupKey: null,
+      committedPdfCount: 0,
+      committedPageCount: 0,
+      completedDirectoryCount: 0,
+      pendingDirectoryCount: 0,
+    },
+  });
+
+  it("rechecks the full start authority after confirmation before reaching runtime", async () => {
+    const entered = deferred();
+    const gate = deferred<boolean>();
+    const hybrid = new FakeHybridCatalogRuntime({
+      status: "ready",
+      active: {
+        importedAt: 1,
+        pdfCount: 12,
+        unverifiedCount: 12,
+        verifiedCount: 0,
+        differenceCount: 0,
+        cloudMissingCount: 0,
+        groupCount: 1,
+        verifiedGroupCount: 0,
+        coveredCandidatePdfCount: 0,
+        groups: [group],
+      },
+    });
+    const fixture = controllerFixture({
+      catalog: new FakeCloudCatalogRuntime({}, undefined, hybrid),
+      catalogLargeScanConfirmation: {
+        request: () => {
+          entered.resolve();
+          return gate.promise;
+        },
+      },
+    });
+    installCurrentVerificationScope(fixture, hybrid, "/Synthetic");
+
+    const starting = fixture.controller.requestLargeCatalogVerification(
+      "/Synthetic",
+      [groupKey],
+    );
+    await entered.promise;
+    fixture.store.setSettingsForTest({
+      ...fixture.store.settings(),
+      cloudVerificationGeneration: 2,
+    });
+    gate.resolve(true);
+
+    await expect(starting).rejects.toThrow("hybrid-batch-unavailable");
+    expect(hybrid.startInputs).toEqual([]);
+    fixture.controller.dispose();
+  });
+
+  it.each(["direct", "selected"] as const)(
+    "accepts an exact allowlisted V3 resume through the %s public entry",
+    async (entry) => {
+      const hybrid = resumableHybrid();
+      let confirmationCalls = 0;
+      const fixture = controllerFixture({
+        catalog: new FakeCloudCatalogRuntime({}, undefined, hybrid),
+        catalogLargeScanConfirmation: {
+          request: async () => { confirmationCalls += 1; return true; },
+        },
+      });
+      installCurrentVerificationScope(fixture, hybrid, "/Synthetic");
+      const binding = fixture.store.settings().boundCloudLibrary!;
+      const scope = deriveCloudVerificationScope(binding)!;
+      const snapshot = hybrid.snapshot();
+      hybrid.setSnapshot({
+        ...snapshot,
+        batch: {
+          ...snapshot.batch!,
+          verificationScope: scope,
+          legacyPromotionRequired: true,
+        },
+      });
+      fixture.store.setSettingsForTest({
+        ...fixture.store.settings(),
+        legacyVerificationAdoption: {
+          schemaVersion: 1,
+          state: "adopted",
+          verificationGeneration: scope.generation,
+          sourceImportSha256: scope.sourceImportSha256,
+          cloudRootSha256: scope.cloudRootSha256,
+          candidate: {
+            importId: "candidate-v3",
+            manifestSha256: "c".repeat(64),
+            descriptorSha256: "d".repeat(64),
+          },
+          overlays: [],
+          unified: null,
+          resumableBatch: {
+            batchId: snapshot.batch!.batchId,
+            checkpointSha256: "e".repeat(64),
+            sourceImportSha256: scope.sourceImportSha256,
+            cloudRootSha256: scope.cloudRootSha256,
+          },
+        },
+      });
+      expect(hybrid.snapshot().batch).toMatchObject({
+        verificationScope: scope,
+        legacyPromotionRequired: true,
+      });
+
+      if (entry === "selected") {
+        fixture.controller.setVerificationRoot("/Synthetic");
+        fixture.controller.toggleVerificationGroup(groupKey);
+        await fixture.controller.resumeSelectedVerification();
+      } else {
+        await fixture.controller.requestResumeLargeCatalogVerification(
+          "/Synthetic",
+          [groupKey],
+        );
+      }
+
+      expect(confirmationCalls).toBe(1);
+      expect(hybrid.resumeInputs).toEqual([{
+        cloudRoot: "/Synthetic",
+        groupKeys: [groupKey],
+      }]);
+      fixture.controller.dispose();
+    },
+  );
+
+  it.each(["direct", "selected"] as const)(
+    "fails closed before confirmation for stale V4/V3 authority through the %s public entry",
+    async (entry) => {
+      const scenarios: ReadonlyArray<Readonly<{
+        label: string;
+        mutate(
+          fixture: ReturnType<typeof controllerFixture>,
+          hybrid: FakeHybridCatalogRuntime,
+        ): void;
+      }>> = [
+        {
+          label: "pending-adoption",
+          mutate: (fixture) => fixture.store.setSettingsForTest({
+            ...fixture.store.settings(),
+            legacyVerificationAdoption: { schemaVersion: 1, state: "pending" },
+          }),
+        },
+        {
+          label: "invalid-adoption",
+          mutate: (fixture) => fixture.store.setSettingsForTest({
+            ...fixture.store.settings(),
+            legacyVerificationAdoption: { schemaVersion: 1, state: "invalid" },
+          }),
+        },
+        {
+          label: "tombstoned-batch",
+          mutate: (fixture, hybrid) => fixture.store.setSettingsForTest({
+            ...fixture.store.settings(),
+            verificationBatchTombstones: {
+              schemaVersion: 1,
+              state: "valid",
+              batchIds: [hybrid.snapshot().batch!.batchId],
+            },
+          }),
+        },
+        {
+          label: "source-mismatch",
+          mutate: (fixture) => fixture.store.setSettingsForTest({
+            ...fixture.store.settings(),
+            boundCloudLibrary: {
+              ...fixture.store.settings().boundCloudLibrary!,
+              sourceImportSha256: "9".repeat(64),
+            },
+          }),
+        },
+        {
+          label: "generation-mismatch",
+          mutate: (fixture) => fixture.store.setSettingsForTest({
+            ...fixture.store.settings(),
+            cloudVerificationGeneration: 2,
+          }),
+        },
+        {
+          label: "root-mismatch",
+          mutate: (fixture) => fixture.store.setSettingsForTest({
+            ...fixture.store.settings(),
+            boundCloudLibrary: {
+              ...fixture.store.settings().boundCloudLibrary!,
+              path: "/Old-root",
+            },
+          }),
+        },
+        {
+          label: "scope-mismatch",
+          mutate: (_fixture, hybrid) => {
+            const snapshot = hybrid.snapshot();
+            hybrid.setSnapshot({
+              ...snapshot,
+              batch: {
+                ...snapshot.batch!,
+                verificationScope: {
+                  ...snapshot.batch!.verificationScope!,
+                  cloudRootSha256: "8".repeat(64),
+                },
+              },
+            });
+          },
+        },
+        {
+          label: "unlisted-v3",
+          mutate: (_fixture, hybrid) => {
+            const snapshot = hybrid.snapshot();
+            hybrid.setSnapshot({
+              ...snapshot,
+              batch: {
+                ...snapshot.batch!,
+                legacyPromotionRequired: true,
+              },
+            });
+          },
+        },
+        {
+          label: "stale-v3-allowlist",
+          mutate: (fixture, hybrid) => {
+            const snapshot = hybrid.snapshot();
+            const binding = fixture.store.settings().boundCloudLibrary!;
+            const scope = deriveCloudVerificationScope(binding)!;
+            hybrid.setSnapshot({
+              ...snapshot,
+              batch: {
+                ...snapshot.batch!,
+                legacyPromotionRequired: true,
+              },
+            });
+            fixture.store.setSettingsForTest({
+              ...fixture.store.settings(),
+              legacyVerificationAdoption: {
+                schemaVersion: 1,
+                state: "adopted",
+                verificationGeneration: scope.generation,
+                sourceImportSha256: scope.sourceImportSha256,
+                cloudRootSha256: scope.cloudRootSha256,
+                candidate: {
+                  importId: "candidate-v3",
+                  manifestSha256: "c".repeat(64),
+                  descriptorSha256: "d".repeat(64),
+                },
+                overlays: [],
+                unified: null,
+                resumableBatch: {
+                  batchId: "different-batch",
+                  checkpointSha256: "e".repeat(64),
+                  sourceImportSha256: scope.sourceImportSha256,
+                  cloudRootSha256: scope.cloudRootSha256,
+                },
+              },
+            });
+          },
+        },
+      ];
+
+      for (const scenario of scenarios) {
+        const hybrid = resumableHybrid();
+        let confirmationCalls = 0;
+        const fixture = controllerFixture({
+          catalog: new FakeCloudCatalogRuntime({}, undefined, hybrid),
+          catalogLargeScanConfirmation: {
+            request: async () => { confirmationCalls += 1; return true; },
+          },
+        });
+        installCurrentVerificationScope(fixture, hybrid, "/Synthetic");
+        if (entry === "selected") {
+          fixture.controller.setVerificationRoot("/Synthetic");
+          fixture.controller.toggleVerificationGroup(groupKey);
+        }
+        scenario.mutate(fixture, hybrid);
+
+        const operation = entry === "selected"
+          ? fixture.controller.resumeSelectedVerification()
+          : fixture.controller.requestResumeLargeCatalogVerification(
+              "/Synthetic",
+              [groupKey],
+            );
+        await expect(operation, scenario.label).rejects.toThrow("hybrid-batch-unavailable");
+        expect(confirmationCalls, scenario.label).toBe(0);
+        expect(hybrid.resumeInputs, scenario.label).toEqual([]);
+        fixture.controller.dispose();
+      }
+    },
+  );
 
   it("fails closed when the normal-only directory selection validator is absent", async () => {
     const hybrid = new FakeHybridCatalogRuntime({
@@ -898,6 +2033,7 @@ describe("WorkbenchController verification page state", () => {
         request: async (input) => { confirmations.push(structuredClone(input)); return true; },
       },
     });
+    installCurrentVerificationScope(fixture, hybrid, "/Synthetic");
     fixture.controller.setVerificationRoot("/Synthetic");
     fixture.controller.toggleVerificationGroup(groupKey);
 
@@ -962,6 +2098,7 @@ describe("WorkbenchController verification page state", () => {
       catalog: new FakeCloudCatalogRuntime({}, undefined, hybrid),
       catalogLargeScanConfirmation: { request: async () => true },
     });
+    installCurrentVerificationScope(fixture, hybrid, "/Wrong-candidate");
     expect(fixture.controller.snapshot().verificationRootLocked).toBe(false);
     fixture.controller.setVerificationRoot("/Wrong-candidate");
     fixture.controller.toggleVerificationGroup(groupKey);
@@ -975,6 +2112,7 @@ describe("WorkbenchController verification page state", () => {
     });
 
     hybrid.beforeResume = undefined;
+    installCurrentVerificationScope(fixture, hybrid, "/Synthetic");
     fixture.controller.setVerificationRoot("/Synthetic");
     expect(fixture.controller.snapshot().verificationActionMessageCode).toBeUndefined();
     await fixture.controller.resumeSelectedVerification();
@@ -1026,6 +2164,7 @@ describe("WorkbenchController verification page state", () => {
       catalog: new FakeCloudCatalogRuntime({}, undefined, hybrid),
       catalogLargeScanConfirmation: { request: async () => true },
     });
+    installCurrentVerificationScope(fixture, hybrid, "/Candidate");
     fixture.controller.setVerificationRoot("/Candidate");
     fixture.controller.toggleVerificationGroup(groupKey);
     hybrid.beforeResume = () => { throw new HybridCatalogError("hybrid-batch-invalid"); };
@@ -1096,6 +2235,7 @@ describe("WorkbenchController verification page state", () => {
       catalog: new FakeCloudCatalogRuntime({}, undefined, hybrid),
       catalogLargeScanConfirmation: { request: async () => true },
     });
+    installCurrentVerificationScope(fixture, hybrid, "/New-root");
     fixture.controller.setVerificationRoot("/New-root");
     fixture.controller.toggleVerificationGroup(groupKey);
 
@@ -1104,6 +2244,7 @@ describe("WorkbenchController verification page state", () => {
     expect(fixture.controller.snapshot().verificationRootLocked).toBe(false);
 
     hybrid.beforeStart = undefined;
+    installCurrentVerificationScope(fixture, hybrid, "/Old-checkpoint-root");
     fixture.controller.setVerificationRoot("/Old-checkpoint-root");
     await fixture.controller.resumeSelectedVerification();
     expect(hybrid.resumeRoots).toEqual(["/Old-checkpoint-root"]);
@@ -1132,6 +2273,7 @@ describe("WorkbenchController verification page state", () => {
       catalog: new FakeCloudCatalogRuntime({}, undefined, hybrid),
       catalogLargeScanConfirmation: { request: async () => true },
     });
+    installCurrentVerificationScope(fixture, hybrid, "/Synthetic");
     fixture.controller.setVerificationRoot("/Synthetic");
     fixture.controller.toggleVerificationGroup(groupKey);
 
@@ -1197,6 +2339,7 @@ describe("WorkbenchController verification page state", () => {
       catalog: new ProjectionFailingCatalog({}, undefined, hybrid),
       catalogLargeScanConfirmation: { request: async () => true },
     });
+    installCurrentVerificationScope(fixture, hybrid, "/New-root");
     fixture.controller.setVerificationRoot("/New-root");
     fixture.controller.toggleVerificationGroup(groupKey);
 

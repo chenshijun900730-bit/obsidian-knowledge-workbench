@@ -10,15 +10,18 @@ import type { CloudDirectoryLocatorRuntime } from "../../src/catalog/cloud-direc
 import type { CatalogScanConfirmationPresenter } from "../../src/ui/catalog-scan-confirmation-modal";
 import type { HybridCatalogRuntime } from "../../src/catalog/hybrid-catalog-runtime";
 import type {
+  ConsumeTxtPreviewResult,
   HybridCatalogActiveSummary,
   HybridCatalogVerificationInput,
   HybridCatalogViewModel,
   LargeCatalogBatchSummary,
 } from "../../src/catalog/hybrid-catalog-runtime";
 import type {
+  CatalogTxtImportSummary,
   CatalogDifferenceKind,
   CatalogVerificationStatus,
 } from "../../src/catalog/hybrid-catalog-types";
+import { HybridCatalogError } from "../../src/catalog/hybrid-catalog-types";
 import type {
   CloudVerificationAuthority,
   CloudVerificationScope,
@@ -77,6 +80,17 @@ const emptyViewModel = (): CloudCatalogViewModel => ({
   total: 0,
   items: [],
 });
+
+const statusAfterTxtNoOp = (
+  active: HybridCatalogActiveSummary | undefined,
+  batch: LargeCatalogBatchSummary | undefined,
+): HybridCatalogViewModel["status"] => {
+  if (active === undefined) return "empty";
+  if (batch?.status === "scanning") return "scanning";
+  if (batch?.status === "paused") return "paused";
+  if (batch?.status === "partial") return "partial";
+  return "ready";
+};
 
 export class FakeCloudCatalogRuntime implements CloudCatalogRuntime {
   readonly queries: string[] = [];
@@ -152,7 +166,11 @@ export class FakeCloudCatalogConnectionRuntime implements CloudCatalogConnection
   revokeCalls = 0;
   cancelScanCalls = 0;
   disposeCalls = 0;
-  beforeStartScan: ((rootPath: string) => void) | undefined;
+  beforeSaveApplicationCredentials: ((input: Readonly<{ appKey: string; secretKey: string }>) => void | Promise<void>) | undefined;
+  beforeBeginAuthorization: (() => void | Promise<void>) | undefined;
+  beforeSubmitAuthorizationCode: ((code: string) => void | Promise<void>) | undefined;
+  beforeRevoke: (() => void | Promise<void>) | undefined;
+  beforeStartScan: ((rootPath: string) => void | Promise<void>) | undefined;
   private readonly listeners = new Set<() => void>();
   private viewModel: CloudCatalogConnectionViewModel;
 
@@ -167,17 +185,20 @@ export class FakeCloudCatalogConnectionRuntime implements CloudCatalogConnection
   }
   async initialize(): Promise<void> {}
   async saveApplicationCredentials(input: Readonly<{ appKey: string; secretKey: string }>): Promise<void> {
+    await this.beforeSaveApplicationCredentials?.(input);
     this.savedCredentials.push(structuredClone(input));
     this.viewModel = { status: "configured" };
     this.emit();
   }
   async beginAuthorization(): Promise<Readonly<{ expiresAt: number }>> {
+    await this.beforeBeginAuthorization?.();
     this.beginAuthorizationCalls += 1;
     this.viewModel = { status: "authorizing", authorizationExpiresAt: 601_000 };
     this.emit();
     return { expiresAt: 601_000 };
   }
   async submitAuthorizationCode(code: string): Promise<void> {
+    await this.beforeSubmitAuthorizationCode?.(code);
     this.submittedAuthorizationCodes.push(code);
     this.viewModel = { status: "authorized" };
     this.emit();
@@ -188,12 +209,13 @@ export class FakeCloudCatalogConnectionRuntime implements CloudCatalogConnection
     this.emit();
   }
   async revoke(): Promise<void> {
+    await this.beforeRevoke?.();
     this.revokeCalls += 1;
     this.viewModel = { status: "unconfigured" };
     this.emit();
   }
   async startScan(rootPath: string): Promise<void> {
-    this.beforeStartScan?.(rootPath);
+    await this.beforeStartScan?.(rootPath);
     this.startScanCalls.push(rootPath);
   }
   cancelScan(): void { this.cancelScanCalls += 1; }
@@ -215,6 +237,10 @@ export class FakeCloudCatalogConnectionRuntime implements CloudCatalogConnection
 export class FakeHybridCatalogRuntime implements HybridCatalogRuntime {
   readonly previewPaths: string[] = [];
   readonly importPaths: string[] = [];
+  readonly consumeTxtPreviewInputs: Array<Readonly<{
+    path: string;
+    expectedSourceSha256: string;
+  }>> = [];
   readonly startInputs: HybridCatalogVerificationInput[] = [];
   readonly resumeRoots: string[] = [];
   readonly resumeInputs: HybridCatalogVerificationInput[] = [];
@@ -226,9 +252,27 @@ export class FakeHybridCatalogRuntime implements HybridCatalogRuntime {
   cancelCalls = 0;
   initializeCalls = 0;
   disposeCalls = 0;
-  beforeImport: (() => void) | undefined;
-  beforeStart: (() => void) | undefined;
-  beforeResume: (() => void) | undefined;
+  beforePreview: ((path: string) => void | Promise<void>) | undefined;
+  beforeConsumeTxtPreview: ((input: Readonly<{
+    path: string;
+    expectedSourceSha256: string;
+  }>) => void | Promise<void>) | undefined;
+  beforeImport: (() => void | Promise<void>) | undefined;
+  beforeRebuildVerificationProjection: (() => void | Promise<void>) | undefined;
+  beforeStart: (() => void | Promise<void>) | undefined;
+  beforeResume: (() => void | Promise<void>) | undefined;
+  previewSummary: CatalogTxtImportSummary = {
+    sourceSha256: "b".repeat(64),
+    byteSize: 100,
+    nonEmptyLineCount: 10,
+    pdfCount: 8,
+    directoryCount: 2,
+    ignoredLeafCount: 0,
+    normalizedWhitespaceCount: 0,
+    maxDepth: 2,
+  };
+  consumeTxtPreviewResult: ConsumeTxtPreviewResult | undefined;
+  activatedActive: HybridCatalogActiveSummary | undefined;
   legacyLocalAuthority: Extract<
     CloudVerificationAuthority,
     Readonly<{ kind: "legacy-local-only" }>
@@ -251,10 +295,74 @@ export class FakeHybridCatalogRuntime implements HybridCatalogRuntime {
     this.listeners.add(listener);
     return () => { this.listeners.delete(listener); };
   }
-  async previewTxt(path: string): Promise<void> { this.previewPaths.push(path); }
+  async previewTxt(path: string): Promise<CatalogTxtImportSummary> {
+    this.previewPaths.push(path);
+    await this.beforePreview?.(path);
+    const summary = structuredClone(this.previewSummary);
+    this.viewModel = {
+      ...this.viewModel,
+      status: "previewed",
+      candidate: summary,
+    };
+    this.emit();
+    return structuredClone(summary);
+  }
+  async consumeTxtPreview(input: Readonly<{
+    path: string;
+    expectedSourceSha256: string;
+  }>): Promise<ConsumeTxtPreviewResult> {
+    const detached = structuredClone(input);
+    this.consumeTxtPreviewInputs.push(detached);
+    await this.beforeConsumeTxtPreview?.(detached);
+    const candidate = this.viewModel.candidate;
+    if (candidate?.sourceSha256 !== input.expectedSourceSha256) {
+      throw new HybridCatalogError("txt-source-invalid");
+    }
+    const result = this.consumeTxtPreviewResult ?? {
+      kind: this.viewModel.active?.sourceImportSha256 === input.expectedSourceSha256
+        ? "unchanged" as const
+        : "activated" as const,
+      sourceSha256: input.expectedSourceSha256,
+    };
+    const active = result.kind === "activated"
+      ? structuredClone(this.activatedActive ?? (this.viewModel.active === undefined
+        ? {
+            sourceImportSha256: result.sourceSha256,
+            legacyArtifactSetSha256: null,
+            importedAt: 1,
+            pdfCount: candidate.pdfCount,
+            unverifiedCount: candidate.pdfCount,
+            verifiedCount: 0,
+            differenceCount: 0,
+            cloudMissingCount: 0,
+            groupCount: 0,
+            verifiedGroupCount: 0,
+            coveredCandidatePdfCount: 0,
+            groups: [],
+          }
+        : { ...this.viewModel.active, sourceImportSha256: result.sourceSha256 }))
+      : this.viewModel.active;
+    const { candidate: _candidate, ...current } = this.viewModel;
+    this.viewModel = result.kind === "activated"
+      ? {
+          status: "ready",
+          executionActive: false,
+          active,
+        }
+      : {
+          ...current,
+          status: statusAfterTxtNoOp(active, this.viewModel.batch),
+          ...(active === undefined ? {} : { active }),
+        };
+    this.emit();
+    return structuredClone(result);
+  }
   async importTxt(path: string): Promise<void> {
-    this.beforeImport?.();
+    await this.beforeImport?.();
     this.importPaths.push(path);
+    const candidate = this.viewModel.candidate;
+    if (candidate === undefined) throw new HybridCatalogError("txt-source-invalid");
+    await this.consumeTxtPreview({ path, expectedSourceSha256: candidate.sourceSha256 });
   }
   setVerificationAuthority(authority: CloudVerificationAuthority | null): void {
     this.verificationAuthorities.push(structuredClone(authority));
@@ -278,14 +386,15 @@ export class FakeHybridCatalogRuntime implements HybridCatalogRuntime {
     this.revalidatedAdoptions.push(structuredClone(prepared));
   }
   async rebuildVerificationProjection(): Promise<void> {
+    await this.beforeRebuildVerificationProjection?.();
     this.rebuildVerificationProjectionCalls += 1;
   }
   async startLargeVerification(input: HybridCatalogVerificationInput): Promise<void> {
-    this.beforeStart?.();
+    await this.beforeStart?.();
     this.startInputs.push(structuredClone(input));
   }
   async resumeLargeVerification(input: HybridCatalogVerificationInput): Promise<void> {
-    this.beforeResume?.();
+    await this.beforeResume?.();
     this.resumeRoots.push(input.cloudRoot);
     this.resumeInputs.push(structuredClone(input));
   }
@@ -298,6 +407,10 @@ export class FakeHybridCatalogRuntime implements HybridCatalogRuntime {
     value: FakeHybridCatalogViewModel,
   ): void {
     this.viewModel = normalizeHybridViewModel(value);
+    this.emit();
+  }
+
+  private emit(): void {
     for (const listener of this.listeners) listener();
   }
 }

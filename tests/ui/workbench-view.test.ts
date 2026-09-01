@@ -40,6 +40,7 @@ import {
   TEST_HYBRID_ACTIVE_AUTHORITY,
   TEST_INACTIVE_HYBRID_EXECUTION,
   TEST_LARGE_BATCH_AUTHORITY,
+  TEST_NEEDS_TXT_WORKFLOW,
   type ProjectionSchedulerDependency,
 } from "../helpers/ui-fixtures";
 import {
@@ -53,6 +54,7 @@ import {
 import type { LargeCatalogBatchSummary } from "../../src/catalog/hybrid-catalog-runtime";
 import type { CloudDirectorySelection } from "../../src/catalog/cloud-directory-selection";
 import type { CloudDirectoryPickerPresenter } from "../../src/ui/cloud-directory-picker";
+import { deriveCloudVerificationScope } from "../../src/catalog/cloud-verification-scope";
 
 const createTestDiv = (): HTMLDivElement => document.createElementNS(
   "http://www.w3.org/1999/xhtml",
@@ -117,6 +119,27 @@ describe("workbench", () => {
     for (const label of suggestionLabels) expect(root.textContent).toContain(label);
     expect(root.textContent).toContain("原文/Keep.md");
     expect(root.querySelector<HTMLButtonElement>("button:disabled")).not.toBeNull();
+  });
+
+  it.each([
+    ["task.txtContentUnchanged", "目录 TXT 内容没有变化，已保留当前书库绑定。"],
+    ["task.txtImportFailed", "目录 TXT 未导入；现有目录保持不变。"],
+    ["verification-must-pause", "请先暂停当前核验，再执行此操作。"],
+    ["scan-must-cancel", "请先取消当前云端扫描，再执行此操作。"],
+    ["cloud-authority-operation-busy", "另一项云端安全操作正在进行；请等待完成后重试。"],
+    ["authorization-attempt-unavailable", "本次授权已失效，请从对应的重新连接或更换账号操作重新开始。"],
+  ] as const)("localizes fixed task status %s on the shared workbench surface", (
+    statusMessage,
+    expected,
+  ) => {
+    const root = createTestDiv();
+    renderWorkbench(root, {
+      ...populatedWorkbenchModel(),
+      locale: "zh-CN",
+      statusMessage,
+    }, noOpWorkbenchActions());
+
+    expect(root.querySelector('[role="status"]')?.textContent).toContain(expected);
   });
 
   it.each([
@@ -583,9 +606,17 @@ describe("workbench", () => {
         verificationStatus: "unverified" as const,
       }],
     };
+    const binding = {
+      schemaVersion: 1 as const,
+      path: "/Wrong-candidate",
+      sourceImportSha256: active.sourceImportSha256,
+      verificationGeneration: 1,
+    };
     const pausedBatch = {
       ...TEST_LARGE_BATCH_AUTHORITY,
       ...INACTIVE_AUTO_RESUME,
+      verificationScope: deriveCloudVerificationScope(binding),
+      selectedGroupKeys: [groupKey],
       batchId: "batch-paused",
       status: "paused" as const,
       stopReason: "time-limit" as const,
@@ -611,6 +642,11 @@ describe("workbench", () => {
     const fixture = controllerFixture({
       catalog: new FakeCloudCatalogRuntime({}, connection, hybrid),
       catalogLargeScanConfirmation: { request: async () => true },
+    });
+    fixture.store.setSettingsForTest({
+      ...fixture.store.settings(),
+      boundCloudLibrary: binding,
+      cloudVerificationGeneration: binding.verificationGeneration,
     });
     fixture.controller.setVerificationRoot("/Wrong-candidate");
     fixture.controller.selectTab("verification");
@@ -650,10 +686,20 @@ describe("workbench", () => {
     expect(view.contentEl.textContent).not.toContain("已保存的核验检查点不可用");
     expect(fixture.controller.snapshot().verificationActionMessageCode).toBeUndefined();
 
+    const correctedBinding = { ...binding, path: "/Correct-candidate" };
+    const correctedBatch = {
+      ...pausedBatch,
+      verificationScope: deriveCloudVerificationScope(correctedBinding),
+    };
+    fixture.store.setSettingsForTest({
+      ...fixture.store.settings(),
+      boundCloudLibrary: correctedBinding,
+    });
+
     hybrid.setSnapshot({
       status: "error",
       active,
-      batch: pausedBatch,
+      batch: correctedBatch,
       messageCode: "hybrid-cloud-root-mismatch",
     });
     expect(view.contentEl.textContent).not.toContain("恢复根目录不匹配");
@@ -686,11 +732,11 @@ describe("workbench", () => {
     hybrid.setSnapshot({
       status: "error",
       active,
-      batch: pausedBatch,
+      batch: correctedBatch,
       messageCode: "hybrid-batch-invalid",
     });
     expect(view.contentEl.textContent).toContain("已保存的核验检查点不可用");
-    hybrid.setSnapshot({ status: "paused", active, batch: pausedBatch });
+    hybrid.setSnapshot({ status: "paused", active, batch: correctedBatch });
     view.contentEl.querySelector<HTMLButtonElement>('[data-action="resume-verification"]')?.click();
     await vi.waitFor(() => expect(hybrid.resumeRoots).toEqual(["/Correct-candidate"]));
 
@@ -957,6 +1003,10 @@ describe("workbench", () => {
         total: 0,
         items: [],
       },
+      pendingCatalogTxt: null,
+      taskActionPending: false,
+      taskActionRevision: 1,
+      workflow: TEST_NEEDS_TXT_WORKFLOW,
       verificationRoot: "",
       verificationRootLocked: false,
       selectedVerificationGroupKeys: [],
