@@ -397,6 +397,7 @@ describe("read-only acceptance automated safety", () => {
       "createSettingsTab",
       "cloudVerificationRootHasher",
       "createCatalog",
+      "createFolderSelection",
       "createCatalogConfirmation",
     ]);
     expect(runtime.policy).toEqual(READ_ONLY_ACCEPTANCE_POLICY);
@@ -412,6 +413,17 @@ describe("read-only acceptance automated safety", () => {
     expect("createWorkbenchSettingsSurface" in runtime).toBe(false);
     expect("createCatalogDirectoryPicker" in runtime).toBe(false);
     expect(runtime.cloudVerificationRootHasher("/样本")).toBeNull();
+    const folderSelection = runtime.createFolderSelection({
+      store: {} as never,
+      catalog: DISABLED_CLOUD_CATALOG_RUNTIME,
+      clock: { now: () => 0 },
+    });
+    expect(folderSelection.sessionFactory.available).toBe(false);
+    expect(folderSelection.hostCapability.available).toBe(false);
+    expect(() => folderSelection.sessionFactory.create({
+      purpose: { kind: "scan" },
+      initialPath: null,
+    })).toThrow("catalog-unavailable");
 
     const candidateWrites = {
       renameFile: vi.fn(async () => undefined),

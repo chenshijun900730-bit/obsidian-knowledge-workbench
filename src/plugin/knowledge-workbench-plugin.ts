@@ -128,6 +128,11 @@ export function createKnowledgeWorkbenchPluginClass(runtime: RuntimeComposition)
       const workspace = new ObsidianWorkspaceAdapter(this.app);
       const quickCapture = runtime.createQuickCapture(this.app, getLocale);
       const catalog = runtime.createCatalog(this.app);
+      const folderSelection = runtime.createFolderSelection({
+        store,
+        catalog,
+        clock: systemClock,
+      });
       const catalogConfirmation = runtime.createCatalogConfirmation(this.app, getLocale);
       const catalogTxtImportConfirmation = runtime.createCatalogTxtImportConfirmation?.(
         this.app,
@@ -184,6 +189,7 @@ export function createKnowledgeWorkbenchPluginClass(runtime: RuntimeComposition)
         clock: systemClock,
         ai: runtime.createAi?.(this.app, getLocale),
         catalog,
+        folderSelectionSessionFactory: folderSelection.sessionFactory,
         cloudVerificationRootHasher: runtime.cloudVerificationRootHasher,
         catalogConfirmation,
         ...(catalogTxtImportConfirmation === undefined
@@ -219,6 +225,7 @@ export function createKnowledgeWorkbenchPluginClass(runtime: RuntimeComposition)
         leaf,
         controller,
         runtime.createWorkbenchSettingsSurface?.(this.app, controller, getLocale),
+        folderSelection.hostCapability,
       ));
       const loadI18n = createWorkbenchI18n(getLocale());
       this.addRibbonIcon(

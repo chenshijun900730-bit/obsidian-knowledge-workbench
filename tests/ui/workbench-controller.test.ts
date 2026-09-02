@@ -22,6 +22,16 @@ import type {
   CloudDirectoryPickerRequest,
 } from "../../src/ui/cloud-directory-picker";
 import { deriveCloudVerificationScope } from "../../src/catalog/cloud-verification-scope";
+import type {
+  CloudDirectoryCandidate,
+  CloudDirectoryCandidateRuntime,
+} from "../../src/catalog/cloud-directory-candidates";
+import { createCloudDirectoryPickerSession } from "../../src/ui/cloud-directory-picker-session";
+import type {
+  FolderSelectionSessionDriver,
+  FolderSelectionSessionFactoryPort,
+} from "../../src/ui/folder-selection-host";
+import type { LegacyVerificationAdoptionV1 } from "../../src/storage/legacy-verification-adoption";
 
 const SOURCE_HASH = "a".repeat(64);
 const TXT_PREVIEW_HASH = "b".repeat(64);
@@ -38,6 +48,67 @@ const deferred = <T = void>() => {
   });
   return { promise, resolve, reject };
 };
+
+class TestFolderSelectionFactory implements FolderSelectionSessionFactoryPort {
+  readonly available = true;
+  readonly creates: Array<Readonly<{
+    purpose: CloudDirectoryPickerPurpose;
+    initialPath: string | null;
+  }>> = [];
+  readonly sessions: FolderSelectionSessionDriver[] = [];
+  readonly rememberCalls: string[] = [];
+  beforeRemember: (() => Promise<void>) | null = null;
+  rememberFailure: Error | null = null;
+  failCreateAt: number | null = null;
+  failSubscribeAt: number | null = null;
+
+  constructor(readonly candidates: readonly CloudDirectoryCandidate[]) {}
+
+  create(input: Readonly<{
+    purpose: CloudDirectoryPickerPurpose;
+    initialPath: string | null;
+  }>): FolderSelectionSessionDriver {
+    this.creates.push(structuredClone(input));
+    const createOrdinal = this.creates.length;
+    if (this.failCreateAt === createOrdinal) {
+      throw new Error("folder-selection-create-failed");
+    }
+    const candidateRuntime: CloudDirectoryCandidateRuntime = {
+      snapshot: () => structuredClone(this.candidates),
+      remember: async (path) => {
+        this.rememberCalls.push(path);
+        await this.beforeRemember?.();
+        if (this.rememberFailure !== null) throw this.rememberFailure;
+      },
+      clearRecent: async () => undefined,
+    };
+    const session = createCloudDirectoryPickerSession({
+      ...structuredClone(input),
+      candidates: candidateRuntime,
+    });
+    const exposed = this.failSubscribeAt === createOrdinal
+      ? new Proxy(session, {
+          get(target, property) {
+            if (property === "subscribe") {
+              return () => { throw new Error("folder-selection-subscribe-failed"); };
+            }
+            const value = Reflect.get(target, property, target) as unknown;
+            return typeof value === "function" ? value.bind(target) as unknown : value;
+          },
+        })
+      : session;
+    this.sessions.push(exposed);
+    return exposed;
+  }
+}
+
+const folderCandidate = (path: string): CloudDirectoryCandidate => ({
+  kind: "exact",
+  path,
+  filename: path.split("/").at(-1)!,
+  source: "recent",
+  pathState: "previously-used",
+});
 
 describe("WorkbenchController catalog authority bootstrap", () => {
   it("installs a detached scoped authority before catalog initialization", async () => {
@@ -1426,6 +1497,1249 @@ describe("WorkbenchController start section", () => {
     expect(emits).toBe(1);
 
     unsubscribe();
+    fixture.controller.dispose();
+  });
+});
+
+describe("WorkbenchController inline folder selection binding", () => {
+  const groupKey = `group:${"f".repeat(64)}`;
+  const group = {
+    groupKey,
+    rootRelativePath: "Literature",
+    label: "Literature",
+    pdfCount: 12,
+    mode: "recursive" as const,
+    verificationStatus: "unverified" as const,
+  };
+  const activeHybrid = (input: Readonly<{
+    sourceImportSha256?: string;
+    legacyArtifactSetSha256?: string | null;
+  }> = {}): FakeHybridCatalogRuntime => new FakeHybridCatalogRuntime({
+    status: "ready",
+    active: {
+      sourceImportSha256: input.sourceImportSha256 ?? SOURCE_HASH,
+      legacyArtifactSetSha256: input.legacyArtifactSetSha256 ?? null,
+      importedAt: 1,
+      pdfCount: 12,
+      unverifiedCount: 12,
+      verifiedCount: 0,
+      differenceCount: 0,
+      cloudMissingCount: 0,
+      groupCount: 1,
+      verifiedGroupCount: 0,
+      coveredCandidatePdfCount: 0,
+      groups: [group],
+    },
+  });
+  const pausedBatch = (batchId: string) => ({
+    ...INACTIVE_AUTO_RESUME,
+    batchId,
+    verificationScope: null,
+    legacyPromotionRequired: false,
+    status: "paused" as const,
+    stopReason: "user-canceled" as const,
+    resumeAvailable: true,
+    runOrdinal: 1,
+    remainingGroupCount: 1,
+    pdfCount: 0,
+    directoryCount: 0,
+    ignoredFileCount: 0,
+    listRequestCount: 0,
+    cumulativeListRequestCount: 0,
+    selectedGroupCount: 1,
+    selectedGroupKeys: [groupKey],
+    completedGroupCount: 0,
+    currentGroupIndex: 0,
+    currentGroupKey: groupKey,
+    committedPdfCount: 0,
+    committedPageCount: 0,
+    completedDirectoryCount: 0,
+    pendingDirectoryCount: 1,
+  });
+
+  it("cleans up a failed initial session subscription before retry", () => {
+    const hybrid = activeHybrid();
+    const factory = new TestFolderSelectionFactory([folderCandidate("/Synthetic")]);
+    factory.failSubscribeAt = 1;
+    const fixture = controllerFixture({
+      catalog: new FakeCloudCatalogRuntime({}, undefined, hybrid),
+      folderSelectionSessionFactory: factory,
+    });
+
+    expect(() => fixture.controller.openVerificationFolderSelection())
+      .toThrow("folder-selection-subscribe-failed");
+    expect(fixture.controller.snapshot().folderSelection).toBeUndefined();
+    expect(factory.sessions[0]?.snapshot().phase).toBe("closed");
+
+    factory.failSubscribeAt = null;
+    fixture.controller.openVerificationFolderSelection();
+    expect(fixture.controller.snapshot().folderSelection).toBeDefined();
+    fixture.controller.dispose();
+  });
+
+  it("publishes detached state and makes actions from an old render revision inert", async () => {
+    const hybrid = activeHybrid();
+    const factory = new TestFolderSelectionFactory([
+      folderCandidate("/Synthetic/Literature"),
+    ]);
+    const fixture = controllerFixture({
+      catalog: new FakeCloudCatalogRuntime({}, undefined, hybrid),
+      folderSelectionSessionFactory: factory,
+    });
+
+    fixture.controller.openVerificationFolderSelection();
+
+    const opened = fixture.controller.snapshot().folderSelection!;
+    expect(() => structuredClone(opened)).not.toThrow();
+    expect(opened).toMatchObject({
+      locale: "zh-CN",
+      returnLabel: "云端核验",
+      legacyProgressMode: "none",
+      state: { phase: "local", draftSelection: null },
+    });
+    expect(factory.creates).toEqual([{
+      initialPath: null,
+      purpose: {
+        kind: "verification",
+        groups: [{
+          groupKey,
+          rootRelativePath: "Literature",
+          label: "Literature",
+        }],
+      },
+    }]);
+
+    const staleActions = fixture.controller.folderSelectionActions(opened.revision);
+    await fixture.controller.setLocale("en");
+    const localized = fixture.controller.snapshot().folderSelection!;
+    expect(localized).toMatchObject({
+      locale: "en",
+      returnLabel: "Cloud verification",
+    });
+    expect(localized.revision).not.toBe(opened.revision);
+    staleActions.onSelectCandidate("/Synthetic/Literature");
+    expect(fixture.controller.snapshot().folderSelection?.state.draftSelection).toBeNull();
+
+    const selectionActions = fixture.controller.folderSelectionActions(localized.revision);
+    selectionActions.onSelectCandidate("/Synthetic/Literature");
+    expect(fixture.controller.snapshot().folderSelection?.state.draftSelection).toEqual({
+      kind: "category",
+      selectedPath: "/Synthetic/Literature",
+      effectiveRoot: "/Synthetic",
+      groupKey,
+    });
+    await selectionActions.onUse();
+    selectionActions.onBack();
+
+    expect(fixture.store.cloudVerificationSettingsCalls).toEqual([]);
+    expect(hybrid.preparedAdoptionScopes).toEqual([]);
+    expect(fixture.controller.snapshot().folderSelection).toBeDefined();
+    expect(fixture.controller.snapshot().verificationRoot).toBe("");
+
+    fixture.controller.folderSelectionActions(
+      fixture.controller.snapshot().folderSelection!.revision,
+    ).onBack();
+    expect(fixture.controller.snapshot().folderSelection).toBeUndefined();
+    expect(factory.sessions[0]?.snapshot().phase).toBe("closed");
+    fixture.controller.dispose();
+  });
+
+  it("commits one category binding with the parent effective root and exact group", async () => {
+    const hybrid = activeHybrid({ legacyArtifactSetSha256: "d".repeat(64) });
+    const proposedBinding = {
+      schemaVersion: 1 as const,
+      path: "/Synthetic",
+      sourceImportSha256: SOURCE_HASH,
+      verificationGeneration: 1,
+    };
+    const scope = deriveCloudVerificationScope(proposedBinding, hashVerificationRoot)!;
+    const adopted = {
+      schemaVersion: 1 as const,
+      state: "adopted" as const,
+      verificationGeneration: 1,
+      sourceImportSha256: SOURCE_HASH,
+      cloudRootSha256: scope.cloudRootSha256,
+      candidate: {
+        importId: "import-1",
+        manifestSha256: "1".repeat(64),
+        descriptorSha256: "2".repeat(64),
+      },
+      overlays: [],
+      unified: null,
+      resumableBatch: null,
+    };
+    hybrid.preparedAdoption = adopted;
+    const factory = new TestFolderSelectionFactory([
+      folderCandidate("/Synthetic/Literature"),
+    ]);
+    const catalog = new FakeCloudCatalogRuntime({}, undefined, hybrid);
+    const fixture = controllerFixture({
+      catalog,
+      folderSelectionSessionFactory: factory,
+    });
+    fixture.store.setSettingsForTest({
+      ...fixture.store.settings(),
+      legacyVerificationAdoption: { schemaVersion: 1, state: "pending" },
+      verificationBatchTombstones: { schemaVersion: 1, state: "valid", batchIds: [] },
+    });
+
+    fixture.controller.openVerificationFolderSelection();
+    let rendered = fixture.controller.snapshot().folderSelection!;
+    fixture.controller.folderSelectionActions(rendered.revision)
+      .onSelectCandidate("/Synthetic/Literature");
+    rendered = fixture.controller.snapshot().folderSelection!;
+    expect(rendered.legacyProgressMode).toBe("will-preserve");
+
+    await fixture.controller.folderSelectionActions(rendered.revision).onUse();
+
+    expect(factory.rememberCalls).toEqual(["/Synthetic/Literature"]);
+    expect(hybrid.preparedAdoptionScopes).toEqual([scope]);
+    expect(hybrid.revalidatedAdoptions).toEqual([adopted]);
+    expect(fixture.store.cloudVerificationSettingsCalls).toEqual([{
+      settings: {
+        boundCloudLibrary: proposedBinding,
+        cloudVerificationGeneration: 1,
+        verificationBatchTombstones: { schemaVersion: 1, state: "valid", batchIds: [] },
+        legacyVerificationAdoption: adopted,
+      },
+      transition: { kind: "library-binding", currentWorkflowBatchId: null },
+    }]);
+    expect(fixture.controller.snapshot()).toMatchObject({
+      status: "ready",
+      statusMessage: "folder-selection-preserved",
+      verificationRoot: "/Synthetic",
+      verificationDirectorySelection: {
+        kind: "category",
+        selectedPath: "/Synthetic/Literature",
+        effectiveRoot: "/Synthetic",
+        groupKey,
+      },
+      selectedVerificationGroupKeys: [groupKey],
+    });
+    expect(fixture.controller.snapshot().folderSelection).toBeUndefined();
+    expect(hybrid.rebuildVerificationProjectionCalls).toBe(1);
+    expect(hybrid.startInputs).toEqual([]);
+    expect(hybrid.resumeInputs).toEqual([]);
+    fixture.controller.dispose();
+  });
+
+  it("preserves an authorized resumable V3 batch during first legacy adoption", async () => {
+    const proposedBinding = {
+      schemaVersion: 1 as const,
+      path: "/Synthetic",
+      sourceImportSha256: SOURCE_HASH,
+      verificationGeneration: 1,
+    };
+    const scope = deriveCloudVerificationScope(proposedBinding, hashVerificationRoot)!;
+    const adopted = {
+      schemaVersion: 1 as const,
+      state: "adopted" as const,
+      verificationGeneration: 1,
+      sourceImportSha256: SOURCE_HASH,
+      cloudRootSha256: scope.cloudRootSha256,
+      candidate: {
+        importId: "legacy-import-v3",
+        manifestSha256: "1".repeat(64),
+        descriptorSha256: "2".repeat(64),
+      },
+      overlays: [],
+      unified: null,
+      resumableBatch: {
+        batchId: "legacy-resumable-v3",
+        checkpointSha256: "3".repeat(64),
+        sourceImportSha256: SOURCE_HASH,
+        cloudRootSha256: scope.cloudRootSha256,
+      },
+    };
+    const hybrid = activeHybrid({ legacyArtifactSetSha256: "e".repeat(64) });
+    hybrid.preparedAdoption = adopted;
+    hybrid.setSnapshot({
+      ...hybrid.snapshot(),
+      status: "paused",
+      batch: {
+        ...pausedBatch("legacy-resumable-v3"),
+        legacyPromotionRequired: true,
+      },
+    });
+    hybrid.beforeRebuildVerificationProjection = () => {
+      const snapshot = hybrid.snapshot();
+      hybrid.setSnapshot({
+        ...snapshot,
+        batch: {
+          ...snapshot.batch!,
+          verificationScope: scope,
+          legacyPromotionRequired: true,
+        },
+      });
+    };
+    const factory = new TestFolderSelectionFactory([
+      folderCandidate("/Synthetic/Literature"),
+    ]);
+    const fixture = controllerFixture({
+      catalog: new FakeCloudCatalogRuntime(
+        {},
+        new FakeCloudCatalogConnectionRuntime({ status: "authorized" }),
+        hybrid,
+      ),
+      folderSelectionSessionFactory: factory,
+    });
+    fixture.store.setSettingsForTest({
+      ...fixture.store.settings(),
+      legacyVerificationAdoption: { schemaVersion: 1, state: "pending" },
+    });
+    hybrid.setSnapshot(hybrid.snapshot());
+    fixture.controller.openVerificationFolderSelection();
+    let rendered = fixture.controller.snapshot().folderSelection!;
+    fixture.controller.folderSelectionActions(rendered.revision)
+      .onSelectCandidate("/Synthetic/Literature");
+    rendered = fixture.controller.snapshot().folderSelection!;
+
+    await fixture.controller.folderSelectionActions(rendered.revision).onUse();
+
+    expect(fixture.store.cloudVerificationSettingsCalls).toEqual([{
+      settings: {
+        boundCloudLibrary: proposedBinding,
+        cloudVerificationGeneration: 1,
+        verificationBatchTombstones: { schemaVersion: 1, state: "valid", batchIds: [] },
+        legacyVerificationAdoption: adopted,
+      },
+      transition: { kind: "library-binding", currentWorkflowBatchId: null },
+    }]);
+    expect(fixture.controller.snapshot()).toMatchObject({
+      status: "ready",
+      statusMessage: "folder-selection-preserved",
+      verificationRoot: "/Synthetic",
+    });
+    fixture.controller.dispose();
+  });
+
+  it("holds the library-binding permit while the session remembers the selection", async () => {
+    const hybrid = activeHybrid();
+    const connection = new FakeCloudCatalogConnectionRuntime({ status: "authorized" });
+    const factory = new TestFolderSelectionFactory([folderCandidate("/Synthetic")]);
+    const enteredRemember = deferred();
+    const releaseRemember = deferred();
+    factory.beforeRemember = async () => {
+      enteredRemember.resolve();
+      await releaseRemember.promise;
+    };
+    const fixture = controllerFixture({
+      catalog: new FakeCloudCatalogRuntime({}, connection, hybrid),
+      folderSelectionSessionFactory: factory,
+    });
+    fixture.controller.openVerificationFolderSelection();
+    let rendered = fixture.controller.snapshot().folderSelection!;
+    fixture.controller.folderSelectionActions(rendered.revision).onSelectCandidate("/Synthetic");
+    rendered = fixture.controller.snapshot().folderSelection!;
+
+    const binding = Promise.resolve(
+      fixture.controller.folderSelectionActions(rendered.revision).onUse(),
+    );
+    await enteredRemember.promise;
+    await expect(fixture.controller.connectCatalog(
+      { appKey: "replacement-app", secretKey: "replacement-secret" },
+      "replace-identity",
+    )).rejects.toThrow("cloud-authority-operation-busy");
+    await expect(fixture.controller.requestLargeCatalogVerification(
+      "/Synthetic",
+      [groupKey],
+    )).rejects.toThrow("cloud-authority-operation-busy");
+    expect(connection.savedCredentials).toEqual([]);
+    expect(fixture.store.cloudVerificationSettingsCalls).toEqual([]);
+
+    releaseRemember.resolve();
+    await binding;
+    expect(fixture.store.cloudVerificationSettingsCalls).toHaveLength(1);
+    expect(fixture.controller.snapshot().statusMessage).toBeUndefined();
+    fixture.controller.dispose();
+  });
+
+  it("rebuilds the same selection session after a stale binding CAS", async () => {
+    const hybrid = activeHybrid();
+    const factory = new TestFolderSelectionFactory([
+      folderCandidate("/Synthetic/Literature"),
+    ]);
+    const catalog = new FakeCloudCatalogRuntime({}, undefined, hybrid);
+    const fixture = controllerFixture({
+      catalog,
+      folderSelectionSessionFactory: factory,
+      pauseCloudVerificationUpdate: true,
+    });
+    fixture.controller.openVerificationFolderSelection();
+    let rendered = fixture.controller.snapshot().folderSelection!;
+    fixture.controller.folderSelectionActions(rendered.revision)
+      .onSelectCandidate("/Synthetic/Literature");
+    rendered = fixture.controller.snapshot().folderSelection!;
+    const binding = Promise.resolve(
+      fixture.controller.folderSelectionActions(rendered.revision).onUse(),
+    );
+    await expect.poll(() => fixture.store.cloudVerificationSettingsCalls.length).toBe(1);
+
+    const externalBinding = {
+      schemaVersion: 1 as const,
+      path: "/External",
+      sourceImportSha256: SOURCE_HASH,
+      verificationGeneration: 1,
+    };
+    fixture.store.setSettingsForTest({
+      ...fixture.store.settings(),
+      boundCloudLibrary: externalBinding,
+      cloudVerificationGeneration: 1,
+    });
+    fixture.store.resumeCloudVerificationUpdate();
+
+    await expect(binding).rejects.toThrow("folder-selection-stale");
+    expect(fixture.store.settings().boundCloudLibrary).toEqual(externalBinding);
+    expect(factory.creates).toHaveLength(2);
+    expect(factory.creates[1]).toEqual({
+      purpose: factory.creates[0]!.purpose,
+      initialPath: "/Synthetic/Literature",
+    });
+    expect(fixture.controller.snapshot()).toMatchObject({
+      verificationRoot: "",
+      folderSelection: {
+        state: {
+          draftSelection: {
+            kind: "category",
+            selectedPath: "/Synthetic/Literature",
+            effectiveRoot: "/Synthetic",
+            groupKey,
+          },
+        },
+      },
+    });
+    expect(fixture.controller.snapshot().folderSelection?.feedbackCode).toBeUndefined();
+    expect(fixture.controller.snapshot().verificationDirectorySelection).toBeUndefined();
+    expect(catalog.verificationAuthorities).toEqual([]);
+    fixture.controller.dispose();
+  });
+
+  it("binds a normal directory to itself and rotates a changed root with an exact tombstone", async () => {
+    const hybrid = activeHybrid();
+    hybrid.setSnapshot({
+      ...hybrid.snapshot(),
+      status: "paused",
+      batch: pausedBatch("batch-old-root"),
+    });
+    hybrid.beforeRebuildVerificationProjection = () => {
+      const { batch: _batch, ...snapshot } = hybrid.snapshot();
+      hybrid.setSnapshot({ ...snapshot, status: "ready" });
+    };
+    const factory = new TestFolderSelectionFactory([folderCandidate("/New Library")]);
+    const fixture = controllerFixture({
+      catalog: new FakeCloudCatalogRuntime({}, undefined, hybrid),
+      folderSelectionSessionFactory: factory,
+    });
+    fixture.store.setSettingsForTest({
+      ...fixture.store.settings(),
+      boundCloudLibrary: {
+        schemaVersion: 1,
+        path: "/Old Library",
+        sourceImportSha256: SOURCE_HASH,
+        verificationGeneration: 1,
+      },
+      cloudVerificationGeneration: 1,
+      legacyVerificationAdoption: { schemaVersion: 1, state: "none" },
+    });
+    fixture.controller.toggleVerificationGroup(groupKey);
+    fixture.controller.openVerificationFolderSelection();
+    let rendered = fixture.controller.snapshot().folderSelection!;
+    fixture.controller.folderSelectionActions(rendered.revision)
+      .onSelectCandidate("/New Library");
+    rendered = fixture.controller.snapshot().folderSelection!;
+
+    await fixture.controller.folderSelectionActions(rendered.revision).onUse();
+
+    expect(fixture.store.cloudVerificationSettingsCalls.at(-1)).toEqual({
+      settings: {
+        boundCloudLibrary: {
+          schemaVersion: 1,
+          path: "/New Library",
+          sourceImportSha256: SOURCE_HASH,
+          verificationGeneration: 2,
+        },
+        cloudVerificationGeneration: 2,
+        legacyVerificationAdoption: { schemaVersion: 1, state: "none" },
+        verificationBatchTombstones: {
+          schemaVersion: 1,
+          state: "valid",
+          batchIds: ["batch-old-root"],
+        },
+      },
+      transition: {
+        kind: "library-binding",
+        currentWorkflowBatchId: "batch-old-root",
+      },
+    });
+    expect(fixture.controller.snapshot()).toMatchObject({
+      verificationRoot: "/New Library",
+      verificationDirectorySelection: {
+        kind: "directory",
+        selectedPath: "/New Library",
+        effectiveRoot: "/New Library",
+      },
+      selectedVerificationGroupKeys: [groupKey],
+    });
+    expect(hybrid.preparedAdoptionScopes).toEqual([]);
+    fixture.controller.dispose();
+  });
+
+  it("treats an adopted batch as historical when switching to a new root", async () => {
+    const oldBinding = {
+      schemaVersion: 1 as const,
+      path: "/Old Library",
+      sourceImportSha256: SOURCE_HASH,
+      verificationGeneration: 1,
+    };
+    const oldScope = deriveCloudVerificationScope(oldBinding, hashVerificationRoot)!;
+    const historicalAdoption = {
+      schemaVersion: 1 as const,
+      state: "adopted" as const,
+      verificationGeneration: 1,
+      sourceImportSha256: SOURCE_HASH,
+      cloudRootSha256: oldScope.cloudRootSha256,
+      candidate: {
+        importId: "legacy-import",
+        manifestSha256: "1".repeat(64),
+        descriptorSha256: "2".repeat(64),
+      },
+      overlays: [],
+      unified: null,
+      resumableBatch: {
+        batchId: "adopted-old-root-batch",
+        checkpointSha256: "3".repeat(64),
+        sourceImportSha256: SOURCE_HASH,
+        cloudRootSha256: oldScope.cloudRootSha256,
+      },
+    };
+    const hybrid = activeHybrid({ legacyArtifactSetSha256: "e".repeat(64) });
+    hybrid.setSnapshot({
+      ...hybrid.snapshot(),
+      status: "paused",
+      batch: {
+        ...pausedBatch("adopted-old-root-batch"),
+        verificationScope: oldScope,
+        legacyPromotionRequired: true,
+      },
+    });
+    hybrid.beforeRebuildVerificationProjection = () => {
+      const { batch: _batch, ...snapshot } = hybrid.snapshot();
+      hybrid.setSnapshot({ ...snapshot, status: "ready" });
+    };
+    const factory = new TestFolderSelectionFactory([folderCandidate("/New Library")]);
+    const fixture = controllerFixture({
+      catalog: new FakeCloudCatalogRuntime({}, undefined, hybrid),
+      folderSelectionSessionFactory: factory,
+    });
+    fixture.store.setSettingsForTest({
+      ...fixture.store.settings(),
+      boundCloudLibrary: oldBinding,
+      cloudVerificationGeneration: 1,
+      legacyVerificationAdoption: historicalAdoption,
+    });
+    fixture.controller.openVerificationFolderSelection();
+    let rendered = fixture.controller.snapshot().folderSelection!;
+    fixture.controller.folderSelectionActions(rendered.revision)
+      .onSelectCandidate("/New Library");
+    rendered = fixture.controller.snapshot().folderSelection!;
+
+    await fixture.controller.folderSelectionActions(rendered.revision).onUse();
+
+    expect(fixture.store.settings()).toMatchObject({
+      boundCloudLibrary: { path: "/New Library", verificationGeneration: 2 },
+      cloudVerificationGeneration: 2,
+      legacyVerificationAdoption: historicalAdoption,
+      verificationBatchTombstones: {
+        schemaVersion: 1,
+        state: "valid",
+        batchIds: ["adopted-old-root-batch"],
+      },
+    });
+    expect(fixture.controller.snapshot().verificationRoot).toBe("/New Library");
+    fixture.controller.dispose();
+  });
+
+  it("tombstones an exact same-root batch while the workflow requires batch repair", async () => {
+    const binding = {
+      schemaVersion: 1 as const,
+      path: "/Synthetic",
+      sourceImportSha256: SOURCE_HASH,
+      verificationGeneration: 1,
+    };
+    const scope = deriveCloudVerificationScope(binding, hashVerificationRoot)!;
+    const hybrid = activeHybrid();
+    hybrid.setSnapshot({
+      ...hybrid.snapshot(),
+      status: "paused",
+      messageCode: "hybrid-batch-invalid",
+      batch: {
+        ...pausedBatch("same-root-invalid-batch"),
+        verificationScope: scope,
+      },
+    });
+    hybrid.beforeRebuildVerificationProjection = () => {
+      const { batch: _batch, messageCode: _messageCode, ...snapshot } = hybrid.snapshot();
+      hybrid.setSnapshot({ ...snapshot, status: "ready" });
+    };
+    const factory = new TestFolderSelectionFactory([folderCandidate("/Synthetic")]);
+    const fixture = controllerFixture({
+      catalog: new FakeCloudCatalogRuntime(
+        {},
+        new FakeCloudCatalogConnectionRuntime({ status: "authorized" }),
+        hybrid,
+      ),
+      folderSelectionSessionFactory: factory,
+    });
+    fixture.store.setSettingsForTest({
+      ...fixture.store.settings(),
+      boundCloudLibrary: binding,
+      cloudVerificationGeneration: 1,
+    });
+    hybrid.setSnapshot(hybrid.snapshot());
+    fixture.controller.openVerificationFolderSelection();
+    let rendered = fixture.controller.snapshot().folderSelection!;
+    fixture.controller.folderSelectionActions(rendered.revision).onSelectCandidate("/Synthetic");
+    rendered = fixture.controller.snapshot().folderSelection!;
+
+    await fixture.controller.folderSelectionActions(rendered.revision).onUse();
+
+    expect(fixture.store.cloudVerificationSettingsCalls.at(-1)).toMatchObject({
+      settings: {
+        verificationBatchTombstones: {
+          schemaVersion: 1,
+          state: "valid",
+          batchIds: ["same-root-invalid-batch"],
+        },
+      },
+      transition: {
+        kind: "library-binding",
+        currentWorkflowBatchId: "same-root-invalid-batch",
+      },
+    });
+    fixture.controller.dispose();
+  });
+
+  it("requires one second explicit use after a deterministic legacy lineage conflict", async () => {
+    class ConflictingLegacyHybrid extends FakeHybridCatalogRuntime {
+      override async prepareLegacyVerificationAdoption(
+        scope: Parameters<FakeHybridCatalogRuntime["prepareLegacyVerificationAdoption"]>[0],
+      ): Promise<LegacyVerificationAdoptionV1 | null> {
+        this.preparedAdoptionScopes.push(structuredClone(scope));
+        throw new HybridCatalogError("hybrid-cloud-root-mismatch");
+      }
+    }
+    const hybrid = new ConflictingLegacyHybrid(activeHybrid({
+      legacyArtifactSetSha256: "e".repeat(64),
+    }).snapshot());
+    hybrid.setSnapshot({
+      ...hybrid.snapshot(),
+      status: "paused",
+      batch: pausedBatch("legacy-conflict-batch"),
+    });
+    const factory = new TestFolderSelectionFactory([
+      folderCandidate("/Synthetic/Literature"),
+    ]);
+    const fixture = controllerFixture({
+      catalog: new FakeCloudCatalogRuntime({}, undefined, hybrid),
+      folderSelectionSessionFactory: factory,
+    });
+    fixture.store.setSettingsForTest({
+      ...fixture.store.settings(),
+      legacyVerificationAdoption: { schemaVersion: 1, state: "pending" },
+    });
+    fixture.controller.openVerificationFolderSelection();
+    let rendered = fixture.controller.snapshot().folderSelection!;
+    fixture.controller.folderSelectionActions(rendered.revision)
+      .onSelectCandidate("/Synthetic/Literature");
+    rendered = fixture.controller.snapshot().folderSelection!;
+
+    await fixture.controller.folderSelectionActions(rendered.revision).onUse();
+
+    expect(fixture.store.cloudVerificationSettingsCalls).toEqual([]);
+    expect(factory.creates).toHaveLength(2);
+    rendered = fixture.controller.snapshot().folderSelection!;
+    expect(rendered.legacyProgressMode).toBe("requires-fresh");
+    expect(rendered.state.draftSelection).toMatchObject({
+      kind: "category",
+      effectiveRoot: "/Synthetic",
+      groupKey,
+    });
+    hybrid.beforeRebuildVerificationProjection = () => {
+      const { batch: _batch, ...snapshot } = hybrid.snapshot();
+      hybrid.setSnapshot({ ...snapshot, status: "ready" });
+    };
+
+    await fixture.controller.folderSelectionActions(rendered.revision).onUse();
+
+    expect(hybrid.preparedAdoptionScopes).toHaveLength(1);
+    expect(fixture.store.cloudVerificationSettingsCalls).toHaveLength(1);
+    expect(fixture.store.cloudVerificationSettingsCalls[0]).toMatchObject({
+      settings: {
+        boundCloudLibrary: { path: "/Synthetic", verificationGeneration: 1 },
+        cloudVerificationGeneration: 1,
+        legacyVerificationAdoption: { schemaVersion: 1, state: "ineligible" },
+        verificationBatchTombstones: {
+          schemaVersion: 1,
+          state: "valid",
+          batchIds: ["legacy-conflict-batch"],
+        },
+      },
+      transition: {
+        kind: "library-binding",
+        currentWorkflowBatchId: "legacy-conflict-batch",
+      },
+    });
+    expect(fixture.controller.snapshot().folderSelection).toBeUndefined();
+    fixture.controller.dispose();
+  });
+
+  it("fresh-binds an invalid legacy sidecar without attempting preservation", async () => {
+    const hybrid = activeHybrid({ legacyArtifactSetSha256: "e".repeat(64) });
+    const factory = new TestFolderSelectionFactory([folderCandidate("/Synthetic")]);
+    const fixture = controllerFixture({
+      catalog: new FakeCloudCatalogRuntime({}, undefined, hybrid),
+      folderSelectionSessionFactory: factory,
+    });
+    fixture.store.setSettingsForTest({
+      ...fixture.store.settings(),
+      legacyVerificationAdoption: { schemaVersion: 1, state: "invalid" },
+      verificationBatchTombstones: { schemaVersion: 1, state: "invalid" },
+    });
+    fixture.controller.openVerificationFolderSelection();
+    let rendered = fixture.controller.snapshot().folderSelection!;
+    expect(rendered.legacyProgressMode).toBe("requires-fresh");
+    fixture.controller.folderSelectionActions(rendered.revision).onSelectCandidate("/Synthetic");
+    rendered = fixture.controller.snapshot().folderSelection!;
+
+    await fixture.controller.folderSelectionActions(rendered.revision).onUse();
+
+    expect(hybrid.preparedAdoptionScopes).toEqual([]);
+    expect(fixture.store.cloudVerificationSettingsCalls[0]).toMatchObject({
+      settings: {
+        legacyVerificationAdoption: { schemaVersion: 1, state: "ineligible" },
+        verificationBatchTombstones: { schemaVersion: 1, state: "valid", batchIds: [] },
+      },
+      transition: { kind: "library-binding", currentWorkflowBatchId: null },
+    });
+    fixture.controller.dispose();
+  });
+
+  it("keeps a recoverable session and the old model when the binding save fails", async () => {
+    const hybrid = activeHybrid();
+    const factory = new TestFolderSelectionFactory([folderCandidate("/Synthetic")]);
+    const fixture = controllerFixture({
+      catalog: new FakeCloudCatalogRuntime({}, undefined, hybrid),
+      folderSelectionSessionFactory: factory,
+    });
+    fixture.store.failNext = new Error("binding-save-failed");
+    fixture.controller.openVerificationFolderSelection();
+    let rendered = fixture.controller.snapshot().folderSelection!;
+    fixture.controller.folderSelectionActions(rendered.revision).onSelectCandidate("/Synthetic");
+    rendered = fixture.controller.snapshot().folderSelection!;
+
+    await expect(fixture.controller.folderSelectionActions(rendered.revision).onUse())
+      .rejects.toThrow("binding-save-failed");
+
+    expect(fixture.store.settings().boundCloudLibrary).toBeNull();
+    expect(fixture.controller.snapshot().verificationRoot).toBe("");
+    expect(fixture.controller.snapshot().verificationDirectorySelection).toBeUndefined();
+    expect(factory.creates).toHaveLength(2);
+    expect(fixture.controller.snapshot().folderSelection?.state.draftSelection).toEqual({
+      kind: "directory",
+      selectedPath: "/Synthetic",
+      effectiveRoot: "/Synthetic",
+    });
+    expect(fixture.controller.snapshot().folderSelection?.feedbackCode).toBe("binding-failed");
+    const failureRevision = fixture.controller.snapshot().folderSelection!.revision;
+    fixture.controller.folderSelectionActions(failureRevision).onQuery("Synthetic");
+    expect(fixture.controller.snapshot().folderSelection?.feedbackCode).toBeUndefined();
+    fixture.controller.dispose();
+  });
+
+  it("keeps a durable binding and reinstalls its authority when projection rebuild fails", async () => {
+    const hybrid = activeHybrid();
+    hybrid.beforeRebuildVerificationProjection = () => {
+      throw new Error("binding-rebuild-failed");
+    };
+    const factory = new TestFolderSelectionFactory([folderCandidate("/Synthetic")]);
+    const catalog = new FakeCloudCatalogRuntime({}, undefined, hybrid);
+    const fixture = controllerFixture({
+      catalog,
+      folderSelectionSessionFactory: factory,
+    });
+    fixture.controller.openVerificationFolderSelection();
+    let rendered = fixture.controller.snapshot().folderSelection!;
+    fixture.controller.folderSelectionActions(rendered.revision).onSelectCandidate("/Synthetic");
+    rendered = fixture.controller.snapshot().folderSelection!;
+
+    await expect(fixture.controller.folderSelectionActions(rendered.revision).onUse())
+      .rejects.toThrow("binding-rebuild-failed");
+
+    expect(fixture.store.settings()).toMatchObject({
+      boundCloudLibrary: {
+        path: "/Synthetic",
+        sourceImportSha256: SOURCE_HASH,
+        verificationGeneration: 1,
+      },
+      cloudVerificationGeneration: 1,
+    });
+    expect(catalog.verificationAuthorities.at(-1)).toMatchObject({
+      kind: "scoped",
+      scope: {
+        generation: 1,
+        sourceImportSha256: SOURCE_HASH,
+        cloudRootSha256: hashVerificationRoot("/Synthetic"),
+      },
+    });
+    expect(fixture.controller.snapshot().verificationRoot).toBe("");
+    expect(factory.creates).toHaveLength(2);
+    expect(fixture.controller.snapshot().folderSelection?.state.draftSelection).toEqual({
+      kind: "directory",
+      selectedPath: "/Synthetic",
+      effectiveRoot: "/Synthetic",
+    });
+    expect(fixture.controller.snapshot().folderSelection?.feedbackCode).toBe("binding-failed");
+    fixture.controller.dispose();
+  });
+
+  it("invalidates an adoption result when the page is explicitly closed during its await", async () => {
+    const entered = deferred();
+    const release = deferred();
+    class DeferredLegacyHybrid extends FakeHybridCatalogRuntime {
+      override async prepareLegacyVerificationAdoption(
+        scope: Parameters<FakeHybridCatalogRuntime["prepareLegacyVerificationAdoption"]>[0],
+      ) {
+        this.preparedAdoptionScopes.push(structuredClone(scope));
+        entered.resolve();
+        await release.promise;
+        return null;
+      }
+    }
+    const hybrid = new DeferredLegacyHybrid(activeHybrid({
+      legacyArtifactSetSha256: "e".repeat(64),
+    }).snapshot());
+    const factory = new TestFolderSelectionFactory([folderCandidate("/Synthetic")]);
+    const fixture = controllerFixture({
+      catalog: new FakeCloudCatalogRuntime({}, undefined, hybrid),
+      folderSelectionSessionFactory: factory,
+    });
+    fixture.store.setSettingsForTest({
+      ...fixture.store.settings(),
+      legacyVerificationAdoption: { schemaVersion: 1, state: "pending" },
+    });
+    fixture.controller.openVerificationFolderSelection();
+    let rendered = fixture.controller.snapshot().folderSelection!;
+    fixture.controller.folderSelectionActions(rendered.revision).onSelectCandidate("/Synthetic");
+    rendered = fixture.controller.snapshot().folderSelection!;
+    const binding = Promise.resolve(
+      fixture.controller.folderSelectionActions(rendered.revision).onUse(),
+    );
+    await entered.promise;
+
+    fixture.controller.closeFolderSelection();
+    release.resolve();
+
+    await expect(binding).rejects.toThrow("folder-selection-stale");
+    expect(fixture.store.cloudVerificationSettingsCalls).toEqual([]);
+    expect(fixture.controller.snapshot().folderSelection).toBeUndefined();
+    expect(fixture.controller.snapshot().verificationRoot).toBe("");
+    fixture.controller.dispose();
+  });
+
+  it("prevents a binding write when disposed before the CAS begins", async () => {
+    const entered = deferred();
+    const release = deferred();
+    class DeferredLegacyHybrid extends FakeHybridCatalogRuntime {
+      override async prepareLegacyVerificationAdoption(
+        scope: Parameters<FakeHybridCatalogRuntime["prepareLegacyVerificationAdoption"]>[0],
+      ): Promise<LegacyVerificationAdoptionV1 | null> {
+        this.preparedAdoptionScopes.push(structuredClone(scope));
+        entered.resolve();
+        await release.promise;
+        return null;
+      }
+    }
+    const hybrid = new DeferredLegacyHybrid(activeHybrid({
+      legacyArtifactSetSha256: "e".repeat(64),
+    }).snapshot());
+    const factory = new TestFolderSelectionFactory([folderCandidate("/Synthetic")]);
+    const catalog = new FakeCloudCatalogRuntime({}, undefined, hybrid);
+    const fixture = controllerFixture({
+      catalog,
+      folderSelectionSessionFactory: factory,
+    });
+    fixture.store.setSettingsForTest({
+      ...fixture.store.settings(),
+      legacyVerificationAdoption: { schemaVersion: 1, state: "pending" },
+    });
+    fixture.controller.openVerificationFolderSelection();
+    let rendered = fixture.controller.snapshot().folderSelection!;
+    fixture.controller.folderSelectionActions(rendered.revision).onSelectCandidate("/Synthetic");
+    rendered = fixture.controller.snapshot().folderSelection!;
+    const binding = Promise.resolve(
+      fixture.controller.folderSelectionActions(rendered.revision).onUse(),
+    );
+    await entered.promise;
+
+    fixture.controller.dispose();
+    release.resolve();
+
+    await expect(binding).rejects.toThrow("folder-selection-stale");
+    expect(fixture.store.cloudVerificationSettingsCalls).toEqual([]);
+    expect(catalog.verificationAuthorities).toEqual([]);
+    expect(hybrid.rebuildVerificationProjectionCalls).toBe(0);
+  });
+
+  it("linearizes an explicit close after the binding CAS starts", async () => {
+    const hybrid = activeHybrid();
+    const factory = new TestFolderSelectionFactory([folderCandidate("/Synthetic")]);
+    const catalog = new FakeCloudCatalogRuntime({}, undefined, hybrid);
+    const fixture = controllerFixture({
+      catalog,
+      folderSelectionSessionFactory: factory,
+      pauseCloudVerificationUpdate: true,
+    });
+    fixture.controller.openVerificationFolderSelection();
+    let rendered = fixture.controller.snapshot().folderSelection!;
+    fixture.controller.folderSelectionActions(rendered.revision).onSelectCandidate("/Synthetic");
+    rendered = fixture.controller.snapshot().folderSelection!;
+    const binding = Promise.resolve(
+      fixture.controller.folderSelectionActions(rendered.revision).onUse(),
+    );
+    await expect.poll(() => fixture.store.cloudVerificationSettingsCalls.length).toBe(1);
+
+    fixture.controller.closeFolderSelection();
+    fixture.controller.openVerificationFolderSelection();
+
+    expect(fixture.controller.snapshot().folderSelection).toBeUndefined();
+    expect(factory.creates).toHaveLength(1);
+    fixture.store.resumeCloudVerificationUpdate();
+    await binding;
+
+    expect(fixture.store.settings().boundCloudLibrary).toMatchObject({
+      path: "/Synthetic",
+      sourceImportSha256: SOURCE_HASH,
+      verificationGeneration: 1,
+    });
+    expect(catalog.verificationAuthorities.at(-1)).toMatchObject({
+      kind: "scoped",
+      scope: { generation: 1, sourceImportSha256: SOURCE_HASH },
+    });
+    expect(hybrid.rebuildVerificationProjectionCalls).toBe(1);
+    expect(fixture.controller.snapshot()).toMatchObject({ verificationRoot: "" });
+    expect(fixture.controller.snapshot().verificationDirectorySelection).toBeUndefined();
+    expect(fixture.controller.snapshot().folderSelection).toBeUndefined();
+    fixture.controller.dispose();
+  });
+
+  it("allows a linearized CAS to persist after dispose without runtime or model work", async () => {
+    const hybrid = activeHybrid();
+    const factory = new TestFolderSelectionFactory([folderCandidate("/Synthetic")]);
+    const catalog = new FakeCloudCatalogRuntime({}, undefined, hybrid);
+    const fixture = controllerFixture({
+      catalog,
+      folderSelectionSessionFactory: factory,
+      pauseCloudVerificationUpdate: true,
+    });
+    fixture.controller.openVerificationFolderSelection();
+    let rendered = fixture.controller.snapshot().folderSelection!;
+    fixture.controller.folderSelectionActions(rendered.revision).onSelectCandidate("/Synthetic");
+    rendered = fixture.controller.snapshot().folderSelection!;
+    const binding = Promise.resolve(
+      fixture.controller.folderSelectionActions(rendered.revision).onUse(),
+    );
+    await expect.poll(() => fixture.store.cloudVerificationSettingsCalls.length).toBe(1);
+
+    fixture.controller.dispose();
+    fixture.store.resumeCloudVerificationUpdate();
+    await binding;
+
+    expect(fixture.store.settings().boundCloudLibrary).toMatchObject({
+      path: "/Synthetic",
+      sourceImportSha256: SOURCE_HASH,
+      verificationGeneration: 1,
+    });
+    expect(catalog.verificationAuthorities).toEqual([]);
+    expect(hybrid.rebuildVerificationProjectionCalls).toBe(0);
+    expect(fixture.controller.snapshot().verificationRoot).toBe("");
+    expect(fixture.controller.snapshot().verificationDirectorySelection).toBeUndefined();
+  });
+
+  it("does no further binding work when disposed during catalog projection refresh", async () => {
+    const enteredRefresh = deferred();
+    const releaseRefresh = deferred();
+    class DeferredRefreshCatalog extends FakeCloudCatalogRuntime {
+      override async initialize(): Promise<void> {
+        enteredRefresh.resolve();
+        await releaseRefresh.promise;
+      }
+    }
+    const hybrid = activeHybrid();
+    const factory = new TestFolderSelectionFactory([folderCandidate("/Synthetic")]);
+    const catalog = new DeferredRefreshCatalog({}, undefined, hybrid);
+    const fixture = controllerFixture({ catalog, folderSelectionSessionFactory: factory });
+    fixture.controller.openVerificationFolderSelection();
+    let rendered = fixture.controller.snapshot().folderSelection!;
+    fixture.controller.folderSelectionActions(rendered.revision).onSelectCandidate("/Synthetic");
+    rendered = fixture.controller.snapshot().folderSelection!;
+    const binding = Promise.resolve(
+      fixture.controller.folderSelectionActions(rendered.revision).onUse(),
+    );
+    await enteredRefresh.promise;
+    const authorityCountAtDispose = catalog.verificationAuthorities.length;
+    const rebuildCountAtDispose = hybrid.rebuildVerificationProjectionCalls;
+
+    fixture.controller.dispose();
+    fixture.store.setSettingsForTest({
+      ...fixture.store.settings(),
+      boundCloudLibrary: {
+        schemaVersion: 1,
+        path: "/External",
+        sourceImportSha256: SOURCE_HASH,
+        verificationGeneration: 2,
+      },
+      cloudVerificationGeneration: 2,
+    });
+    releaseRefresh.resolve();
+    await binding;
+
+    expect(catalog.verificationAuthorities).toHaveLength(authorityCountAtDispose);
+    expect(hybrid.rebuildVerificationProjectionCalls).toBe(rebuildCountAtDispose);
+    expect(fixture.controller.snapshot().verificationRoot).toBe("");
+  });
+
+  it("clears the legacy fresh-start token immediately after durable save", async () => {
+    class ConflictingLegacyHybrid extends FakeHybridCatalogRuntime {
+      override async prepareLegacyVerificationAdoption(
+        scope: Parameters<FakeHybridCatalogRuntime["prepareLegacyVerificationAdoption"]>[0],
+      ): Promise<LegacyVerificationAdoptionV1 | null> {
+        this.preparedAdoptionScopes.push(structuredClone(scope));
+        throw new HybridCatalogError("hybrid-cloud-root-mismatch");
+      }
+    }
+    const hybrid = new ConflictingLegacyHybrid(activeHybrid({
+      legacyArtifactSetSha256: "e".repeat(64),
+    }).snapshot());
+    hybrid.setSnapshot({
+      ...hybrid.snapshot(),
+      status: "paused",
+      batch: pausedBatch("legacy-conflict-batch"),
+    });
+    const factory = new TestFolderSelectionFactory([folderCandidate("/Synthetic")]);
+    const fixture = controllerFixture({
+      catalog: new FakeCloudCatalogRuntime({}, undefined, hybrid),
+      folderSelectionSessionFactory: factory,
+    });
+    fixture.store.setSettingsForTest({
+      ...fixture.store.settings(),
+      legacyVerificationAdoption: { schemaVersion: 1, state: "pending" },
+    });
+    fixture.controller.openVerificationFolderSelection();
+    let rendered = fixture.controller.snapshot().folderSelection!;
+    fixture.controller.folderSelectionActions(rendered.revision).onSelectCandidate("/Synthetic");
+    rendered = fixture.controller.snapshot().folderSelection!;
+
+    await fixture.controller.folderSelectionActions(rendered.revision).onUse();
+    hybrid.beforeRebuildVerificationProjection = () => {
+      throw new Error("binding-rebuild-failed");
+    };
+    rendered = fixture.controller.snapshot().folderSelection!;
+    await expect(fixture.controller.folderSelectionActions(rendered.revision).onUse())
+      .rejects.toThrow("binding-rebuild-failed");
+
+    hybrid.beforeRebuildVerificationProjection = undefined;
+    const durableScope = deriveCloudVerificationScope(
+      fixture.store.settings().boundCloudLibrary,
+      hashVerificationRoot,
+    )!;
+    hybrid.setSnapshot({
+      ...hybrid.snapshot(),
+      status: "paused",
+      batch: {
+        ...pausedBatch("new-batch-after-durable-save"),
+        verificationScope: durableScope,
+      },
+    });
+    rendered = fixture.controller.snapshot().folderSelection!;
+    await fixture.controller.folderSelectionActions(rendered.revision).onUse();
+
+    expect(fixture.store.cloudVerificationSettingsCalls).toHaveLength(2);
+    expect(fixture.store.cloudVerificationSettingsCalls[1]).toMatchObject({
+      settings: {
+        verificationBatchTombstones: {
+          schemaVersion: 1,
+          state: "valid",
+          batchIds: ["legacy-conflict-batch"],
+        },
+      },
+      transition: { kind: "library-binding", currentWorkflowBatchId: null },
+    });
+    fixture.controller.dispose();
+  });
+
+  it("rejects category purpose drift after projection rebuild", async () => {
+    const hybrid = activeHybrid();
+    hybrid.beforeRebuildVerificationProjection = () => {
+      const snapshot = hybrid.snapshot();
+      hybrid.setSnapshot({
+        ...snapshot,
+        active: {
+          ...snapshot.active!,
+          groupCount: 0,
+          groups: [],
+        },
+      });
+    };
+    const factory = new TestFolderSelectionFactory([
+      folderCandidate("/Synthetic/Literature"),
+    ]);
+    const fixture = controllerFixture({
+      catalog: new FakeCloudCatalogRuntime({}, undefined, hybrid),
+      folderSelectionSessionFactory: factory,
+    });
+    fixture.controller.openVerificationFolderSelection();
+    let rendered = fixture.controller.snapshot().folderSelection!;
+    fixture.controller.folderSelectionActions(rendered.revision)
+      .onSelectCandidate("/Synthetic/Literature");
+    rendered = fixture.controller.snapshot().folderSelection!;
+
+    await expect(fixture.controller.folderSelectionActions(rendered.revision).onUse())
+      .rejects.toThrow("folder-selection-stale");
+
+    expect(fixture.store.settings().boundCloudLibrary).toMatchObject({ path: "/Synthetic" });
+    expect(fixture.controller.snapshot().verificationRoot).toBe("");
+    expect(fixture.controller.snapshot().verificationDirectorySelection).toBeUndefined();
+    expect(fixture.controller.snapshot().selectedVerificationGroupKeys).toEqual([]);
+    expect(fixture.controller.snapshot().folderSelection).toBeUndefined();
+    fixture.controller.dispose();
+  });
+
+  it("rejects legacy artifact drift after projection rebuild", async () => {
+    const hybrid = activeHybrid({ legacyArtifactSetSha256: "e".repeat(64) });
+    hybrid.beforeRebuildVerificationProjection = () => {
+      const snapshot = hybrid.snapshot();
+      hybrid.setSnapshot({
+        ...snapshot,
+        active: {
+          ...snapshot.active!,
+          legacyArtifactSetSha256: "9".repeat(64),
+        },
+      });
+    };
+    const factory = new TestFolderSelectionFactory([folderCandidate("/Synthetic")]);
+    const fixture = controllerFixture({
+      catalog: new FakeCloudCatalogRuntime({}, undefined, hybrid),
+      folderSelectionSessionFactory: factory,
+    });
+    fixture.controller.openVerificationFolderSelection();
+    let rendered = fixture.controller.snapshot().folderSelection!;
+    fixture.controller.folderSelectionActions(rendered.revision).onSelectCandidate("/Synthetic");
+    rendered = fixture.controller.snapshot().folderSelection!;
+
+    await expect(fixture.controller.folderSelectionActions(rendered.revision).onUse())
+      .rejects.toThrow("folder-selection-stale");
+
+    expect(fixture.store.settings().boundCloudLibrary).toMatchObject({ path: "/Synthetic" });
+    expect(fixture.controller.snapshot().verificationRoot).toBe("");
+    expect(fixture.controller.snapshot().folderSelection).toBeUndefined();
+    fixture.controller.dispose();
+  });
+
+  it("rejects an unexpected batch scope after projection rebuild", async () => {
+    const hybrid = activeHybrid();
+    hybrid.beforeRebuildVerificationProjection = () => {
+      hybrid.setSnapshot({
+        ...hybrid.snapshot(),
+        status: "paused",
+        batch: {
+          ...pausedBatch("unexpected-post-binding-batch"),
+          verificationScope: {
+            generation: 99,
+            sourceImportSha256: SOURCE_HASH,
+            cloudRootSha256: hashVerificationRoot("/Wrong"),
+          },
+        },
+      });
+    };
+    const factory = new TestFolderSelectionFactory([folderCandidate("/Synthetic")]);
+    const fixture = controllerFixture({
+      catalog: new FakeCloudCatalogRuntime({}, undefined, hybrid),
+      folderSelectionSessionFactory: factory,
+    });
+    fixture.controller.openVerificationFolderSelection();
+    let rendered = fixture.controller.snapshot().folderSelection!;
+    fixture.controller.folderSelectionActions(rendered.revision).onSelectCandidate("/Synthetic");
+    rendered = fixture.controller.snapshot().folderSelection!;
+
+    await expect(fixture.controller.folderSelectionActions(rendered.revision).onUse())
+      .rejects.toThrow("folder-selection-stale");
+
+    expect(fixture.store.settings().boundCloudLibrary).toMatchObject({ path: "/Synthetic" });
+    expect(fixture.controller.snapshot().verificationRoot).toBe("");
+    expect(fixture.controller.snapshot().verificationDirectorySelection).toBeUndefined();
+    fixture.controller.dispose();
+  });
+
+  it.each(["create", "subscribe"] as const)(
+    "clears the page when recoverable session %s fails",
+    async (failure) => {
+      const hybrid = activeHybrid();
+      const factory = new TestFolderSelectionFactory([folderCandidate("/Synthetic")]);
+      if (failure === "create") factory.failCreateAt = 2;
+      else factory.failSubscribeAt = 2;
+      const fixture = controllerFixture({
+        catalog: new FakeCloudCatalogRuntime({}, undefined, hybrid),
+        folderSelectionSessionFactory: factory,
+      });
+      fixture.store.failNext = new Error("binding-save-failed");
+      fixture.controller.openVerificationFolderSelection();
+      let rendered = fixture.controller.snapshot().folderSelection!;
+      fixture.controller.folderSelectionActions(rendered.revision).onSelectCandidate("/Synthetic");
+      rendered = fixture.controller.snapshot().folderSelection!;
+      let emissions = 0;
+      const unsubscribe = fixture.controller.subscribe(() => { emissions += 1; });
+
+      await expect(fixture.controller.folderSelectionActions(rendered.revision).onUse())
+        .rejects.toThrow("binding-save-failed");
+
+      expect(fixture.controller.snapshot().folderSelection).toBeUndefined();
+      expect(fixture.controller.snapshot().statusMessage)
+        .toBe("folder-selection-binding-failed");
+      expect(emissions).toBeGreaterThan(0);
+      if (failure === "subscribe") {
+        expect(factory.sessions[1]?.snapshot().phase).toBe("closed");
+      }
+      unsubscribe();
+      fixture.controller.dispose();
+    },
+  );
+
+  it("rejects use before remember while an identity replacement owns cloud authority", async () => {
+    const hybrid = activeHybrid();
+    const connection = new FakeCloudCatalogConnectionRuntime({ status: "authorized" });
+    const factory = new TestFolderSelectionFactory([folderCandidate("/Synthetic")]);
+    const fixture = controllerFixture({
+      catalog: new FakeCloudCatalogRuntime({}, connection, hybrid),
+      folderSelectionSessionFactory: factory,
+      pauseCloudVerificationUpdate: true,
+    });
+    fixture.controller.openVerificationFolderSelection();
+    let rendered = fixture.controller.snapshot().folderSelection!;
+    fixture.controller.folderSelectionActions(rendered.revision).onSelectCandidate("/Synthetic");
+    rendered = fixture.controller.snapshot().folderSelection!;
+    const replacing = fixture.controller.connectCatalog(
+      { appKey: "replacement-app", secretKey: "replacement-secret" },
+      "replace-identity",
+    );
+    await expect.poll(() => fixture.store.cloudVerificationSettingsCalls.length).toBe(1);
+
+    await expect(fixture.controller.folderSelectionActions(rendered.revision).onUse())
+      .rejects.toThrow("cloud-authority-operation-busy");
+    expect(factory.rememberCalls).toEqual([]);
+
+    fixture.store.resumeCloudVerificationUpdate();
+    await replacing;
+    expect(fixture.controller.snapshot().folderSelection).toBeUndefined();
     fixture.controller.dispose();
   });
 });

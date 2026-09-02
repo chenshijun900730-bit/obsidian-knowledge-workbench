@@ -97,6 +97,19 @@ const en = {
   "directoryPicker.browser.error.fixed": "Folder browsing is temporarily unavailable. No private error details are shown.",
   "directoryPicker.browser.canceled": "Folder loading was canceled. Committed folders remain available.",
   "directoryPicker.browser.highlighted": "Highlighted folder: {path}",
+  "folderSelection.title": "Choose a library folder",
+  "folderSelection.browseOther": "Browse other folders",
+  "folderSelection.advanced": "More ways to find folders",
+  "folderSelection.willPreserve": "Existing verification progress will be preserved when possible.",
+  "folderSelection.preserved": "Existing verification progress was preserved.",
+  "folderSelection.requiresFresh": "This folder requires a fresh verification.",
+  "folderSelection.useFresh": "Use this folder and verify again",
+  "folderSelection.bindingFailed": "Could not use this folder. Please try again.",
+  "folderSelection.selectionInvalid": "This selection is no longer available. Choose it again.",
+  "folderSelection.queryRequired": "Enter a folder name first.",
+  "folderSelection.lookup.complete": "Lookup complete: checked {directories} folders, found {matches} matches, used {requests} list requests, and took {milliseconds} ms.",
+  "folderSelection.lookup.partial": "Lookup paused ({reason}): checked {directories} folders, kept {matches} matches, used {requests} list requests, and took {milliseconds} ms.",
+  "folderSelection.lookup.canceled": "Lookup canceled: checked {directories} folders, kept {matches} matches, used {requests} list requests, and took {milliseconds} ms.",
 } as const;
 
 export type DirectoryPickerMessageKey = keyof typeof en;
@@ -198,6 +211,19 @@ const zhCN: Record<DirectoryPickerMessageKey, string> = {
   "directoryPicker.browser.error.fixed": "文件夹浏览暂时不可用；不会显示私密错误详情。",
   "directoryPicker.browser.canceled": "文件夹加载已取消；已提交的目录仍可使用。",
   "directoryPicker.browser.highlighted": "已选中文件夹：{path}",
+  "folderSelection.title": "选择书库文件夹",
+  "folderSelection.browseOther": "浏览其他文件夹",
+  "folderSelection.advanced": "更多查找方式",
+  "folderSelection.willPreserve": "将尝试保留已有核验进度。",
+  "folderSelection.preserved": "已保留已有核验进度。",
+  "folderSelection.requiresFresh": "此目录需要重新检查。",
+  "folderSelection.useFresh": "使用此文件夹并重新检查",
+  "folderSelection.bindingFailed": "未能使用这个文件夹，请重试。",
+  "folderSelection.selectionInvalid": "这个选择已失效，请重新选择。",
+  "folderSelection.queryRequired": "请先输入文件夹名称。",
+  "folderSelection.lookup.complete": "定位完成：检查了 {directories} 个目录，找到 {matches} 个匹配项，使用 {requests} 次列表请求，用时 {milliseconds} 毫秒。",
+  "folderSelection.lookup.partial": "定位已暂停（{reason}）：检查了 {directories} 个目录，保留 {matches} 个匹配项，使用 {requests} 次列表请求，用时 {milliseconds} 毫秒。",
+  "folderSelection.lookup.canceled": "定位已取消：检查了 {directories} 个目录，保留 {matches} 个匹配项，使用 {requests} 次列表请求，用时 {milliseconds} 毫秒。",
 };
 
 const dictionaries: Record<WorkbenchLocale, Record<DirectoryPickerMessageKey, string>> = {

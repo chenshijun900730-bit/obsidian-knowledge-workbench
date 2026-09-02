@@ -132,6 +132,9 @@ describe("composition-root dependency graphs", () => {
       "src/catalog/cloud-directory-locator.ts",
       "src/ui/cloud-directory-browser-view.ts",
       "src/ui/cloud-directory-picker.ts",
+      "src/ui/cloud-directory-picker-session.ts",
+      "src/ui/folder-selection-page.ts",
+      "src/runtime/normal-folder-selection-composition.ts",
       "src/i18n/workbench-directory-picker-i18n.ts",
     ];
 
@@ -187,6 +190,9 @@ describe("composition-root dependency graphs", () => {
       "src/catalog/cloud-directory-locator.ts",
       "src/ui/cloud-directory-browser-view.ts",
       "src/ui/cloud-directory-picker.ts",
+      "src/ui/cloud-directory-picker-session.ts",
+      "src/ui/folder-selection-page.ts",
+      "src/runtime/normal-folder-selection-composition.ts",
       "src/i18n/workbench-directory-picker-i18n.ts",
     ]));
     expect(output).toMatch(/requestUrl/u);

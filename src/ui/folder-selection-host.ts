@@ -14,6 +14,8 @@ import type {
   CloudDirectoryPickerPurpose,
   CloudDirectorySelection,
 } from "../catalog/cloud-directory-selection";
+import type { DirectoryPickerI18n } from "../i18n/workbench-directory-picker-i18n";
+import type { WorkbenchLocale } from "../i18n/workbench-i18n";
 
 export type CloudDirectoryPickerPhase =
   | "local"
@@ -90,6 +92,7 @@ export interface CloudDirectoryPickerSessionState {
 }
 
 export type FolderSelectionDraft = CloudDirectorySelection;
+export type FolderSelectionFeedbackCode = "binding-failed";
 
 export interface FolderSelectionSessionDriver {
   snapshot(): CloudDirectoryPickerSessionState;
@@ -116,4 +119,65 @@ export interface FolderSelectionSessionDriver {
   useSelection(): Promise<FolderSelectionDraft | null>;
   cancel(): void;
   dispose(): void;
+}
+
+export interface FolderSelectionHostSnapshot {
+  readonly revision: number;
+  readonly i18n: DirectoryPickerI18n;
+  readonly state: CloudDirectoryPickerSessionState;
+  readonly returnLabel: string;
+  readonly legacyProgressMode: "none" | "will-preserve" | "requires-fresh";
+  readonly feedbackCode?: FolderSelectionFeedbackCode;
+}
+
+export interface FolderSelectionRenderState {
+  readonly revision: number;
+  readonly locale: WorkbenchLocale;
+  readonly state: CloudDirectoryPickerSessionState;
+  readonly returnLabel: string;
+  readonly legacyProgressMode: "none" | "will-preserve" | "requires-fresh";
+  readonly feedbackCode?: FolderSelectionFeedbackCode;
+}
+
+export interface FolderSelectionHostActions {
+  readonly onBack: () => void;
+  readonly onQuery: (value: string) => void;
+  readonly onToggleSource: (source: CloudDirectoryCandidateSource) => void;
+  readonly onSelectCandidate: (path: string) => void;
+  readonly onUse: () => Promise<void> | void;
+  readonly onBrowseOther: () => void;
+  readonly onConfirmLookup: () => Promise<void> | void;
+  readonly onRevealRoot: () => void;
+  readonly onConfirmRoot: () => void;
+  readonly onBrowserAction: Readonly<{
+    onNavigate: (path: string) => void;
+    onHighlight: (path: string | null) => void;
+    onSelectCurrent: () => Promise<void> | void;
+    onSelectHighlighted: () => Promise<void> | void;
+    onSelectCategory: (path: string) => Promise<void> | void;
+    onContinue: () => Promise<void> | void;
+    onRetry: () => Promise<void> | void;
+    onCancel: () => void;
+  }>;
+}
+
+export interface DisposableSurface {
+  dispose(): void;
+}
+
+export interface FolderSelectionHostCapability {
+  readonly available: boolean;
+  render(
+    root: HTMLElement,
+    state: FolderSelectionRenderState,
+    actions: FolderSelectionHostActions,
+  ): DisposableSurface;
+}
+
+export interface FolderSelectionSessionFactoryPort {
+  readonly available: boolean;
+  create(input: Readonly<{
+    purpose: CloudDirectoryPickerPurpose;
+    initialPath: string | null;
+  }>): FolderSelectionSessionDriver;
 }

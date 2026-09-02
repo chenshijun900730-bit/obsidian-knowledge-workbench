@@ -29,6 +29,7 @@ import { createCatalogLargeScanConfirmationModalClass } from "./ui/catalog-large
 import { createCloudDirectoryPickerModalClass } from "./ui/cloud-directory-picker";
 import { createDirectoryPickerI18n } from "./i18n/workbench-directory-picker-i18n";
 import { validateCloudDirectorySelection } from "./catalog/cloud-directory-selection";
+import { createNormalFolderSelectionComposition } from "./runtime/normal-folder-selection-composition";
 
 if (
   __KNOWLEDGE_WORKBENCH_BUILD_MODE__ !== "normal"
@@ -114,6 +115,7 @@ const runtime = Object.freeze({
       openBaidu: async () => { openExternalPage("https://pan.baidu.com/disk/main"); },
     },
   }),
+  createFolderSelection: createNormalFolderSelectionComposition,
   createCatalogConfirmation: (app, getLocale) => {
     const ConcreteCatalogScanConfirmationModal = createCatalogScanConfirmationModalClass(
       Modal,

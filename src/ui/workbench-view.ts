@@ -44,6 +44,12 @@ import type {
   LibraryWorkflowState,
   PendingCatalogTxtDraft,
 } from "./library-workflow-state";
+import type {
+  DisposableSurface,
+  FolderSelectionHostActions,
+  FolderSelectionHostCapability,
+  FolderSelectionRenderState,
+} from "./folder-selection-host";
 
 export type { WorkbenchTab } from "./workbench-shell";
 export type { StartSection } from "./start-page";
@@ -69,6 +75,7 @@ export interface WorkbenchViewModel {
   readonly taskActionPending: boolean;
   readonly taskActionRevision: number;
   readonly workflow: LibraryWorkflowState;
+  readonly folderSelection?: FolderSelectionRenderState;
   readonly verificationRoot: string;
   readonly verificationRootLocked: boolean;
   readonly verificationDirectorySelection?: CloudDirectorySelection;
@@ -134,6 +141,10 @@ export interface WorkbenchActions {
   readonly onCancelSelectedVerification: () => void;
   readonly onBrowseVerificationRoot?: () => Promise<CloudDirectorySelection | null>;
   readonly onApplyVerificationDirectorySelection?: (selection: CloudDirectorySelection) => void;
+  readonly onOpenVerificationFolderSelection?: () => void;
+  readonly folderSelectionActions?: (
+    expectedRevision: number,
+  ) => FolderSelectionHostActions;
 }
 
 const PROGRESS_LABEL_KEYS = {
@@ -173,9 +184,12 @@ const STATUS_MESSAGE_KEYS: Readonly<Record<string, WorkbenchMessageKey>> = {
   "scan-must-cancel": "cloudAuthority.scanMustCancel",
   "cloud-authority-operation-busy": "cloudAuthority.operationBusy",
   "authorization-attempt-unavailable": "cloudAuthority.authorizationAttemptUnavailable",
+  "folder-selection-preserved": "folderSelection.preserved",
+  "folder-selection-binding-failed": "host.status.actionFailed",
 };
 
 const verificationPageSurfaces = new WeakMap<HTMLElement, VerificationPageSurface>();
+const folderSelectionPageSurfaces = new WeakMap<HTMLElement, DisposableSurface>();
 
 const verificationPickerPurpose = (
   model: WorkbenchViewModel,
@@ -261,6 +275,7 @@ export function renderWorkbench(
   actions: WorkbenchActions,
   policy: RuntimeSafetyPolicy = NORMAL_RUNTIME_POLICY,
   settingsSurface?: SettingsSectionsSurface,
+  folderSelectionHost?: FolderSelectionHostCapability,
 ): void {
   const doc = root.ownerDocument;
   const i18n = createWorkbenchI18n(model.locale);
@@ -282,6 +297,8 @@ export function renderWorkbench(
     "details[data-cloud-directory-advanced]",
   )?.open ?? false;
   disposeVerificationPage(root);
+  folderSelectionPageSurfaces.get(root)?.dispose();
+  folderSelectionPageSurfaces.delete(root);
   root.replaceChildren();
   root.classList.add("knowledge-workbench");
   const readOnlyAcceptance = policy.mode === "read-only-acceptance";
@@ -319,7 +336,19 @@ export function renderWorkbench(
   if (model.activeTab === "workbench") {
     renderStartPage(panel, { model, actions: surfaceActions, policy });
   } else if (model.activeTab === "verification") {
-    verificationPageSurfaces.set(root, renderVerificationPage(panel, {
+    if (
+      !readOnlyAcceptance
+      && model.folderSelection !== undefined
+      && folderSelectionHost?.available === true
+      && surfaceActions.folderSelectionActions !== undefined
+    ) {
+      folderSelectionPageSurfaces.set(root, folderSelectionHost.render(
+        panel,
+        model.folderSelection,
+        surfaceActions.folderSelectionActions(model.folderSelection.revision),
+      ));
+    } else {
+      verificationPageSurfaces.set(root, renderVerificationPage(panel, {
       i18n,
       rootPath: model.verificationRoot,
       directorySelection: model.verificationDirectorySelection,
@@ -341,7 +370,8 @@ export function renderWorkbench(
           onBrowseRoot: surfaceActions.onBrowseVerificationRoot,
         }),
       },
-    }));
+      }));
+    }
   } else if (model.activeTab === "history") {
     renderHistory(panel, model.history ?? { entries: [] }, {
       onUndo: surfaceActions.onUndoHistory ?? (() => undefined),
@@ -421,6 +451,9 @@ export interface WorkbenchViewController {
     purpose: CloudDirectoryPickerPurpose;
   }>): Promise<CloudDirectorySelection | null>;
   applyCatalogRootSelection?(selection: CloudDirectorySelection): void;
+  openVerificationFolderSelection?(): void;
+  folderSelectionActions?(expectedRevision: number): FolderSelectionHostActions;
+  closeFolderSelection?(): void;
   toggleVerificationGroup(groupKey: string): void;
   startSelectedVerification(): Promise<void>;
   resumeSelectedVerification(): Promise<void>;
@@ -455,6 +488,7 @@ export function createWorkbenchViewClass(
       leaf: WorkspaceLeaf,
       private readonly controller: WorkbenchViewController,
       private readonly settingsSurface?: SettingsSectionsSurface,
+      private readonly folderSelectionHost?: FolderSelectionHostCapability,
     ) {
       super(leaf);
     }
@@ -476,6 +510,9 @@ export function createWorkbenchViewClass(
       this.unsubscribe = null;
       this.settingsSurface?.dispose();
       disposeVerificationPage(this.contentEl);
+      folderSelectionPageSurfaces.get(this.contentEl)?.dispose();
+      folderSelectionPageSurfaces.delete(this.contentEl);
+      this.controller.closeFolderSelection?.();
       this.contentEl.replaceChildren();
     }
 
@@ -485,6 +522,20 @@ export function createWorkbenchViewClass(
         : undefined;
       const applyCatalogRootSelection = policy.mode === "normal"
         ? this.controller.applyCatalogRootSelection?.bind(this.controller)
+        : undefined;
+      const openFolderSelectionMethod = this.controller.openVerificationFolderSelection
+        ?.bind(this.controller);
+      const folderSelectionActionsMethod = this.controller.folderSelectionActions
+        ?.bind(this.controller);
+      const inlineFolderSelectionAvailable = policy.mode === "normal"
+        && this.folderSelectionHost?.available === true
+        && openFolderSelectionMethod !== undefined
+        && folderSelectionActionsMethod !== undefined;
+      const openFolderSelection = inlineFolderSelectionAvailable
+        ? openFolderSelectionMethod
+        : undefined;
+      const folderSelectionActions = inlineFolderSelectionAvailable
+        ? folderSelectionActionsMethod
         : undefined;
       const snapshot = this.controller.snapshot();
       renderWorkbench(this.contentEl, snapshot, {
@@ -537,16 +588,25 @@ export function createWorkbenchViewClass(
         onStartSelectedVerification: () => this.controller.startSelectedVerification(),
         onResumeSelectedVerification: () => this.controller.resumeSelectedVerification(),
         onCancelSelectedVerification: () => this.controller.cancelSelectedVerification(),
-        ...(chooseCatalogRoot === undefined ? {} : {
-          onBrowseVerificationRoot: () => chooseCatalogRoot({
-            initialRoot: this.controller.snapshot().verificationRoot,
-            purpose: verificationPickerPurpose(this.controller.snapshot()),
-          }),
-        }),
+        ...(openFolderSelection === undefined
+          ? (chooseCatalogRoot === undefined ? {} : {
+              onBrowseVerificationRoot: () => chooseCatalogRoot({
+                initialRoot: this.controller.snapshot().verificationRoot,
+                purpose: verificationPickerPurpose(this.controller.snapshot()),
+              }),
+            })
+          : {
+              onBrowseVerificationRoot: async () => {
+                openFolderSelection();
+                return null;
+              },
+              onOpenVerificationFolderSelection: openFolderSelection,
+            }),
+        ...(folderSelectionActions === undefined ? {} : { folderSelectionActions }),
         ...(applyCatalogRootSelection === undefined ? {} : {
           onApplyVerificationDirectorySelection: applyCatalogRootSelection,
         }),
-      }, policy, this.settingsSurface);
+      }, policy, this.settingsSurface, this.folderSelectionHost);
     }
 
     private runAction(labelKey: HostActionMessageKey, operation: () => Promise<unknown>): void {

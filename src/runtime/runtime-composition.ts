@@ -1,5 +1,5 @@
 import type { App, Plugin, PluginSettingTab } from "obsidian";
-import type { QuickCapturePort, VaultWritePort } from "../core/ports";
+import type { Clock, QuickCapturePort, VaultWritePort } from "../core/ports";
 import type { ChangePlanService } from "../plans/change-plan-service";
 import type { ChangePreviewPresenter } from "../ui/change-preview-modal";
 import type { HistoryConfirmationPresenter } from "../ui/history-tab";
@@ -20,11 +20,21 @@ import type {
 } from "../i18n/workbench-i18n";
 import type { CloudDirectoryPickerPresenter } from "../ui/cloud-directory-picker";
 import type { CloudVerificationRootHasher } from "../catalog/cloud-verification-scope";
+import type { PluginDataStore } from "../storage/plugin-data-store";
+import type {
+  FolderSelectionHostCapability,
+  FolderSelectionSessionFactoryPort,
+} from "../ui/folder-selection-host";
 
 export type { WorkbenchLocaleProvider } from "../i18n/workbench-i18n";
 
 export interface DisposableQuickCapturePort extends QuickCapturePort {
   dispose(): void;
+}
+
+export interface FolderSelectionComposition {
+  readonly sessionFactory: FolderSelectionSessionFactoryPort;
+  readonly hostCapability: FolderSelectionHostCapability;
 }
 
 export interface RuntimeComposition {
@@ -60,6 +70,11 @@ export interface RuntimeComposition {
     getLocale: WorkbenchLocaleProvider,
   ) => WorkbenchAiDependencies;
   readonly createCatalog: (app: App) => CloudCatalogRuntime;
+  readonly createFolderSelection: (input: Readonly<{
+    store: PluginDataStore;
+    catalog: CloudCatalogRuntime;
+    clock: Clock;
+  }>) => FolderSelectionComposition;
   readonly cloudVerificationRootHasher: CloudVerificationRootHasher;
   readonly createCatalogConfirmation: (
     app: App,

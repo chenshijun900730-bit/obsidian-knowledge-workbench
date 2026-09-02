@@ -56,11 +56,62 @@ import type { LargeCatalogBatchSummary } from "../../src/catalog/hybrid-catalog-
 import type { CloudDirectorySelection } from "../../src/catalog/cloud-directory-selection";
 import type { CloudDirectoryPickerPresenter } from "../../src/ui/cloud-directory-picker";
 import { deriveCloudVerificationScope } from "../../src/catalog/cloud-verification-scope";
+import type {
+  FolderSelectionHostActions,
+  FolderSelectionHostCapability,
+  FolderSelectionRenderState,
+} from "../../src/ui/folder-selection-host";
 
 const createTestDiv = (): HTMLDivElement => document.createElementNS(
   "http://www.w3.org/1999/xhtml",
   "div",
 ) as HTMLDivElement;
+
+const inlineFolderSelectionState = (): FolderSelectionRenderState => ({
+  revision: 7,
+  locale: "zh-CN",
+  returnLabel: "返回云端核验",
+  legacyProgressMode: "none",
+  state: {
+    phase: "local",
+    purpose: { kind: "scan" },
+    query: "科学",
+    enabledSources: ["recent", "session-cache", "txt-group", "cloud-locator"],
+    rankedCandidates: [],
+    selectedPath: null,
+    draftSelection: null,
+    lookupDetail: null,
+    browserPath: null,
+    browserHighlightedPath: null,
+    browserLayer: null,
+    visibleBrowserDirectories: [],
+    browserActivity: "idle",
+    browserDetail: { round: null, fixedError: null },
+    statusCode: null,
+  },
+});
+
+const noOpFolderSelectionActions = (): FolderSelectionHostActions => ({
+  onBack: () => undefined,
+  onQuery: () => undefined,
+  onToggleSource: () => undefined,
+  onSelectCandidate: () => undefined,
+  onUse: () => undefined,
+  onBrowseOther: () => undefined,
+  onConfirmLookup: () => undefined,
+  onRevealRoot: () => undefined,
+  onConfirmRoot: () => undefined,
+  onBrowserAction: {
+    onNavigate: () => undefined,
+    onHighlight: () => undefined,
+    onSelectCurrent: () => undefined,
+    onSelectHighlighted: () => undefined,
+    onSelectCategory: () => undefined,
+    onContinue: () => undefined,
+    onRetry: () => undefined,
+    onCancel: () => undefined,
+  },
+});
 
 describe("workbench", () => {
   it.each([
@@ -129,6 +180,8 @@ describe("workbench", () => {
     ["scan-must-cancel", "请先取消当前云端扫描，再执行此操作。"],
     ["cloud-authority-operation-busy", "另一项云端安全操作正在进行；请等待完成后重试。"],
     ["authorization-attempt-unavailable", "本次授权已失效，请从对应的重新连接或更换账号操作重新开始。"],
+    ["folder-selection-preserved", "已保留已有核验进度。"],
+    ["folder-selection-binding-failed", "操作未能完成；本地数据保持不变。"],
   ] as const)("localizes fixed task status %s on the shared workbench surface", (
     statusMessage,
     expected,
@@ -247,6 +300,98 @@ describe("workbench", () => {
     expect(root.querySelector(".knowledge-workbench__verification-page")).not.toBeNull();
     expect(root.textContent).toContain("云端核验能力不可用");
     expect(root.querySelector('[aria-label="Organization suggestions"]')).toBeNull();
+  });
+
+  it("renders the injected folder page inline and disposes it before returning to verification", () => {
+    const root = createTestDiv();
+    const dispose = vi.fn();
+    const render = vi.fn<FolderSelectionHostCapability["render"]>((host, state) => {
+      const marker = host.ownerDocument.createElement("p");
+      marker.dataset.inlineFolderSelection = "true";
+      marker.textContent = `${state.returnLabel}:${state.revision}`;
+      host.append(marker);
+      return { dispose };
+    });
+    const capability: FolderSelectionHostCapability = { available: true, render };
+    const folderSelectionActions = vi.fn(() => noOpFolderSelectionActions());
+    const model = {
+      ...populatedWorkbenchModel(),
+      activeTab: "verification" as const,
+      folderSelection: inlineFolderSelectionState(),
+    };
+
+    renderWorkbench(
+      root,
+      model,
+      noOpWorkbenchActions({ folderSelectionActions }),
+      NORMAL_RUNTIME_POLICY,
+      undefined,
+      capability,
+    );
+
+    expect(render).toHaveBeenCalledOnce();
+    expect(folderSelectionActions).toHaveBeenCalledWith(7);
+    expect(root.querySelector('[data-inline-folder-selection="true"]')?.textContent)
+      .toBe("返回云端核验:7");
+    expect(root.querySelector(".knowledge-workbench__verification-page")).toBeNull();
+
+    renderWorkbench(
+      root,
+      { ...model, folderSelection: undefined },
+      noOpWorkbenchActions(),
+      NORMAL_RUNTIME_POLICY,
+      undefined,
+      capability,
+    );
+
+    expect(dispose).toHaveBeenCalledOnce();
+    expect(root.querySelector(".knowledge-workbench__verification-page")).not.toBeNull();
+  });
+
+  it("never renders an injected normal folder page in read-only acceptance mode", () => {
+    const root = createTestDiv();
+    const render = vi.fn<FolderSelectionHostCapability["render"]>(() => ({
+      dispose: () => undefined,
+    }));
+
+    renderWorkbench(
+      root,
+      {
+        ...populatedWorkbenchModel(),
+        activeTab: "verification",
+        folderSelection: inlineFolderSelectionState(),
+      },
+      noOpWorkbenchActions({ folderSelectionActions: () => noOpFolderSelectionActions() }),
+      READ_ONLY_ACCEPTANCE_POLICY,
+      undefined,
+      { available: true, render },
+    );
+
+    expect(render).not.toHaveBeenCalled();
+    expect(root.querySelector(".knowledge-workbench__verification-page")).not.toBeNull();
+  });
+
+  it("falls back to the legacy verification page when inline actions are incomplete", () => {
+    const root = createTestDiv();
+    const render = vi.fn<FolderSelectionHostCapability["render"]>(() => ({
+      dispose: () => undefined,
+    }));
+
+    renderWorkbench(
+      root,
+      {
+        ...populatedWorkbenchModel(),
+        activeTab: "verification",
+        folderSelection: inlineFolderSelectionState(),
+      },
+      noOpWorkbenchActions(),
+      NORMAL_RUNTIME_POLICY,
+      undefined,
+      { available: true, render },
+    );
+
+    expect(render).not.toHaveBeenCalled();
+    expect(root.querySelector(".knowledge-workbench__verification-page")).not.toBeNull();
   });
 
   it("fills an empty verification draft without starting, resuming, or locating again", async () => {

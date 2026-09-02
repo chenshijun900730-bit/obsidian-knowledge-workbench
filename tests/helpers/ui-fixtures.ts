@@ -39,6 +39,7 @@ import type {
   LargeCatalogBatchSummary,
 } from "../../src/catalog/hybrid-catalog-runtime";
 import type { LibraryWorkflowState } from "../../src/ui/library-workflow-state";
+import type { FolderSelectionSessionFactoryPort } from "../../src/ui/folder-selection-host";
 
 export const TEST_SOURCE_IMPORT_SHA256 = "a".repeat(64);
 export const TEST_CLOUD_VERIFICATION_ROOT_HASHER = (normalizedRoot: string): string => (
@@ -644,6 +645,7 @@ export interface ControllerFixtureOptions {
   readonly catalogConfirmation?: CatalogScanConfirmationPresenter;
   readonly catalogTxtImportConfirmation?: CatalogTxtImportConfirmationPresenter;
   readonly catalogLargeScanConfirmation?: CatalogLargeScanConfirmationPresenter;
+  readonly folderSelectionSessionFactory?: FolderSelectionSessionFactoryPort;
   readonly pauseCloudVerificationUpdate?: boolean;
 }
 
@@ -896,6 +898,9 @@ export function controllerFixture(options: ControllerFixtureOptions = {}) {
     cloudVerificationRootHasher: TEST_CLOUD_VERIFICATION_ROOT_HASHER,
     catalogConfirmation,
     catalogDirectorySelectionValidator: validateCloudDirectorySelection,
+    ...(options.folderSelectionSessionFactory === undefined
+      ? {}
+      : { folderSelectionSessionFactory: options.folderSelectionSessionFactory }),
     ...(options.catalogTxtImportConfirmation === undefined
       ? {}
       : { catalogTxtImportConfirmation: options.catalogTxtImportConfirmation }),

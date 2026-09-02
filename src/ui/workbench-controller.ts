@@ -81,6 +81,12 @@ import {
   type VerificationLaunchGroup,
   type VerificationLaunchRequest,
 } from "../catalog/verification-launch-request";
+import type {
+  FolderSelectionHostActions,
+  FolderSelectionRenderState,
+  FolderSelectionSessionDriver,
+  FolderSelectionSessionFactoryPort,
+} from "./folder-selection-host";
 
 export interface AiSettingsInput {
   readonly enabled: boolean;
@@ -134,6 +140,7 @@ export interface WorkbenchDependencies {
   readonly catalogLargeScanConfirmation?: CatalogLargeScanConfirmationPresenter;
   readonly catalogDirectoryPicker?: CloudDirectoryPickerPresenter;
   readonly catalogDirectorySelectionValidator?: CloudDirectorySelectionValidator;
+  readonly folderSelectionSessionFactory?: FolderSelectionSessionFactoryPort;
 }
 
 export type MapCenter = Readonly<{ kind: "document" | "topic"; id: string }>;
@@ -155,6 +162,32 @@ type CatalogAuthorizationAttempt = Readonly<{
 type TaskActionPermit = Readonly<{
   revision: number;
   nonce: symbol;
+}>;
+
+type FolderSelectionOwner = {
+  readonly nonce: symbol;
+  readonly purpose: CloudDirectoryPickerPurpose;
+  readonly driver: FolderSelectionSessionDriver;
+  readonly sourceImportSha256: string;
+  unsubscribe: () => void;
+  usePending: boolean;
+  commitStarted: boolean;
+  closeRequested: boolean;
+  driverDisposed: boolean;
+};
+
+interface LegacyAdoptionFailureToken {
+  readonly selectedEffectiveRootSha256: string;
+  readonly activeSourceImportSha256: string;
+  readonly legacyArtifactSetSha256: string;
+}
+
+type FolderBindingBaseline = Readonly<{
+  activeSourceImportSha256: string;
+  legacyArtifactSetSha256: string | null;
+  groupsKey: string;
+  settingsKey: string;
+  batchKey: string;
 }>;
 
 const emptyMap = (): FocusedMap => ({ nodes: [], edges: [], selected: null, truncated: false });
@@ -196,6 +229,9 @@ const verificationPickerPurpose = (
       label: group.label,
     })),
 });
+const folderSelectionPurposeKey = (purpose: CloudDirectoryPickerPurpose): string => (
+  JSON.stringify(purpose)
+);
 const isSelectedCategoryRoot = (
   cloudRoot: string,
   groups: readonly Readonly<{
@@ -345,6 +381,59 @@ const verificationAuthoritySettingsKey = (settings: PluginSettings): string => J
   legacyVerificationAdoption: settings.legacyVerificationAdoption,
 });
 
+const cloudVerificationSettingsFrom = (settings: PluginSettings): CloudVerificationSettings => ({
+  boundCloudLibrary: settings.boundCloudLibrary === null
+    ? null
+    : clone(settings.boundCloudLibrary),
+  cloudVerificationGeneration: settings.cloudVerificationGeneration,
+  verificationBatchTombstones: clone(settings.verificationBatchTombstones),
+  legacyVerificationAdoption: clone(settings.legacyVerificationAdoption),
+});
+
+const cloudVerificationSettingsKey = (settings: PluginSettings): string => JSON.stringify(
+  cloudVerificationSettingsFrom(settings),
+);
+
+const sameCloudVerificationSettings = (
+  left: CloudVerificationSettings,
+  right: CloudVerificationSettings,
+): boolean => left.cloudVerificationGeneration === right.cloudVerificationGeneration
+  && JSON.stringify(left.boundCloudLibrary) === JSON.stringify(right.boundCloudLibrary)
+  && JSON.stringify(left.verificationBatchTombstones)
+    === JSON.stringify(right.verificationBatchTombstones)
+  && JSON.stringify(left.legacyVerificationAdoption)
+    === JSON.stringify(right.legacyVerificationAdoption);
+
+const checkedNextVerificationGeneration = (current: number): number => {
+  if (!Number.isSafeInteger(current) || current < 0 || current >= Number.MAX_SAFE_INTEGER) {
+    throw new RangeError("cloud-verification-generation-overflow");
+  }
+  return current + 1;
+};
+
+const sameLegacyAdoptionFailureToken = (
+  left: LegacyAdoptionFailureToken | null,
+  right: LegacyAdoptionFailureToken | null,
+): boolean => left === null || right === null
+  ? left === right
+  : left.selectedEffectiveRootSha256 === right.selectedEffectiveRootSha256
+    && left.activeSourceImportSha256 === right.activeSourceImportSha256
+    && left.legacyArtifactSetSha256 === right.legacyArtifactSetSha256;
+
+const deterministicLegacyAdoptionConflict = (error: unknown): boolean => (
+  error instanceof HybridCatalogError
+  && [
+    "hybrid-cloud-root-mismatch",
+    "hybrid-snapshot-corrupt",
+    "hybrid-batch-invalid",
+  ].includes(error.code)
+);
+
+const bindingCasConflict = (error: unknown): boolean => error instanceof RangeError
+  && error.message === "Cloud verification authority changed before the transaction committed";
+
+const folderSelectionStale = (): Error => new Error("folder-selection-stale");
+
 export class WorkbenchController {
   private readonly listeners = new Set<() => void>();
   private readonly unsubscribeIndex: () => void;
@@ -391,6 +480,9 @@ export class WorkbenchController {
     nonce: symbol;
   }> | null = null;
   private catalogAuthorizationAttempt: CatalogAuthorizationAttempt | null = null;
+  private folderSelectionOwner: FolderSelectionOwner | null = null;
+  private folderSelectionRevision = 0;
+  private legacyAdoptionFailureToken: LegacyAdoptionFailureToken | null = null;
 
   constructor(private readonly dependencies: WorkbenchDependencies) {
     this.cloudDirectoryCandidates = Object.freeze({
@@ -591,6 +683,98 @@ export class WorkbenchController {
       verificationRoot: value,
     };
     this.emit();
+  }
+
+  openVerificationFolderSelection(): void {
+    if (this.disposed || this.lockedVerificationRoot !== null) return;
+    if (this.folderSelectionOwner?.usePending === true) return;
+    const factory = this.dependencies.folderSelectionSessionFactory;
+    const active = this.dependencies.catalog.hybrid?.snapshot().active;
+    if (factory?.available !== true || active === undefined) {
+      throw new Error("catalog-unavailable");
+    }
+    const purpose = verificationPickerPurpose(active.groups);
+    const currentSelectedPath = this.model.verificationDirectorySelection?.selectedPath;
+    const rawInitialPath = currentSelectedPath ?? this.model.verificationRoot.trim();
+    const initialPath = rawInitialPath.length === 0
+      ? null
+      : this.validateCatalogScanRoot(rawInitialPath);
+    this.disposeFolderSelection(true, false);
+    let owner: FolderSelectionOwner | null = null;
+    try {
+      const driver = factory.create({
+        purpose: clone(purpose),
+        initialPath,
+      });
+      owner = {
+        nonce: Symbol("folder-selection"),
+        purpose: clone(purpose),
+        driver,
+        sourceImportSha256: active.sourceImportSha256,
+        unsubscribe: () => undefined,
+        usePending: false,
+        commitStarted: false,
+        closeRequested: false,
+        driverDisposed: false,
+      };
+      owner.unsubscribe = driver.subscribe(() => this.onFolderSelectionEmission(owner!));
+      const state = clone(driver.snapshot());
+      if (state.phase === "closed") throw new Error("folder-selection-open-closed");
+      const folderSelection = this.folderSelectionRenderState(state);
+      this.folderSelectionOwner = owner;
+      this.model = { ...this.model, folderSelection };
+      this.emit();
+    } catch (error) {
+      if (owner !== null) this.destroyFolderSelectionOwner(owner);
+      this.removeFolderSelectionModel();
+      this.emit();
+      throw error;
+    }
+  }
+
+  closeFolderSelection(): void {
+    if (this.folderSelectionOwner === null) return;
+    this.disposeFolderSelection(true, true);
+  }
+
+  folderSelectionActions(expectedRevision: number): FolderSelectionHostActions {
+    const current = (): FolderSelectionOwner | null => this.currentFolderSelection(
+      expectedRevision,
+    );
+    const invoke = (action: (driver: FolderSelectionSessionDriver) => void): void => {
+      const owner = current();
+      if (owner !== null) action(owner.driver);
+    };
+    const invokeAsync = async (
+      action: (driver: FolderSelectionSessionDriver) => Promise<void>,
+    ): Promise<void> => {
+      const owner = current();
+      if (owner !== null) await action(owner.driver);
+    };
+    const actions: FolderSelectionHostActions = {
+      onBack: () => {
+        if (current() !== null) this.closeFolderSelection();
+      },
+      onQuery: (value) => invoke((driver) => driver.setQuery(value)),
+      onToggleSource: (source) => invoke((driver) => driver.toggleSource(source)),
+      onSelectCandidate: (path) => invoke((driver) => driver.selectCandidate(path)),
+      onUse: () => this.useFolderSelection(expectedRevision),
+      onBrowseOther: () => invoke((driver) => driver.requestLookupConsent()),
+      onConfirmLookup: () => invokeAsync((driver) => driver.confirmLookup()),
+      onRevealRoot: () => invoke((driver) => driver.revealRootBrowser()),
+      onConfirmRoot: () => invoke((driver) => driver.confirmRootBrowser()),
+      onBrowserAction: {
+        onNavigate: (path) => invoke((driver) => driver.enterBrowserPath(path)),
+        onHighlight: (path) => invoke((driver) => driver.highlightBrowserPath(path)),
+        onSelectCurrent: () => invokeAsync((driver) => driver.selectCurrentDirectory()),
+        onSelectHighlighted: () => invokeAsync((driver) => driver.selectHighlightedDirectory()),
+        onSelectCategory: (path) => invokeAsync((driver) => driver.selectCategory(path)),
+        onContinue: () => invokeAsync((driver) => driver.continueBrowser()),
+        onRetry: () => invokeAsync((driver) => driver.retryBrowser()),
+        onCancel: () => invoke((driver) => driver.cancelBrowser()),
+      },
+    };
+    return Object.freeze(actions);
   }
 
   applyCatalogRootSelection(selection: CloudDirectorySelection): void {
@@ -1477,7 +1661,11 @@ export class WorkbenchController {
     await this.dependencies.store.saveSettings({ ...settings, locale });
     if (this.disposed) return;
     this.model = { ...this.model, locale };
-    this.emit();
+    if (
+      this.folderSelectionOwner === null
+      || this.folderSelectionOwner.closeRequested
+    ) this.emit();
+    else this.publishFolderSelection(this.folderSelectionOwner);
   }
 
   async setWriteEnabled(value: boolean): Promise<void> {
@@ -1600,6 +1788,7 @@ export class WorkbenchController {
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
+    this.disposeFolderSelection(true, false);
     this.cancelProjectionSchedule();
     this.lifecycleEpoch += 1;
     this.exclusionGeneration += 1;
@@ -1625,6 +1814,11 @@ export class WorkbenchController {
     const incomingHybridCatalog = this.dependencies.catalog.hybrid === undefined
       ? undefined
       : clone(this.dependencies.catalog.hybrid.snapshot());
+    if (
+      this.folderSelectionOwner !== null
+      && incomingHybridCatalog?.active?.sourceImportSha256
+        !== this.folderSelectionOwner.sourceImportSha256
+    ) this.disposeFolderSelection(true, false);
     const verificationCapabilityAvailable = incomingHybridCatalog !== undefined
       && incomingHybridCatalog.status !== "unavailable";
     if (!verificationCapabilityAvailable) {
@@ -1684,6 +1878,26 @@ export class WorkbenchController {
         ? this.model.selectedCatalogId
         : null,
     };
+    const folderOwner = this.folderSelectionOwner;
+    if (folderOwner !== null && !folderOwner.closeRequested) {
+      try {
+        const state = clone(folderOwner.driver.snapshot());
+        if (state.phase !== "closed") {
+          this.model = {
+            ...this.model,
+            folderSelection: {
+              revision: this.nextFolderSelectionRevision(),
+              locale: this.model.locale,
+              state,
+              returnLabel: this.model.locale === "zh-CN" ? "云端核验" : "Cloud verification",
+              legacyProgressMode: this.folderSelectionLegacyProgressMode(state),
+            },
+          };
+        }
+      } catch {
+        this.disposeFolderSelection(true, false);
+      }
+    }
     this.emit();
   }
 
@@ -2535,6 +2749,8 @@ export class WorkbenchController {
       this.emit();
       if (result.kind === "unchanged") return;
 
+      this.disposeFolderSelection(true, false);
+
       // Activation is the one-use boundary. Revoke old scope in memory before
       // any fallible persistence/rebuild await so cleanup failure stays closed.
       this.installVerificationAuthority(null);
@@ -2553,6 +2769,635 @@ export class WorkbenchController {
       await hybrid.rebuildVerificationProjection();
       if (!this.disposed) await refreshCatalogProjection(this.dependencies.catalog);
     });
+  }
+
+  private currentFolderSelection(expectedRevision: number): FolderSelectionOwner | null {
+    const owner = this.folderSelectionOwner;
+    if (
+      this.disposed
+      || owner === null
+      || this.model.folderSelection?.revision !== expectedRevision
+    ) return null;
+    return owner;
+  }
+
+  private nextFolderSelectionRevision(): number {
+    this.folderSelectionRevision = this.folderSelectionRevision >= Number.MAX_SAFE_INTEGER
+      ? 1
+      : this.folderSelectionRevision + 1;
+    return this.folderSelectionRevision;
+  }
+
+  private legacyInputForSelection(
+    state: FolderSelectionRenderState["state"],
+  ): LegacyAdoptionFailureToken | null {
+    const active = this.dependencies.catalog.hybrid?.snapshot().active;
+    const effectiveRoot = state.draftSelection?.effectiveRoot;
+    if (
+      active === undefined
+      || active.legacyArtifactSetSha256 === null
+      || effectiveRoot === undefined
+    ) return null;
+    let normalizedRoot: string;
+    try {
+      normalizedRoot = this.validateCatalogScanRoot(effectiveRoot);
+    } catch {
+      return null;
+    }
+    const selectedEffectiveRootSha256 = this.dependencies.cloudVerificationRootHasher(
+      normalizedRoot,
+    );
+    if (selectedEffectiveRootSha256 === null) return null;
+    return {
+      selectedEffectiveRootSha256,
+      activeSourceImportSha256: active.sourceImportSha256,
+      legacyArtifactSetSha256: active.legacyArtifactSetSha256,
+    };
+  }
+
+  private folderSelectionLegacyProgressMode(
+    state: FolderSelectionRenderState["state"],
+  ): FolderSelectionRenderState["legacyProgressMode"] {
+    const adoption = this.dependencies.store.settings().legacyVerificationAdoption;
+    if (adoption.state === "invalid") return "requires-fresh";
+    if (adoption.state !== "pending") return "none";
+    const input = this.legacyInputForSelection(state);
+    return input !== null
+      && sameLegacyAdoptionFailureToken(this.legacyAdoptionFailureToken, input)
+      ? "requires-fresh"
+      : "will-preserve";
+  }
+
+  private publishFolderSelection(owner: FolderSelectionOwner): void {
+    if (
+      this.disposed
+      || this.folderSelectionOwner !== owner
+      || owner.closeRequested
+    ) return;
+    let state: FolderSelectionRenderState["state"];
+    try {
+      state = clone(owner.driver.snapshot());
+    } catch {
+      this.disposeFolderSelection(true, true);
+      return;
+    }
+    if (state.phase === "closed") {
+      if (!owner.usePending) this.disposeFolderSelection(true, true);
+      return;
+    }
+    this.model = { ...this.model, folderSelection: this.folderSelectionRenderState(state) };
+    this.emit();
+  }
+
+  private folderSelectionRenderState(
+    state: FolderSelectionRenderState["state"],
+    feedbackCode?: FolderSelectionRenderState["feedbackCode"],
+  ): FolderSelectionRenderState {
+    return {
+      revision: this.nextFolderSelectionRevision(),
+      locale: this.model.locale,
+      state,
+      returnLabel: this.model.locale === "zh-CN" ? "云端核验" : "Cloud verification",
+      legacyProgressMode: this.folderSelectionLegacyProgressMode(state),
+      ...(feedbackCode === undefined ? {} : { feedbackCode }),
+    };
+  }
+
+  private onFolderSelectionEmission(owner: FolderSelectionOwner): void {
+    if (
+      this.folderSelectionOwner !== owner
+      || this.disposed
+      || owner.closeRequested
+    ) return;
+    let phase: FolderSelectionRenderState["state"]["phase"];
+    try {
+      phase = owner.driver.snapshot().phase;
+    } catch {
+      this.disposeFolderSelection(true, true);
+      return;
+    }
+    if (phase === "closed" && owner.usePending) return;
+    if (phase === "closed") {
+      this.disposeFolderSelection(true, true);
+      return;
+    }
+    this.publishFolderSelection(owner);
+  }
+
+  private destroyFolderSelectionOwner(owner: FolderSelectionOwner): void {
+    if (owner.driverDisposed) return;
+    owner.driverDisposed = true;
+    const unsubscribe = owner.unsubscribe;
+    owner.unsubscribe = () => undefined;
+    try { unsubscribe(); } catch { /* best-effort listener detachment */ }
+    try { owner.driver.cancel(); } catch { /* driver lifecycle is fail-closed below */ }
+    try { owner.driver.dispose(); } catch { /* no shared runtime is cleared by disposal */ }
+  }
+
+  private removeFolderSelectionModel(): void {
+    const { folderSelection: _folderSelection, ...current } = this.model;
+    this.model = current;
+  }
+
+  private finalizeFolderSelectionOwner(
+    owner: FolderSelectionOwner,
+    clearFailureToken: boolean,
+    emit: boolean,
+  ): void {
+    if (this.folderSelectionOwner !== owner) return;
+    this.folderSelectionOwner = null;
+    if (clearFailureToken) this.legacyAdoptionFailureToken = null;
+    this.destroyFolderSelectionOwner(owner);
+    this.removeFolderSelectionModel();
+    if (emit && !this.disposed) this.emit();
+  }
+
+  private disposeFolderSelection(clearFailureToken: boolean, emit: boolean): void {
+    const owner = this.folderSelectionOwner;
+    if (clearFailureToken) this.legacyAdoptionFailureToken = null;
+    if (owner !== null && owner.commitStarted && owner.usePending) {
+      owner.closeRequested = true;
+      this.destroyFolderSelectionOwner(owner);
+      this.removeFolderSelectionModel();
+      if (emit && !this.disposed) this.emit();
+      return;
+    }
+    if (owner !== null) {
+      this.finalizeFolderSelectionOwner(owner, clearFailureToken, emit);
+      return;
+    }
+    this.removeFolderSelectionModel();
+    if (emit && !this.disposed) this.emit();
+  }
+
+  private rebuildFolderSelection(
+    previousOwner: FolderSelectionOwner,
+    selectedPath: string,
+    baseline: FolderBindingBaseline,
+    feedbackCode?: FolderSelectionRenderState["feedbackCode"],
+  ): void {
+    if (
+      this.disposed
+      || this.folderSelectionOwner !== previousOwner
+      || previousOwner.closeRequested
+    ) return;
+    const factory = this.dependencies.folderSelectionSessionFactory;
+    const active = this.dependencies.catalog.hybrid?.snapshot().active;
+    const purpose = clone(previousOwner.purpose);
+    if (
+      factory?.available !== true
+      || active === undefined
+      || active.sourceImportSha256 !== previousOwner.sourceImportSha256
+      || active.legacyArtifactSetSha256 !== baseline.legacyArtifactSetSha256
+      || folderSelectionPurposeKey(verificationPickerPurpose(active.groups))
+        !== folderSelectionPurposeKey(purpose)
+    ) {
+      this.legacyAdoptionFailureToken = null;
+      this.finalizeFolderSelectionOwner(previousOwner, false, true);
+      throw folderSelectionStale();
+    }
+    let owner: FolderSelectionOwner | null = null;
+    try {
+      const driver = factory.create({ purpose: clone(purpose), initialPath: selectedPath });
+      owner = {
+        nonce: Symbol("folder-selection"),
+        purpose,
+        driver,
+        sourceImportSha256: active.sourceImportSha256,
+        unsubscribe: () => undefined,
+        usePending: false,
+        commitStarted: false,
+        closeRequested: false,
+        driverDisposed: false,
+      };
+      owner.unsubscribe = driver.subscribe(() => this.onFolderSelectionEmission(owner!));
+      const state = clone(driver.snapshot());
+      if (state.phase === "closed") throw new Error("folder-selection-rebuild-closed");
+      const folderSelection = this.folderSelectionRenderState(state, feedbackCode);
+      this.folderSelectionOwner = owner;
+      this.destroyFolderSelectionOwner(previousOwner);
+      this.model = { ...this.model, folderSelection };
+      this.emit();
+    } catch (error) {
+      if (owner !== null) this.destroyFolderSelectionOwner(owner);
+      this.finalizeFolderSelectionOwner(previousOwner, false, true);
+      throw error;
+    }
+  }
+
+  private captureFolderBindingBaseline(owner: FolderSelectionOwner): FolderBindingBaseline {
+    const hybrid = this.dependencies.catalog.hybrid?.snapshot();
+    const active = hybrid?.active;
+    if (
+      active === undefined
+      || active.sourceImportSha256 !== owner.sourceImportSha256
+    ) throw folderSelectionStale();
+    return {
+      activeSourceImportSha256: active.sourceImportSha256,
+      legacyArtifactSetSha256: active.legacyArtifactSetSha256,
+      groupsKey: folderSelectionPurposeKey(verificationPickerPurpose(active.groups)),
+      settingsKey: cloudVerificationSettingsKey(this.dependencies.store.settings()),
+      batchKey: JSON.stringify(hybrid?.batch ?? null),
+    };
+  }
+
+  private assertFolderBindingBaseline(
+    owner: FolderSelectionOwner,
+    baseline: FolderBindingBaseline,
+    permitNonce: symbol,
+  ): void {
+    this.assertNoLiveCloudExecution();
+    const hybrid = this.dependencies.catalog.hybrid?.snapshot();
+    const active = hybrid?.active;
+    if (
+      this.disposed
+      || this.cloudAuthorityOperation?.nonce !== permitNonce
+      || this.folderSelectionOwner !== owner
+      || owner.nonce !== this.folderSelectionOwner.nonce
+      || active === undefined
+      || active.sourceImportSha256 !== baseline.activeSourceImportSha256
+      || active.legacyArtifactSetSha256 !== baseline.legacyArtifactSetSha256
+      || folderSelectionPurposeKey(verificationPickerPurpose(active.groups)) !== baseline.groupsKey
+      || cloudVerificationSettingsKey(this.dependencies.store.settings()) !== baseline.settingsKey
+      || JSON.stringify(hybrid?.batch ?? null) !== baseline.batchKey
+    ) throw folderSelectionStale();
+  }
+
+  private folderBindingSnapshotMatchesBaseline(
+    owner: FolderSelectionOwner,
+    baseline: FolderBindingBaseline,
+    permitNonce: symbol,
+    snapshot: HybridCatalogViewModel | undefined,
+  ): boolean {
+    if (snapshot === undefined) return false;
+    const active = snapshot.active;
+    return !this.disposed
+      && this.cloudAuthorityOperation?.nonce === permitNonce
+      && this.folderSelectionOwner === owner
+      && active !== undefined
+      && snapshot.executionActive !== true
+      && active.sourceImportSha256 === baseline.activeSourceImportSha256
+      && active.legacyArtifactSetSha256 === baseline.legacyArtifactSetSha256
+      && folderSelectionPurposeKey(verificationPickerPurpose(active.groups)) === baseline.groupsKey
+      && JSON.stringify(snapshot.batch ?? null) === baseline.batchKey;
+  }
+
+  private folderBindingProjectionMatches(
+    owner: FolderSelectionOwner,
+    baseline: FolderBindingBaseline,
+    permitNonce: symbol,
+    selection: CloudDirectorySelection,
+    replacement: CloudVerificationSettings,
+    scope: CloudVerificationScope,
+    expectedBatchId: string | null,
+  ): boolean {
+    const snapshot = this.dependencies.catalog.hybrid?.snapshot();
+    if (snapshot === undefined) return false;
+    const active = snapshot.active;
+    if (
+      this.disposed
+      || this.cloudAuthorityOperation?.nonce !== permitNonce
+      || this.folderSelectionOwner !== owner
+      || active === undefined
+      || snapshot.executionActive === true
+      || active.sourceImportSha256 !== baseline.activeSourceImportSha256
+      || active.legacyArtifactSetSha256 !== baseline.legacyArtifactSetSha256
+      || folderSelectionPurposeKey(verificationPickerPurpose(active.groups)) !== baseline.groupsKey
+      || !sameCloudVerificationSettings(
+        cloudVerificationSettingsFrom(this.dependencies.store.settings()),
+        replacement,
+      )
+    ) return false;
+    const availableGroupKeys = new Set(active.groups.map((group) => group.groupKey));
+    if (selection.kind === "category" && !availableGroupKeys.has(selection.groupKey)) {
+      return false;
+    }
+    const batch = snapshot.batch;
+    if ((batch?.batchId ?? null) !== expectedBatchId) return false;
+    if (batch === undefined) return true;
+    if (
+      replacement.verificationBatchTombstones.state !== "valid"
+      || replacement.verificationBatchTombstones.batchIds.includes(batch.batchId)
+      || !cloudVerificationScopesEqual(batch.verificationScope, scope)
+      || batch.selectedGroupCount !== batch.selectedGroupKeys.length
+      || new Set(batch.selectedGroupKeys).size !== batch.selectedGroupKeys.length
+      || batch.selectedGroupKeys.some((groupKey) => !availableGroupKeys.has(groupKey))
+    ) return false;
+    if (!batch.legacyPromotionRequired) return true;
+    const adoption = replacement.legacyVerificationAdoption;
+    return adoption.state === "adopted"
+      && adoption.verificationGeneration === scope.generation
+      && adoption.sourceImportSha256 === scope.sourceImportSha256
+      && adoption.cloudRootSha256 === scope.cloudRootSha256
+      && adoption.resumableBatch?.batchId === batch.batchId
+      && adoption.resumableBatch.sourceImportSha256 === scope.sourceImportSha256
+      && adoption.resumableBatch.cloudRootSha256 === scope.cloudRootSha256;
+  }
+
+  private async useFolderSelection(expectedRevision: number): Promise<void> {
+    const owner = this.currentFolderSelection(expectedRevision);
+    if (owner === null) return;
+    await this.withCloudAuthorityPermit("library-binding", async (permitNonce) => {
+      this.assertNoLiveCloudExecution();
+      if (this.folderSelectionOwner !== owner) throw folderSelectionStale();
+      const baseline = this.captureFolderBindingBaseline(owner);
+      owner.usePending = true;
+      let selection: CloudDirectorySelection | null = null;
+      try {
+        selection = await owner.driver.useSelection();
+        if (selection === null) return;
+        this.assertFolderBindingBaseline(owner, baseline, permitNonce);
+        await this.commitFolderSelection(owner, baseline, permitNonce, selection);
+      } catch (error) {
+        const stale = bindingCasConflict(error)
+          || (error instanceof Error && error.message === "folder-selection-stale");
+        let recovered = false;
+        if (
+          selection !== null
+          && this.folderSelectionOwner === owner
+          && !owner.closeRequested
+          && !this.disposed
+        ) {
+          try {
+            this.rebuildFolderSelection(
+              owner,
+              selection.selectedPath,
+              baseline,
+              stale ? undefined : "binding-failed",
+            );
+            recovered = true;
+          } catch { /* original binding failure remains authoritative */ }
+        }
+        if (
+          selection !== null
+          && !stale
+          && !recovered
+          && !owner.closeRequested
+          && !this.disposed
+          && this.model.folderSelection === undefined
+        ) {
+          this.model = {
+            ...this.model,
+            status: "ready",
+            statusMessage: "folder-selection-binding-failed",
+          };
+          this.emit();
+        }
+        if (bindingCasConflict(error)) throw folderSelectionStale();
+        throw error;
+      } finally {
+        if (this.folderSelectionOwner === owner) {
+          owner.usePending = false;
+          if (owner.closeRequested || this.disposed) {
+            this.finalizeFolderSelectionOwner(owner, false, false);
+          }
+        }
+      }
+    });
+  }
+
+  private async commitFolderSelection(
+    owner: FolderSelectionOwner,
+    baseline: FolderBindingBaseline,
+    permitNonce: symbol,
+    selection: CloudDirectorySelection,
+  ): Promise<void> {
+    const hybrid = this.dependencies.catalog.hybrid;
+    if (hybrid === undefined) throw new Error("catalog-unavailable");
+    const before = hybrid.snapshot();
+    const active = before.active;
+    if (active === undefined) throw folderSelectionStale();
+    const effectiveRoot = this.validateCatalogScanRoot(selection.effectiveRoot);
+    if (
+      selection.kind === "category"
+      && !active.groups.some((group) => group.groupKey === selection.groupKey)
+    ) throw folderSelectionStale();
+
+    const currentSettings = this.dependencies.store.settings();
+    const currentBindingRoot = currentSettings.boundCloudLibrary === null
+      ? null
+      : this.validateCatalogScanRoot(currentSettings.boundCloudLibrary.path);
+    const rootChanged = currentBindingRoot !== null && currentBindingRoot !== effectiveRoot;
+    const rotateGeneration = currentSettings.cloudVerificationGeneration === 0 || rootChanged;
+    const nextGeneration = rotateGeneration
+      ? checkedNextVerificationGeneration(currentSettings.cloudVerificationGeneration)
+      : currentSettings.cloudVerificationGeneration;
+    const proposedBinding = {
+      schemaVersion: 1 as const,
+      path: effectiveRoot,
+      sourceImportSha256: active.sourceImportSha256,
+      verificationGeneration: nextGeneration,
+    };
+    const proposedScope = deriveCloudVerificationScope(
+      proposedBinding,
+      this.dependencies.cloudVerificationRootHasher,
+    );
+    if (proposedScope === null) throw new RangeError("cloud-verification-root-unavailable");
+    const legacyInput: LegacyAdoptionFailureToken | null = active.legacyArtifactSetSha256 === null
+      ? null
+      : {
+          selectedEffectiveRootSha256: proposedScope.cloudRootSha256,
+          activeSourceImportSha256: active.sourceImportSha256,
+          legacyArtifactSetSha256: active.legacyArtifactSetSha256,
+        };
+    const forceFreshByInvalid = currentSettings.legacyVerificationAdoption.state === "invalid";
+    const forceFreshByToken = legacyInput !== null
+      && sameLegacyAdoptionFailureToken(this.legacyAdoptionFailureToken, legacyInput);
+    const forceFreshLegacy = forceFreshByInvalid || forceFreshByToken;
+    let preparedAdoption: LegacyVerificationAdoptionV1 | null = null;
+    if (
+      !forceFreshLegacy
+      && currentSettings.cloudVerificationGeneration === 0
+      && currentSettings.legacyVerificationAdoption.state === "pending"
+    ) {
+      try {
+        preparedAdoption = await hybrid.prepareLegacyVerificationAdoption(proposedScope);
+        this.assertFolderBindingBaseline(owner, baseline, permitNonce);
+        await hybrid.revalidatePreparedLegacyAdoption(preparedAdoption);
+        this.assertFolderBindingBaseline(owner, baseline, permitNonce);
+      } catch (error) {
+        this.assertFolderBindingBaseline(owner, baseline, permitNonce);
+        if (!deterministicLegacyAdoptionConflict(error)) throw error;
+        if (legacyInput === null) {
+          throw new RangeError("legacy-adoption-input-unavailable");
+        }
+        this.legacyAdoptionFailureToken = legacyInput;
+        this.rebuildFolderSelection(owner, selection.selectedPath, baseline);
+        return;
+      }
+    }
+
+    this.assertFolderBindingBaseline(owner, baseline, permitNonce);
+    const latest = hybrid.snapshot();
+    const latestActive = latest.active;
+    const latestLegacyInput: LegacyAdoptionFailureToken | null = latestActive?.legacyArtifactSetSha256 == null
+      ? null
+      : {
+          selectedEffectiveRootSha256: proposedScope.cloudRootSha256,
+          activeSourceImportSha256: latestActive.sourceImportSha256,
+          legacyArtifactSetSha256: latestActive.legacyArtifactSetSha256,
+        };
+    if (
+      forceFreshByToken
+      && !sameLegacyAdoptionFailureToken(this.legacyAdoptionFailureToken, latestLegacyInput)
+    ) {
+      this.legacyAdoptionFailureToken = null;
+      this.rebuildFolderSelection(owner, selection.selectedPath, baseline);
+      return;
+    }
+
+    const batch = latest.batch;
+    const currentBatchId = batch !== undefined && batch.status !== "complete"
+      ? batch.batchId
+      : null;
+    const adoptedBatchId = preparedAdoption?.state === "adopted"
+      ? preparedAdoption.resumableBatch?.batchId ?? null
+      : legacyAllowlistFor(
+          currentSettings.legacyVerificationAdoption,
+          proposedScope,
+        )?.resumableBatch?.batchId ?? null;
+    const repairingCurrentBatch = currentBatchId !== null
+      && deriveLibraryWorkflowState({
+        connection: this.dependencies.catalog.connection?.snapshot(),
+        hybrid: latest,
+        boundCloudLibrary: currentSettings.boundCloudLibrary,
+        cloudVerificationGeneration: currentSettings.cloudVerificationGeneration,
+        verificationBatchTombstones: currentSettings.verificationBatchTombstones,
+        legacyVerificationAdoption: currentSettings.legacyVerificationAdoption,
+        pendingCatalogTxt: this.pendingCatalogTxt,
+        cloudVerificationRootHasher: this.dependencies.cloudVerificationRootHasher,
+        capabilityAvailable: latest.status !== "unavailable",
+      }).kind === "repair-library";
+    const requiresBatchRepair = rootChanged
+      || forceFreshLegacy
+      || repairingCurrentBatch
+      || currentSettings.verificationBatchTombstones.state === "invalid";
+    const adoptedBatchExempt = !rootChanged
+      && !forceFreshLegacy
+      && !repairingCurrentBatch
+      && currentBatchId !== null
+      && currentBatchId === adoptedBatchId;
+    const currentWorkflowBatchId = requiresBatchRepair && !adoptedBatchExempt
+      ? currentBatchId
+      : null;
+    const expectedPostBatchId = adoptedBatchId ?? (
+      currentBindingRoot === effectiveRoot
+      && !forceFreshLegacy
+      && !repairingCurrentBatch
+      && currentSettings.verificationBatchTombstones.state === "valid"
+        ? latest.batch?.batchId ?? null
+        : null
+    );
+    const replacement: CloudVerificationSettings = {
+      boundCloudLibrary: proposedBinding,
+      cloudVerificationGeneration: nextGeneration,
+      legacyVerificationAdoption: forceFreshLegacy
+        ? { schemaVersion: 1, state: "ineligible" }
+        : preparedAdoption
+          ?? (currentSettings.legacyVerificationAdoption.state === "pending"
+            ? { schemaVersion: 1, state: "none" }
+            : clone(currentSettings.legacyVerificationAdoption)),
+      verificationBatchTombstones: repairVerificationBatchTombstones(
+        currentSettings.verificationBatchTombstones,
+        currentWorkflowBatchId,
+      ),
+    };
+    this.assertFolderBindingBaseline(owner, baseline, permitNonce);
+    owner.commitStarted = true;
+    await this.dependencies.store.updateCloudVerificationSettings(replacement, {
+      kind: "library-binding",
+      currentWorkflowBatchId,
+    });
+    this.legacyAdoptionFailureToken = null;
+
+    if (this.disposed) return;
+
+    const saved = this.dependencies.store.settings();
+    if (!sameCloudVerificationSettings(cloudVerificationSettingsFrom(saved), replacement)) {
+      this.installVerificationAuthority(scopedAuthorityForSettings(
+        saved,
+        this.dependencies.cloudVerificationRootHasher,
+      ));
+      throw folderSelectionStale();
+    }
+    const beforeProjectionMatches = this.folderBindingSnapshotMatchesBaseline(
+      owner,
+      baseline,
+      permitNonce,
+      hybrid.snapshot(),
+    );
+    const authority = scopedAuthorityForSettings(
+      saved,
+      this.dependencies.cloudVerificationRootHasher,
+    );
+    if (authority === null) throw folderSelectionStale();
+    try {
+      this.installVerificationAuthority(authority);
+      await hybrid.rebuildVerificationProjection();
+      if (this.disposed) return;
+      await refreshCatalogProjection(this.dependencies.catalog);
+      if (this.disposed) return;
+    } catch (error) {
+      if (this.disposed) return;
+      const durableSettings = this.dependencies.store.settings();
+      this.installVerificationAuthority(scopedAuthorityForSettings(
+        durableSettings,
+        this.dependencies.cloudVerificationRootHasher,
+      ));
+      throw error;
+    }
+
+    const durableSettings = this.dependencies.store.settings();
+    if (!sameCloudVerificationSettings(
+      cloudVerificationSettingsFrom(durableSettings),
+      replacement,
+    )) {
+      const durableAuthority = scopedAuthorityForSettings(
+        durableSettings,
+        this.dependencies.cloudVerificationRootHasher,
+      );
+      this.installVerificationAuthority(durableAuthority);
+      await hybrid.rebuildVerificationProjection();
+      throw folderSelectionStale();
+    }
+    if (
+      !beforeProjectionMatches
+      || !this.folderBindingProjectionMatches(
+        owner,
+        baseline,
+        permitNonce,
+        selection,
+        replacement,
+        proposedScope,
+        expectedPostBatchId,
+      )
+    ) throw folderSelectionStale();
+    if (owner.closeRequested) return;
+    const afterActive = hybrid.snapshot().active;
+    if (afterActive === undefined) throw folderSelectionStale();
+    const availableGroupKeys = new Set(afterActive.groups.map((group) => group.groupKey));
+    const selectedVerificationGroupKeys = selection.kind === "category"
+      ? [selection.groupKey]
+      : this.model.selectedVerificationGroupKeys.filter((groupKey) => (
+          availableGroupKeys.has(groupKey)
+        ));
+    this.finalizeFolderSelectionOwner(owner, false, false);
+    const {
+      verificationActionMessageCode: _verificationActionMessageCode,
+      statusMessage: _statusMessage,
+      ...currentModel
+    } = this.model;
+    this.model = {
+      ...currentModel,
+      status: "ready",
+      ...(preparedAdoption?.state === "adopted"
+        ? { statusMessage: "folder-selection-preserved" }
+        : {}),
+      verificationRoot: effectiveRoot,
+      verificationDirectorySelection: clone(selection),
+      selectedVerificationGroupKeys,
+    };
+    this.emit();
   }
 
   private async withCloudAuthorityPermit<T>(
@@ -2627,6 +3472,7 @@ export class WorkbenchController {
     });
     if (this.disposed) return nextGeneration;
 
+    this.disposeFolderSelection(true, false);
     this.pendingCatalogTxt = null;
     this.catalogAuthorizationAttempt = null;
     this.lockedVerificationRoot = null;

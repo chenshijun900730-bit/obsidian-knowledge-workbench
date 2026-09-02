@@ -42,4 +42,48 @@ describe("workbench directory picker i18n", () => {
       expect(placeholders(zhValue)).toEqual(placeholders(enValue));
     }
   });
+
+  it("provides paired inline folder-selection and legacy-progress messages", () => {
+    const zh = createDirectoryPickerI18n("zh-CN");
+    const en = createDirectoryPickerI18n("en");
+    const samples = [
+      ["folderSelection.title", "选择书库文件夹", "Choose a library folder"],
+      ["folderSelection.browseOther", "浏览其他文件夹", "Browse other folders"],
+      ["folderSelection.advanced", "更多查找方式", "More ways to find folders"],
+      ["folderSelection.willPreserve", "将尝试保留已有核验进度。", "Existing verification progress will be preserved when possible."],
+      ["folderSelection.preserved", "已保留已有核验进度。", "Existing verification progress was preserved."],
+      ["folderSelection.requiresFresh", "此目录需要重新检查。", "This folder requires a fresh verification."],
+      ["folderSelection.useFresh", "使用此文件夹并重新检查", "Use this folder and verify again"],
+      ["folderSelection.bindingFailed", "未能使用这个文件夹，请重试。", "Could not use this folder. Please try again."],
+      ["folderSelection.selectionInvalid", "这个选择已失效，请重新选择。", "This selection is no longer available. Choose it again."],
+      ["folderSelection.queryRequired", "请先输入文件夹名称。", "Enter a folder name first."],
+    ] as const;
+    for (const [key, zhText, enText] of samples) {
+      expect(zh.t(key)).toBe(zhText);
+      expect(en.t(key)).toBe(enText);
+    }
+  });
+
+  it("provides paired fixed lookup summaries including elapsed time", () => {
+    const zh = createDirectoryPickerI18n("zh-CN");
+    const en = createDirectoryPickerI18n("en");
+    const values = {
+      reason: "limit",
+      directories: 12,
+      matches: 3,
+      requests: 4,
+      milliseconds: 500,
+    };
+    for (const key of [
+      "folderSelection.lookup.complete",
+      "folderSelection.lookup.partial",
+      "folderSelection.lookup.canceled",
+    ] as const) {
+      const zhValue = zh.t(key, values);
+      const enValue = en.t(key, values);
+      expect(zhValue).toContain("500");
+      expect(enValue).toContain("500");
+      expect(placeholders(zhValue)).toEqual(placeholders(enValue));
+    }
+  });
 });
