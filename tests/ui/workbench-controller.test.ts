@@ -56,6 +56,8 @@ class TestFolderSelectionFactory implements FolderSelectionSessionFactoryPort {
     initialPath: string | null;
   }>> = [];
   readonly sessions: FolderSelectionSessionDriver[] = [];
+  readonly cancelCalls: number[] = [];
+  readonly disposeCalls: number[] = [];
   readonly rememberCalls: string[] = [];
   beforeRemember: (() => Promise<void>) | null = null;
   rememberFailure: Error | null = null;
@@ -86,17 +88,30 @@ class TestFolderSelectionFactory implements FolderSelectionSessionFactoryPort {
       ...structuredClone(input),
       candidates: candidateRuntime,
     });
-    const exposed = this.failSubscribeAt === createOrdinal
-      ? new Proxy(session, {
-          get(target, property) {
-            if (property === "subscribe") {
-              return () => { throw new Error("folder-selection-subscribe-failed"); };
-            }
-            const value = Reflect.get(target, property, target) as unknown;
-            return typeof value === "function" ? value.bind(target) as unknown : value;
-          },
-        })
-      : session;
+    const sessionIndex = this.sessions.length;
+    this.cancelCalls.push(0);
+    this.disposeCalls.push(0);
+    const exposed = new Proxy(session, {
+      get: (target, property) => {
+        if (property === "subscribe" && this.failSubscribeAt === createOrdinal) {
+          return () => { throw new Error("folder-selection-subscribe-failed"); };
+        }
+        if (property === "cancel") {
+          return () => {
+            this.cancelCalls[sessionIndex] = (this.cancelCalls[sessionIndex] ?? 0) + 1;
+            target.cancel();
+          };
+        }
+        if (property === "dispose") {
+          return () => {
+            this.disposeCalls[sessionIndex] = (this.disposeCalls[sessionIndex] ?? 0) + 1;
+            target.dispose();
+          };
+        }
+        const value = Reflect.get(target, property, target) as unknown;
+        return typeof value === "function" ? value.bind(target) as unknown : value;
+      },
+    });
     this.sessions.push(exposed);
     return exposed;
   }
@@ -1461,7 +1476,7 @@ describe("WorkbenchController cloud catalog filters", () => {
 describe("WorkbenchController locale", () => {
   it("persists English, emits once, and retains the current workbench state", async () => {
     const fixture = controllerFixture();
-    fixture.controller.selectTab("cloud-catalog");
+    fixture.controller.selectRoute({ tab: "more", page: "history" });
     fixture.controller.searchCatalog("climate");
     await fixture.controller.selectCenter({ kind: "document", id: "a" });
     const before = fixture.controller.snapshot();
@@ -1474,7 +1489,7 @@ describe("WorkbenchController locale", () => {
     expect(fixture.controller.snapshot().locale).toBe("en");
     expect(emits).toBe(1);
     expect(fixture.controller.snapshot().catalog.query).toBe(before.catalog.query);
-    expect(fixture.controller.snapshot().activeTab).toBe(before.activeTab);
+    expect(fixture.controller.snapshot().route).toEqual(before.route);
     expect(fixture.controller.snapshot().map.selected).toEqual(before.map.selected);
 
     unsubscribe();
@@ -1555,6 +1570,70 @@ describe("WorkbenchController inline folder selection binding", () => {
     committedPageCount: 0,
     completedDirectoryCount: 0,
     pendingDirectoryCount: 1,
+  });
+
+  it("defaults to the library and keeps route changes local and offline", () => {
+    const connection = new FakeCloudCatalogConnectionRuntime({ status: "authorized" });
+    const hybrid = activeHybrid();
+    const catalog = new FakeCloudCatalogRuntime({}, connection, hybrid);
+    const fixture = controllerFixture({ catalog });
+    let emits = 0;
+    const unsubscribe = fixture.controller.subscribe(() => { emits += 1; });
+
+    expect(fixture.controller.snapshot().route).toEqual({ tab: "library" });
+    fixture.controller.selectRoute({ tab: "library" });
+    fixture.controller.selectRoute({ tab: "task", page: "category-selection" });
+    fixture.controller.selectRoute({ tab: "more", page: "connection" });
+    fixture.controller.selectTab("library");
+
+    expect(fixture.controller.snapshot().route).toEqual({ tab: "library" });
+    expect(emits).toBe(3);
+    expect(fixture.store.saveSettingsCalls).toEqual([]);
+    expect(fixture.store.cloudVerificationSettingsCalls).toEqual([]);
+    expect(catalog.initializeCalls).toBe(0);
+    expect(catalog.queries).toEqual([]);
+    expect(catalog.folderPrefixes).toEqual([]);
+    expect(catalog.openBaiduCalls).toBe(0);
+    expect(connection.savedCredentials).toEqual([]);
+    expect(connection.beginAuthorizationCalls).toBe(0);
+    expect(connection.submittedAuthorizationCodes).toEqual([]);
+    expect(connection.startScanCalls).toEqual([]);
+    expect(hybrid.previewPaths).toEqual([]);
+    expect(hybrid.importPaths).toEqual([]);
+    expect(hybrid.startInputs).toEqual([]);
+    expect(hybrid.resumeInputs).toEqual([]);
+
+    unsubscribe();
+    fixture.controller.dispose();
+  });
+
+  it("disposes the inline folder session exactly once when its route is left", () => {
+    const hybrid = activeHybrid();
+    const factory = new TestFolderSelectionFactory([folderCandidate("/Synthetic")]);
+    const fixture = controllerFixture({
+      catalog: new FakeCloudCatalogRuntime({}, undefined, hybrid),
+      folderSelectionSessionFactory: factory,
+    });
+
+    fixture.controller.openVerificationFolderSelection();
+    expect(fixture.controller.snapshot().route).toEqual({
+      tab: "task",
+      page: "folder-selection",
+    });
+
+    fixture.controller.selectRoute({ tab: "more", page: "history" });
+    expect(fixture.controller.snapshot().route).toEqual({ tab: "more", page: "history" });
+    expect(fixture.controller.snapshot().folderSelection).toBeUndefined();
+    expect(factory.cancelCalls).toEqual([1]);
+    expect(factory.disposeCalls).toEqual([1]);
+
+    fixture.controller.selectRoute({ tab: "library" });
+    fixture.controller.closeFolderSelection();
+    expect(factory.cancelCalls).toEqual([1]);
+    expect(factory.disposeCalls).toEqual([1]);
+    fixture.controller.dispose();
+    expect(factory.cancelCalls).toEqual([1]);
+    expect(factory.disposeCalls).toEqual([1]);
   });
 
   it("cleans up a failed initial session subscription before retry", () => {

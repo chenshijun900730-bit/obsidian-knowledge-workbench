@@ -1,19 +1,13 @@
 import type { CloudCatalogConnectionViewModel } from "../catalog/cloud-catalog-runtime";
 import type { WorkbenchI18n, WorkbenchLocale } from "../i18n/workbench-i18n";
+import type { WorkbenchTab } from "./workbench-route";
 
-export type WorkbenchTab =
-  | "workbench"
-  | "cloud-catalog"
-  | "verification"
-  | "history"
-  | "settings";
+export type { WorkbenchTab } from "./workbench-route";
 
 const NAVIGATION = [
-  { page: "workbench", key: "nav.start", icon: "⌂" },
-  { page: "cloud-catalog", key: "nav.catalog", icon: "▤" },
-  { page: "verification", key: "nav.verification", icon: "✓" },
-  { page: "history", key: "nav.history", icon: "↻" },
-  { page: "settings", key: "nav.settings", icon: "⚙" },
+  { page: "library", key: "nav.library", icon: "⌕" },
+  { page: "task", key: "nav.task", icon: "✓" },
+  { page: "more", key: "nav.more", icon: "•••" },
 ] as const;
 
 export interface WorkbenchShellOptions {
@@ -61,9 +55,11 @@ export function renderWorkbenchShell(root: HTMLElement, options: WorkbenchShellO
     button.dataset.workbenchIcon = destination.icon;
     button.dataset.focusKey = `page-${destination.page}`;
     if (destination.page === options.activePage) button.setAttribute("aria-current", "page");
+    const navigationLabel = options.i18n.t(destination.key);
+    button.setAttribute("aria-label", navigationLabel);
     const label = doc.createElement("span");
     label.className = "knowledge-workbench__nav-label";
-    label.textContent = options.i18n.t(destination.key);
+    label.textContent = navigationLabel;
     button.append(label);
     button.addEventListener("click", () => options.onSelectPage(destination.page));
     sidebar.append(button);

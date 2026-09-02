@@ -28,8 +28,12 @@ import {
   type WorkbenchLocale,
   type WorkbenchMessageKey,
 } from "../i18n/workbench-i18n";
-import { renderWorkbenchShell, type WorkbenchTab } from "./workbench-shell";
+import { renderWorkbenchShell } from "./workbench-shell";
 import { renderStartPage, type StartSection } from "./start-page";
+import {
+  routeForTab,
+  type WorkbenchRoute,
+} from "./workbench-route";
 import type { SettingsSectionsSurface } from "./settings-sections";
 import {
   renderVerificationPage,
@@ -51,7 +55,7 @@ import type {
   FolderSelectionRenderState,
 } from "./folder-selection-host";
 
-export type { WorkbenchTab } from "./workbench-shell";
+export type { WorkbenchRoute, WorkbenchTab } from "./workbench-route";
 export type { StartSection } from "./start-page";
 export type ProgressStatus = "idle" | "running" | "canceled" | "error" | "complete";
 type HostActionMessageKey = Extract<WorkbenchMessageKey, `host.action.${string}`>;
@@ -66,7 +70,7 @@ export interface WorkbenchViewModel {
   readonly locale: WorkbenchLocale;
   readonly status: "ready" | "canceled" | "error";
   readonly statusMessage?: string;
-  readonly activeTab: WorkbenchTab;
+  readonly route: WorkbenchRoute;
   readonly startSection: StartSection;
   readonly catalog: CloudCatalogViewModel;
   readonly catalogConnection?: CloudCatalogConnectionViewModel;
@@ -96,7 +100,7 @@ export interface WorkbenchViewModel {
   readonly aiSuggestion?: Readonly<{ action: AiAction; text: string }>;
 }
 export interface WorkbenchActions {
-  readonly onSelectTab: (tab: WorkbenchTab) => void;
+  readonly onSelectRoute: (route: WorkbenchRoute) => void;
   readonly onSelectStartSection: (section: StartSection) => void;
   readonly onSetLocale?: (locale: WorkbenchLocale) => void | Promise<void>;
   readonly onSelectTodayFilter: (filter: TodayFilter) => void;
@@ -190,6 +194,7 @@ const STATUS_MESSAGE_KEYS: Readonly<Record<string, WorkbenchMessageKey>> = {
 
 const verificationPageSurfaces = new WeakMap<HTMLElement, VerificationPageSurface>();
 const folderSelectionPageSurfaces = new WeakMap<HTMLElement, DisposableSurface>();
+const settingsPageSurfaces = new WeakMap<HTMLElement, SettingsSectionsSurface>();
 
 const verificationPickerPurpose = (
   model: WorkbenchViewModel,
@@ -207,6 +212,17 @@ const verificationPickerPurpose = (
 const disposeVerificationPage = (root: HTMLElement): void => {
   verificationPageSurfaces.get(root)?.dispose();
   verificationPageSurfaces.delete(root);
+};
+
+const isSettingsRoute = (route: WorkbenchRoute): boolean => (
+  route.tab === "more"
+  && route.page !== "history"
+  && route.page !== "knowledge-tools"
+);
+
+const disposeSettingsPage = (root: HTMLElement): void => {
+  settingsPageSurfaces.get(root)?.dispose();
+  settingsPageSurfaces.delete(root);
 };
 
 const localizedStatusMessage = (
@@ -296,6 +312,13 @@ export function renderWorkbench(
   const verificationDirectoryAdvancedOpen = root.querySelector<HTMLDetailsElement>(
     "details[data-cloud-directory-advanced]",
   )?.open ?? false;
+  const renderedSettingsSurface = settingsPageSurfaces.get(root);
+  if (
+    renderedSettingsSurface !== undefined
+    && (!isSettingsRoute(model.route) || renderedSettingsSurface !== settingsSurface)
+  ) {
+    disposeSettingsPage(root);
+  }
   disposeVerificationPage(root);
   folderSelectionPageSurfaces.get(root)?.dispose();
   folderSelectionPageSurfaces.delete(root);
@@ -311,12 +334,12 @@ export function renderWorkbench(
     onSuggestLabels: undefined,
   } : actions;
   const shell = renderWorkbenchShell(root, {
-    activePage: model.activeTab,
+    activePage: model.route.tab,
     i18n,
     connectionStatus: model.catalog.status === "unavailable"
       ? "unavailable"
       : model.catalogConnection?.status ?? "unavailable",
-    onSelectPage: actions.onSelectTab,
+    onSelectPage: (tab) => actions.onSelectRoute(routeForTab(tab)),
     onSetLocale: (locale) => { void actions.onSetLocale?.(locale); },
   });
   shell.status.textContent = statusText(model, i18n);
@@ -332,10 +355,16 @@ export function renderWorkbench(
     shell.status.before(banner);
   }
   const panel = shell.panel;
-  if (model.activeTab !== "settings") settingsSurface?.dispose();
-  if (model.activeTab === "workbench") {
-    renderStartPage(panel, { model, actions: surfaceActions, policy });
-  } else if (model.activeTab === "verification") {
+  if (model.route.tab === "library") {
+    renderCloudCatalogTab(panel, model.catalog, surfaceActions, {
+      i18n: createWorkbenchI18n(model.locale),
+      selectedCatalogId: model.selectedCatalogId,
+      filtersExpanded: model.catalogFiltersExpanded,
+    });
+  } else if (
+    model.route.tab === "task"
+    && model.route.page === "folder-selection"
+  ) {
     if (
       !readOnlyAcceptance
       && model.folderSelection !== undefined
@@ -349,6 +378,31 @@ export function renderWorkbench(
       ));
     } else {
       verificationPageSurfaces.set(root, renderVerificationPage(panel, {
+        i18n,
+        rootPath: model.verificationRoot,
+        directorySelection: model.verificationDirectorySelection,
+        rootLocked: model.verificationRootLocked,
+        actionMessageCode: model.verificationActionMessageCode,
+        runDetailsOpen: verificationRunDetailsOpen,
+        selectedGroupKeys: model.selectedVerificationGroupKeys,
+        connection: model.catalogConnection,
+        hybrid: model.hybridCatalog,
+        actions: {
+          onRootChange: surfaceActions.onSetVerificationRoot,
+          onToggleGroup: surfaceActions.onToggleVerificationGroup,
+          onStart: surfaceActions.onStartSelectedVerification,
+          onResume: surfaceActions.onResumeSelectedVerification,
+          onCancel: surfaceActions.onCancelSelectedVerification,
+          onDirectorySelection: surfaceActions.onApplyVerificationDirectorySelection
+            ?? (() => undefined),
+          ...(surfaceActions.onBrowseVerificationRoot === undefined ? {} : {
+            onBrowseRoot: surfaceActions.onBrowseVerificationRoot,
+          }),
+        },
+      }));
+    }
+  } else if (model.route.tab === "task") {
+    verificationPageSurfaces.set(root, renderVerificationPage(panel, {
       i18n,
       rootPath: model.verificationRoot,
       directorySelection: model.verificationDirectorySelection,
@@ -370,23 +424,19 @@ export function renderWorkbench(
           onBrowseRoot: surfaceActions.onBrowseVerificationRoot,
         }),
       },
-      }));
-    }
-  } else if (model.activeTab === "history") {
+    }));
+  } else if (model.route.page === "history") {
     renderHistory(panel, model.history ?? { entries: [] }, {
       onUndo: surfaceActions.onUndoHistory ?? (() => undefined),
       onViewRecovery: surfaceActions.onViewRecovery ?? (() => undefined),
       onClear: surfaceActions.onClearHistory ?? (() => undefined),
       onExport: surfaceActions.onExportHistory ?? (() => undefined),
     }, policy, i18n);
-  } else if (model.activeTab === "cloud-catalog") {
-    renderCloudCatalogTab(panel, model.catalog, surfaceActions, {
-      i18n: createWorkbenchI18n(model.locale),
-      selectedCatalogId: model.selectedCatalogId,
-      filtersExpanded: model.catalogFiltersExpanded,
-    });
+  } else if (model.route.page === "knowledge-tools") {
+    renderStartPage(panel, { model, actions: surfaceActions, policy });
   } else if (settingsSurface !== undefined) {
     settingsSurface.render(panel, model.locale);
+    settingsPageSurfaces.set(root, settingsSurface);
   } else {
     const placeholder = doc.createElement("p");
     placeholder.className = "knowledge-workbench__placeholder";
@@ -420,7 +470,7 @@ export function renderWorkbench(
 export interface WorkbenchViewController {
   snapshot(): WorkbenchViewModel;
   subscribe(listener: () => void): () => void;
-  selectTab(tab: WorkbenchTab): void;
+  selectRoute(route: WorkbenchRoute): void;
   selectStartSection(section: StartSection): void;
   setTodayFilter(filter: TodayFilter): void;
   setLocale(locale: WorkbenchLocale): Promise<void>;
@@ -508,7 +558,7 @@ export function createWorkbenchViewClass(
     async onClose(): Promise<void> {
       this.unsubscribe?.();
       this.unsubscribe = null;
-      this.settingsSurface?.dispose();
+      disposeSettingsPage(this.contentEl);
       disposeVerificationPage(this.contentEl);
       folderSelectionPageSurfaces.get(this.contentEl)?.dispose();
       folderSelectionPageSurfaces.delete(this.contentEl);
@@ -539,7 +589,7 @@ export function createWorkbenchViewClass(
         : undefined;
       const snapshot = this.controller.snapshot();
       renderWorkbench(this.contentEl, snapshot, {
-        onSelectTab: (tab) => this.controller.selectTab(tab),
+        onSelectRoute: (route) => this.controller.selectRoute(route),
         onSelectStartSection: (section) => this.controller.selectStartSection(section),
         onSetLocale: (locale) => this.runAction("host.action.languageFailed", () => this.controller.setLocale(locale)),
         onSelectTodayFilter: (filter) => this.controller.setTodayFilter(filter),

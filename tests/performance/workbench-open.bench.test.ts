@@ -81,7 +81,7 @@ it("keeps a 68,959-entry catalog and one 20,000-folder browser surface allocatio
     items: catalogStore.slice(0, 50),
   });
   const fixture = controllerFixture({ activeIndex: true, records, catalog });
-  fixture.controller.selectTab("cloud-catalog");
+  fixture.controller.selectRoute({ tab: "library" });
   class ItemViewSurface {
     readonly contentEl = document.createElementNS(
       "http://www.w3.org/1999/xhtml",

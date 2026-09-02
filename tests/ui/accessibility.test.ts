@@ -31,7 +31,8 @@ describe("workbench accessibility contracts", () => {
   it("keeps navigation controls named and names every native control", () => {
     const root = renderRoot();
     const pages = Array.from(root.querySelectorAll<HTMLButtonElement>("[data-workbench-page]"));
-    expect(pages.map((page) => page.tabIndex)).toEqual([0, 0, 0, 0, 0]);
+    expect(pages.map((page) => page.tabIndex)).toEqual([0, 0, 0]);
+    expect(pages.map((page) => page.getAttribute("aria-label"))).toEqual(["文库", "任务", "更多"]);
     expect(root.querySelector<HTMLSelectElement>("[data-workbench-locale]")?.getAttribute("aria-label")).toBeTruthy();
     for (const control of Array.from(root.querySelectorAll<HTMLElement>("button, input, select, textarea"))) {
       const name = control.getAttribute("aria-label")

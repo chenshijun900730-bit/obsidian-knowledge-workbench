@@ -18,6 +18,13 @@ describe("workbench i18n", () => {
   it("formats translated navigation and counts", () => {
     const zh = createWorkbenchI18n("zh-CN");
     const en = createWorkbenchI18n("en");
+    expect([
+      zh.t("nav.library"), zh.t("nav.task"), zh.t("nav.more"),
+    ]).toEqual(["文库", "任务", "更多"]);
+    expect([
+      en.t("nav.library"), en.t("nav.task"), en.t("nav.more"),
+    ]).toEqual(["Library", "Task", "More"]);
+    // Keep legacy navigation keys until the final cleanup proves that no callers remain.
     expect(zh.t("nav.catalog")).toBe("我的目录");
     expect(en.t("nav.catalog")).toBe("My catalog");
     expect(zh.t("catalog.pdfCount", { count: zh.number(68_959) }))

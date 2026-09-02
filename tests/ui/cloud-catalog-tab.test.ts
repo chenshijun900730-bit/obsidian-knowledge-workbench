@@ -374,14 +374,14 @@ describe("Cloud Catalog tab", () => {
     const base = populatedWorkbenchModel();
     const model = {
       ...base,
-      activeTab: "cloud-catalog" as const,
+      route: { tab: "library" } as const,
       catalog: readyCatalog({ query: "统计" }),
     };
     renderWorkbench(root, model, noOpWorkbenchActions(actions));
 
-    expect(root.querySelector('[data-workbench-page="cloud-catalog"]')?.textContent).toBe("我的目录");
-    expect(root.querySelectorAll('[data-workbench-page]')).toHaveLength(5);
-    const destination = root.querySelector<HTMLElement>('[data-workbench-page="cloud-catalog"]')!;
+    expect(root.querySelector('[data-workbench-page="library"]')?.textContent).toBe("文库");
+    expect(root.querySelectorAll('[data-workbench-page]')).toHaveLength(3);
+    const destination = root.querySelector<HTMLElement>('[data-workbench-page="library"]')!;
     expect(root.querySelector("main")?.getAttribute("aria-labelledby")).toBe(destination.id);
     const search = root.querySelector<HTMLInputElement>('[data-catalog-search="true"]')!;
     search.focus();
@@ -402,7 +402,7 @@ describe("Cloud Catalog tab", () => {
     const base = populatedWorkbenchModel();
     const model = {
       ...base,
-      activeTab: "cloud-catalog" as const,
+      route: { tab: "library" } as const,
       catalog: readyCatalog({
         source: "unified",
         verificationCounts: { unverified: 2, verified: 1, difference: 1, cloudMissing: 0 },

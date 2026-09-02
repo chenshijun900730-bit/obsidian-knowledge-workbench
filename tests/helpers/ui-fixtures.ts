@@ -158,7 +158,7 @@ export function populatedWorkbenchModel(): WorkbenchViewModel {
   return {
     locale: "zh-CN",
     status: "ready",
-    activeTab: "workbench",
+    route: { tab: "library" },
     startSection: "overview",
     catalog: {
       status: "no-snapshot",
@@ -247,7 +247,7 @@ export function populatedWorkbenchModel(): WorkbenchViewModel {
 
 export function noOpWorkbenchActions(overrides: Partial<WorkbenchActions> = {}): WorkbenchActions {
   return {
-    onSelectTab: () => undefined,
+    onSelectRoute: () => undefined,
     onSelectStartSection: () => undefined,
     onSelectTodayFilter: () => undefined,
     onSelectMapFilter: () => undefined,

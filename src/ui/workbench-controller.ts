@@ -25,7 +25,14 @@ import type { UndoService } from "../transactions/undo-service";
 import type { ChangePreviewPresenter } from "./change-preview-modal";
 import { exportJournalJson, type HistoryConfirmationPresenter } from "./history-tab";
 import type { TodayFilter } from "./today-pane";
-import type { StartSection, WorkbenchProgress, WorkbenchTab, WorkbenchViewModel } from "./workbench-view";
+import type { StartSection, WorkbenchProgress, WorkbenchViewModel } from "./workbench-view";
+import {
+  defaultWorkbenchRoute,
+  routeForTab,
+  sameWorkbenchRoute,
+  type WorkbenchRoute,
+  type WorkbenchTab,
+} from "./workbench-route";
 import type { AiPayloadPreviewPresenter } from "./ai-payload-preview-modal";
 import { effectiveSettings, type RuntimeSafetyPolicy } from "../runtime/safety-policy";
 import { catalogPageContains, type CloudCatalogRuntime } from "../catalog/cloud-catalog-runtime";
@@ -531,7 +538,7 @@ export class WorkbenchController {
     this.model = {
       locale: effectiveSettings(dependencies.policy, dependencies.store.settings()).locale,
       status: "ready",
-      activeTab: "workbench",
+      route: defaultWorkbenchRoute(),
       startSection: "overview",
       catalog: dependencies.catalog.snapshot(),
       ...(initialCatalogConnection === undefined ? {} : {
@@ -643,10 +650,17 @@ export class WorkbenchController {
     if (!this.disposed) await this.dependencies.catalog.initialize();
   }
 
-  selectTab(tab: WorkbenchTab): void {
-    if (this.disposed || tab === this.model.activeTab) return;
-    this.model = { ...this.model, activeTab: tab };
+  selectRoute(route: WorkbenchRoute): void {
+    if (this.disposed || sameWorkbenchRoute(route, this.model.route)) return;
+    const leavingFolderSelection = this.model.route.tab === "task"
+      && this.model.route.page === "folder-selection";
+    if (leavingFolderSelection) this.disposeFolderSelection(true, false);
+    this.model = { ...this.model, route: clone(route) };
     this.emit();
+  }
+
+  selectTab(tab: WorkbenchTab): void {
+    this.selectRoute(routeForTab(tab));
   }
 
   selectStartSection(section: StartSection): void {
@@ -722,7 +736,11 @@ export class WorkbenchController {
       if (state.phase === "closed") throw new Error("folder-selection-open-closed");
       const folderSelection = this.folderSelectionRenderState(state);
       this.folderSelectionOwner = owner;
-      this.model = { ...this.model, folderSelection };
+      this.model = {
+        ...this.model,
+        route: { tab: "task", page: "folder-selection" },
+        folderSelection,
+      };
       this.emit();
     } catch (error) {
       if (owner !== null) this.destroyFolderSelectionOwner(owner);
@@ -733,8 +751,14 @@ export class WorkbenchController {
   }
 
   closeFolderSelection(): void {
-    if (this.folderSelectionOwner === null) return;
-    this.disposeFolderSelection(true, true);
+    const onFolderSelectionRoute = this.model.route.tab === "task"
+      && this.model.route.page === "folder-selection";
+    if (this.folderSelectionOwner === null && !onFolderSelectionRoute) return;
+    this.disposeFolderSelection(true, false);
+    if (!this.disposed && onFolderSelectionRoute) {
+      this.model = { ...this.model, route: { tab: "task", page: "overview" } };
+    }
+    if (!this.disposed) this.emit();
   }
 
   folderSelectionActions(expectedRevision: number): FolderSelectionHostActions {
@@ -2896,7 +2920,9 @@ export class WorkbenchController {
 
   private removeFolderSelectionModel(): void {
     const { folderSelection: _folderSelection, ...current } = this.model;
-    this.model = current;
+    this.model = current.route.tab === "task" && current.route.page === "folder-selection"
+      ? { ...current, route: { tab: "task", page: "overview" } }
+      : current;
   }
 
   private finalizeFolderSelectionOwner(

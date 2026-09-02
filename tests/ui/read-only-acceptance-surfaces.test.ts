@@ -20,7 +20,7 @@ import {
 import {
   renderWorkbench,
   type WorkbenchActions,
-  type WorkbenchTab,
+  type WorkbenchRoute,
   type WorkbenchViewModel,
 } from "../../src/ui/workbench-view";
 import { TEST_NEEDS_TXT_WORKFLOW } from "../helpers/ui-fixtures";
@@ -60,10 +60,10 @@ const previewOperation = {
   targetPath: "Generated/B.md",
 };
 
-const modelFor = (activeTab: WorkbenchTab): WorkbenchViewModel => ({
+const modelFor = (route: WorkbenchRoute): WorkbenchViewModel => ({
   locale: "zh-CN",
   status: "ready",
-  activeTab,
+  route,
   startSection: "overview",
   catalog: {
     status: "unavailable",
@@ -142,7 +142,7 @@ const modelFor = (activeTab: WorkbenchTab): WorkbenchViewModel => ({
 const workbenchActions = (
   overrides: Partial<WorkbenchActions> = {},
 ): WorkbenchActions => ({
-  onSelectTab: vi.fn(),
+  onSelectRoute: vi.fn(),
   onSelectStartSection: vi.fn(),
   onSelectTodayFilter: vi.fn(),
   onSelectMapFilter: vi.fn(),
@@ -286,7 +286,10 @@ describe("read-only acceptance surfaces", () => {
     settingsNotice,
   ) => {
     const root = testDiv();
-    renderWorkbench(root, { ...modelFor("settings"), locale }, workbenchActions(), READ_ONLY_ACCEPTANCE_POLICY);
+    renderWorkbench(root, {
+      ...modelFor({ tab: "more", page: "overview" }),
+      locale,
+    }, workbenchActions(), READ_ONLY_ACCEPTANCE_POLICY);
     const banner = root.querySelector<HTMLElement>('[data-acceptance-banner="true"]')!;
     expect(banner.textContent).toBe(bannerText);
     expect(banner.getAttribute("aria-label")).toBe(ariaLabel);
@@ -308,8 +311,13 @@ describe("read-only acceptance surfaces", () => {
       onSuggestLabels: ai,
     });
 
-    for (const tab of ["workbench", "verification", "history", "settings"] as const) {
-      renderWorkbench(root, modelFor(tab), actions, READ_ONLY_ACCEPTANCE_POLICY);
+    for (const route of [
+      { tab: "more", page: "knowledge-tools" },
+      { tab: "task", page: "overview" },
+      { tab: "more", page: "history" },
+      { tab: "more", page: "overview" },
+    ] as const satisfies readonly WorkbenchRoute[]) {
+      renderWorkbench(root, modelFor(route), actions, READ_ONLY_ACCEPTANCE_POLICY);
       const banners = root.querySelectorAll<HTMLElement>('[data-acceptance-banner="true"]');
       expect(banners).toHaveLength(1);
       expect(banners[0]?.textContent).toBe(ZH_ACCEPTANCE_BANNER);
@@ -326,7 +334,10 @@ describe("read-only acceptance surfaces", () => {
     expect(css).toMatch(/\.knowledge-workbench__acceptance-banner\s*\{[^}]*font-weight:\s*600/su);
     expect(css).toMatch(/\.knowledge-workbench--read-only-acceptance button:disabled/u);
 
-    renderWorkbench(root, modelFor("workbench"), actions, READ_ONLY_ACCEPTANCE_POLICY);
+    renderWorkbench(root, modelFor({
+      tab: "more",
+      page: "knowledge-tools",
+    }), actions, READ_ONLY_ACCEPTANCE_POLICY);
     const capture = root.querySelector<HTMLButtonElement>('[data-action="quick-capture"]');
     expect(capture).toBeNull();
     expect(quickCapture).not.toHaveBeenCalled();
@@ -335,7 +346,7 @@ describe("read-only acceptance surfaces", () => {
     expect(ai).not.toHaveBeenCalled();
 
     renderWorkbench(root, {
-      ...modelFor("workbench"),
+      ...modelFor({ tab: "more", page: "knowledge-tools" }),
       startSection: "suggestions",
     }, actions, READ_ONLY_ACCEPTANCE_POLICY);
     const checkbox = root.querySelector<HTMLInputElement>(

@@ -158,6 +158,7 @@ describe("workbench", () => {
     };
     const base = {
       ...populatedWorkbenchModel(),
+      route: { tab: "more", page: "knowledge-tools" } as const,
       locale,
       aiSuggestion: { action: "summarize" as const, text: "MODEL-OUTPUT" },
       suggestions: [suggestion],
@@ -271,7 +272,7 @@ describe("workbench", () => {
 
     renderWorkbench(root, {
       ...populatedWorkbenchModel(),
-      activeTab: "settings",
+      route: { tab: "more", page: "overview" },
     }, noOpWorkbenchActions(), NORMAL_RUNTIME_POLICY, surface);
 
     expect(Array.from(root.querySelectorAll("[data-settings-section]"))
@@ -285,11 +286,145 @@ describe("workbench", () => {
     expect(startup).toHaveBeenCalledWith(true);
   });
 
+  it("dispatches each legal temporary route without reviving the retired five-page shell", () => {
+    const root = createTestDiv();
+    const base = populatedWorkbenchModel();
+    const settingsSurface = {
+      render: (host: HTMLElement) => {
+        const marker = host.ownerDocument.createElement("p");
+        marker.dataset.settingsMarker = "true";
+        host.append(marker);
+      },
+      dispose: () => undefined,
+    };
+
+    renderWorkbench(
+      root,
+      { ...base, route: { tab: "library" } },
+      noOpWorkbenchActions(),
+      NORMAL_RUNTIME_POLICY,
+      settingsSurface,
+    );
+    expect(root.querySelector(".knowledge-workbench__cloud-catalog")).not.toBeNull();
+
+    for (const page of ["overview", "folder-selection", "category-selection"] as const) {
+      renderWorkbench(root, {
+        ...base,
+        route: { tab: "task", page },
+      }, noOpWorkbenchActions(), NORMAL_RUNTIME_POLICY, settingsSurface);
+      expect(root.querySelector(".knowledge-workbench__verification-page")).not.toBeNull();
+    }
+
+    renderWorkbench(root, {
+      ...base,
+      route: { tab: "more", page: "history" },
+    }, noOpWorkbenchActions(), NORMAL_RUNTIME_POLICY, settingsSurface);
+    expect(root.textContent).toContain("暂无操作记录");
+
+    renderWorkbench(root, {
+      ...base,
+      route: { tab: "more", page: "knowledge-tools" },
+    }, noOpWorkbenchActions(), NORMAL_RUNTIME_POLICY, settingsSurface);
+    expect(root.querySelector(".knowledge-workbench__start")).not.toBeNull();
+
+    for (const page of [
+      "overview",
+      "connection",
+      "catalog-data",
+      "language",
+      "advanced",
+    ] as const) {
+      renderWorkbench(root, {
+        ...base,
+        route: { tab: "more", page },
+      }, noOpWorkbenchActions(), NORMAL_RUNTIME_POLICY, settingsSurface);
+      expect(root.querySelector('[data-settings-marker="true"]')).not.toBeNull();
+    }
+  });
+
+  it("disposes a rendered settings surface exactly once when its route leaves", () => {
+    const root = createTestDiv();
+    const render = vi.fn((host: HTMLElement) => {
+      const marker = host.ownerDocument.createElement("p");
+      marker.dataset.settingsMarker = "true";
+      host.append(marker);
+    });
+    const dispose = vi.fn();
+    const surface = { render, dispose };
+    const base = populatedWorkbenchModel();
+
+    renderWorkbench(root, {
+      ...base,
+      route: { tab: "more", page: "overview" },
+    }, noOpWorkbenchActions(), NORMAL_RUNTIME_POLICY, surface);
+    renderWorkbench(root, {
+      ...base,
+      route: { tab: "more", page: "connection" },
+    }, noOpWorkbenchActions(), NORMAL_RUNTIME_POLICY, surface);
+
+    expect(render).toHaveBeenCalledTimes(2);
+    expect(dispose).not.toHaveBeenCalled();
+
+    renderWorkbench(root, {
+      ...base,
+      route: { tab: "library" },
+    }, noOpWorkbenchActions(), NORMAL_RUNTIME_POLICY, surface);
+    renderWorkbench(root, {
+      ...base,
+      route: { tab: "library" },
+    }, noOpWorkbenchActions(), NORMAL_RUNTIME_POLICY, surface);
+
+    expect(dispose).toHaveBeenCalledOnce();
+  });
+
+  it("disposes the active settings surface once when the concrete view closes", async () => {
+    class ItemViewSurface {
+      readonly contentEl = createTestDiv();
+    }
+    const fixture = controllerFixture();
+    fixture.controller.selectRoute({ tab: "more", page: "advanced" });
+    const render = vi.fn();
+    const dispose = vi.fn();
+    const WorkbenchView = createWorkbenchViewClass(
+      ItemViewSurface as unknown as ItemViewConstructor,
+      NORMAL_RUNTIME_POLICY,
+    );
+    const view = new WorkbenchView(
+      {} as WorkspaceLeaf,
+      fixture.controller,
+      { render, dispose },
+    );
+
+    await view.onOpen();
+    expect(render).toHaveBeenCalledOnce();
+    await view.onClose();
+    await view.onClose();
+
+    expect(dispose).toHaveBeenCalledOnce();
+    fixture.controller.dispose();
+  });
+
+  it("maps the three shell destinations to their legal default routes", () => {
+    const root = createTestDiv();
+    const onSelectRoute = vi.fn();
+    renderWorkbench(root, populatedWorkbenchModel(), noOpWorkbenchActions({
+      onSelectRoute,
+    }));
+
+    root.querySelector<HTMLButtonElement>('[data-workbench-page="task"]')?.click();
+    root.querySelector<HTMLButtonElement>('[data-workbench-page="more"]')?.click();
+
+    expect(onSelectRoute.mock.calls).toEqual([
+      [{ tab: "task", page: "overview" }],
+      [{ tab: "more", page: "overview" }],
+    ]);
+  });
+
   it("always renders the dedicated verification page on the verification destination", () => {
     const root = createTestDiv();
     renderWorkbench(root, {
       ...populatedWorkbenchModel(),
-      activeTab: "verification",
+      route: { tab: "task", page: "overview" },
       suggestions: [{
         operation: { id: "legacy-suggestion", kind: "rename", sourcePath: "A.md", targetPath: "B.md" },
         localRationale: { source: "local", summary: "legacy", signals: [], confidence: "high", impact: 1 },
@@ -316,7 +451,7 @@ describe("workbench", () => {
     const folderSelectionActions = vi.fn(() => noOpFolderSelectionActions());
     const model = {
       ...populatedWorkbenchModel(),
-      activeTab: "verification" as const,
+      route: { tab: "task", page: "folder-selection" } as const,
       folderSelection: inlineFolderSelectionState(),
     };
 
@@ -358,7 +493,7 @@ describe("workbench", () => {
       root,
       {
         ...populatedWorkbenchModel(),
-        activeTab: "verification",
+        route: { tab: "task", page: "folder-selection" },
         folderSelection: inlineFolderSelectionState(),
       },
       noOpWorkbenchActions({ folderSelectionActions: () => noOpFolderSelectionActions() }),
@@ -381,7 +516,7 @@ describe("workbench", () => {
       root,
       {
         ...populatedWorkbenchModel(),
-        activeTab: "verification",
+        route: { tab: "task", page: "folder-selection" },
         folderSelection: inlineFolderSelectionState(),
       },
       noOpWorkbenchActions(),
@@ -409,7 +544,7 @@ describe("workbench", () => {
     const onBrowseVerificationRoot = vi.fn(async () => selection);
     const model = {
       ...populatedWorkbenchModel(),
-      activeTab: "verification" as const,
+      route: { tab: "task", page: "overview" } as const,
       verificationRoot: "",
       selectedVerificationGroupKeys: [groupKey],
       catalogConnection: { status: "authorized" as const },
@@ -481,7 +616,7 @@ describe("workbench", () => {
     const onSetVerificationRoot = vi.fn();
     const model = {
       ...populatedWorkbenchModel(),
-      activeTab: "verification" as const,
+      route: { tab: "task", page: "overview" } as const,
       verificationRoot: "/Synthetic/Existing",
       catalogConnection: { status: "authorized" as const },
       hybridCatalog: { ...TEST_INACTIVE_HYBRID_EXECUTION, status: "ready" as const },
@@ -513,7 +648,7 @@ describe("workbench", () => {
     document.body.append(root);
     const model = {
       ...populatedWorkbenchModel(),
-      activeTab: "verification" as const,
+      route: { tab: "task", page: "overview" } as const,
       verificationRoot: "/Synthetic/Existing",
       catalogConnection: { status: "authorized" as const },
       hybridCatalog: { ...TEST_INACTIVE_HYBRID_EXECUTION, status: "ready" as const },
@@ -539,7 +674,7 @@ describe("workbench", () => {
       readonly contentEl = createTestDiv();
     }
     const fixture = controllerFixture();
-    fixture.controller.selectTab("verification");
+    fixture.controller.selectRoute({ tab: "task", page: "overview" });
     const ConcreteWorkbenchView = createWorkbenchViewClass(
       ItemViewSurface as unknown as ItemViewConstructor,
       NORMAL_RUNTIME_POLICY,
@@ -637,7 +772,7 @@ describe("workbench", () => {
     });
     const firstModel = {
       ...populatedWorkbenchModel(),
-      activeTab: "verification" as const,
+      route: { tab: "task", page: "overview" } as const,
       verificationRoot: "/Synthetic",
       selectedVerificationGroupKeys: [groupKey],
       catalogConnection: { status: "authorized" as const },
@@ -689,7 +824,7 @@ describe("workbench", () => {
     document.body.append(root);
     let currentModel = {
       ...populatedWorkbenchModel(),
-      activeTab: "verification" as const,
+      route: { tab: "task", page: "overview" } as const,
       verificationRoot: "",
       catalogConnection: { status: "authorized" as const },
       hybridCatalog: { ...TEST_INACTIVE_HYBRID_EXECUTION, status: "ready" as const },
@@ -798,7 +933,7 @@ describe("workbench", () => {
       cloudVerificationGeneration: binding.verificationGeneration,
     });
     fixture.controller.setVerificationRoot("/Wrong-candidate");
-    fixture.controller.selectTab("verification");
+    fixture.controller.selectRoute({ tab: "task", page: "overview" });
     fixture.controller.toggleVerificationGroup(groupKey);
     hybrid.beforeResume = () => {
       hybrid.setSnapshot({ status: "scanning", active, batch: pausedBatch });
@@ -962,7 +1097,7 @@ describe("workbench", () => {
     });
     fixture.controller.setVerificationRoot("malformed-relative-root");
     fixture.controller.toggleVerificationGroup(groupKey);
-    fixture.controller.selectTab("verification");
+    fixture.controller.selectRoute({ tab: "task", page: "overview" });
     const ConcreteWorkbenchView = createWorkbenchViewClass(
       ItemViewSurface as unknown as ItemViewConstructor,
       NORMAL_RUNTIME_POLICY,
@@ -1034,7 +1169,7 @@ describe("workbench", () => {
     };
     const model = {
       ...populatedWorkbenchModel(),
-      activeTab: "workbench" as const,
+      route: { tab: "more", page: "knowledge-tools" } as const,
       startSection: "suggestions" as const,
       suggestions: [suggestion],
     };
@@ -1082,6 +1217,7 @@ describe("workbench", () => {
       folderRules: [{ prefix: "Notes", kind: "note" }],
     });
     await fixture.controller.setLocale(locale);
+    fixture.controller.selectRoute({ tab: "more", page: "knowledge-tools" });
     const localSuggestions = fixture.controller.refreshSuggestions();
     expect(localSuggestions.length).toBeGreaterThan(0);
     await fixture.controller.selectCenter({ kind: "document", id: "a" });
@@ -1114,7 +1250,10 @@ describe("workbench", () => {
   it("routes explicit map AI actions using selected paths rather than note bodies", () => {
     const root = createTestDiv();
     const calls: unknown[] = [];
-    renderWorkbench(root, populatedWorkbenchModel(), noOpWorkbenchActions({
+    renderWorkbench(root, {
+      ...populatedWorkbenchModel(),
+      route: { tab: "more", page: "knowledge-tools" },
+    }, noOpWorkbenchActions({
       onSummarize: (paths) => { calls.push(["summarize", [...paths]]); },
       onNameCluster: (paths) => { calls.push(["name-cluster", [...paths]]); },
       onExplainRelation: (paths, id) => { calls.push(["explain-relation", [...paths], id]); },
@@ -1134,7 +1273,7 @@ describe("workbench", () => {
     renderWorkbench(root, {
       locale: "zh-CN" as const,
       status: "ready",
-      activeTab: "workbench",
+      route: { tab: "more", page: "knowledge-tools" },
       startSection: "overview",
       catalog: {
         status: "no-snapshot",
@@ -1173,7 +1312,7 @@ describe("workbench", () => {
       scanProgress: { status: "idle", completed: 0, label: "Index" },
       mapProgress: { status: "idle", completed: 0, label: "Map" },
     }, {
-      onSelectTab: () => undefined,
+      onSelectRoute: () => undefined,
       onSelectStartSection: () => undefined,
       onSelectTodayFilter: () => undefined,
       onSelectMapFilter: () => undefined,
@@ -1216,14 +1355,17 @@ describe("workbench", () => {
   it("labels the main page region with its selected navigation button", () => {
     const root = createTestDiv();
     renderWorkbench(root, populatedWorkbenchModel(), noOpWorkbenchActions());
-    const selected = root.querySelector<HTMLElement>('[data-workbench-page="workbench"]')!;
+    const selected = root.querySelector<HTMLElement>('[data-workbench-page="library"]')!;
     const panel = root.querySelector<HTMLElement>("main")!;
     expect(panel.getAttribute("aria-labelledby")).toBe(selected.id);
   });
 
   it("keeps actions as native buttons with visible labels", () => {
     const root = createTestDiv();
-    renderWorkbench(root, populatedWorkbenchModel(), noOpWorkbenchActions());
+    renderWorkbench(root, {
+      ...populatedWorkbenchModel(),
+      route: { tab: "more", page: "knowledge-tools" },
+    }, noOpWorkbenchActions());
     expect(root.querySelector(".knowledge-workbench__split")).not.toBeNull();
     for (const button of Array.from(root.querySelectorAll("button"))) {
       expect(button.textContent?.trim() || button.getAttribute("aria-label")).toBeTruthy();
@@ -1242,19 +1384,21 @@ describe("workbench", () => {
     const selected: string[] = [];
     const root = createTestDiv();
     const model = populatedWorkbenchModel();
-    const actions = noOpWorkbenchActions({ onSelectTab: (tab) => selected.push(tab) });
+    const actions = noOpWorkbenchActions({
+      onSelectRoute: (route) => selected.push(route.tab),
+    });
     document.body.append(root);
     renderWorkbench(root, model, actions);
-    const first = root.querySelector<HTMLButtonElement>('[data-workbench-page="workbench"]')!;
+    const first = root.querySelector<HTMLButtonElement>('[data-workbench-page="library"]')!;
     first.focus();
     first.dispatchEvent(new KeyboardEvent("keydown", { key: "End", bubbles: true }));
     expect(selected).toEqual([]);
-    expect(document.activeElement?.getAttribute("data-workbench-page")).toBe("settings");
-    renderWorkbench(root, { ...model, activeTab: "settings" }, actions);
-    expect(document.activeElement?.getAttribute("data-workbench-page")).toBe("settings");
+    expect(document.activeElement?.getAttribute("data-workbench-page")).toBe("more");
+    renderWorkbench(root, { ...model, route: { tab: "more", page: "overview" } }, actions);
+    expect(document.activeElement?.getAttribute("data-workbench-page")).toBe("more");
     document.activeElement?.dispatchEvent(new KeyboardEvent("keydown", { key: "Home", bubbles: true }));
     expect(selected).toEqual([]);
-    expect(document.activeElement?.getAttribute("data-workbench-page")).toBe("workbench");
+    expect(document.activeElement?.getAttribute("data-workbench-page")).toBe("library");
     root.remove();
   });
 
@@ -1263,6 +1407,7 @@ describe("workbench", () => {
       readonly contentEl = createTestDiv();
     }
     const fixture = controllerFixture();
+    fixture.controller.selectRoute({ tab: "more", page: "knowledge-tools" });
     const ConcreteWorkbenchView = createWorkbenchViewClass(ItemViewSurface as unknown as ItemViewConstructor, NORMAL_RUNTIME_POLICY);
     const view = new ConcreteWorkbenchView({} as WorkspaceLeaf, fixture.controller);
     document.body.append(view.contentEl);
@@ -1293,6 +1438,7 @@ describe("workbench", () => {
       readonly contentEl = createTestDiv();
     }
     const fixture = controllerFixture();
+    fixture.controller.selectRoute({ tab: "more", page: "knowledge-tools" });
     const ConcreteWorkbenchView = createWorkbenchViewClass(ItemViewSurface as unknown as ItemViewConstructor, NORMAL_RUNTIME_POLICY);
     const view = new ConcreteWorkbenchView({} as WorkspaceLeaf, fixture.controller);
     document.body.append(view.contentEl);
@@ -1343,6 +1489,7 @@ describe("workbench", () => {
     }
     const fixture = controllerFixture();
     await fixture.controller.setLocale(locale);
+    fixture.controller.selectRoute({ tab: "more", page: "knowledge-tools" });
     vi.spyOn(fixture.controller, "setMapFilter").mockRejectedValue(
       new Error("SECRET-RUNTIME-DETAIL"),
     );
@@ -1417,7 +1564,10 @@ describe("workbench", () => {
     const root = createTestDiv();
     const searches: string[] = [];
     const selected: string[] = [];
-    renderWorkbench(root, populatedWorkbenchModel(), noOpWorkbenchActions({
+    renderWorkbench(root, {
+      ...populatedWorkbenchModel(),
+      route: { tab: "more", page: "knowledge-tools" },
+    }, noOpWorkbenchActions({
       onSearchMap: (query) => searches.push(query),
       onSelectCenter: (center) => selected.push(center.id),
     }));
@@ -1431,7 +1581,10 @@ describe("workbench", () => {
 
   it("windows future result lists beyond 100 rows without losing later entries", () => {
     const root = createTestDiv();
-    const model = populatedWorkbenchModel();
+    const model = {
+      ...populatedWorkbenchModel(),
+      route: { tab: "more", page: "knowledge-tools" } as const,
+    };
     const searchResults = Array.from({ length: 150 }, (_, index) => ({
       documentId: `id-${index}`,
       path: `Notes/${index}.md`,
@@ -1450,7 +1603,10 @@ describe("workbench", () => {
 
   it("routes a suggestion's primary action to preview without opening its note", () => {
     const root = createTestDiv();
-    const model = populatedWorkbenchModel();
+    const model = {
+      ...populatedWorkbenchModel(),
+      route: { tab: "more", page: "knowledge-tools" } as const,
+    };
     const previews: string[] = [];
     const opens: string[] = [];
     renderWorkbench(root, {
@@ -1485,7 +1641,7 @@ describe("workbench", () => {
     };
     renderWorkbench(root, {
       ...populatedWorkbenchModel(),
-      activeTab: "workbench",
+      route: { tab: "more", page: "knowledge-tools" },
       startSection: "suggestions",
       suggestions: [suggestion],
     }, noOpWorkbenchActions({
@@ -2378,6 +2534,7 @@ describe("workbench", () => {
     }
     const ConcreteWorkbenchView = createWorkbenchViewClass(ItemViewSurface as unknown as ItemViewConstructor, NORMAL_RUNTIME_POLICY);
     const controller = controllerFixture().controller;
+    controller.selectRoute({ tab: "more", page: "knowledge-tools" });
     const instance = new ConcreteWorkbenchView({} as WorkspaceLeaf, controller);
     expect(instance).toBeInstanceOf(ItemViewSurface);
     expect(instance).toBeInstanceOf(ConcreteWorkbenchView);
@@ -2429,7 +2586,7 @@ describe("workbench", () => {
       readonly dependencies: { catalogDirectoryPicker?: CloudDirectoryPickerPresenter };
     };
     internals.dependencies.catalogDirectoryPicker = { request: pickerRequest };
-    fixture.controller.selectTab("verification");
+    fixture.controller.selectRoute({ tab: "task", page: "overview" });
     fixture.controller.setVerificationRoot("/科学文库");
     const WorkbenchView = createWorkbenchViewClass(
       ItemViewSurface as unknown as ItemViewConstructor,
@@ -2484,6 +2641,7 @@ describe("workbench", () => {
       readonly contentEl = createTestDiv();
     }
     const fixture = controllerFixture();
+    fixture.controller.selectRoute({ tab: "more", page: "knowledge-tools" });
     fixture.store.failNext = new Error("pin store failed");
     const WorkbenchView = createWorkbenchViewClass(ItemViewSurface as unknown as ItemViewConstructor, NORMAL_RUNTIME_POLICY);
     const view = new WorkbenchView({} as WorkspaceLeaf, fixture.controller);
@@ -2502,6 +2660,7 @@ describe("workbench", () => {
       readonly contentEl = createTestDiv();
     }
     const fixture = controllerFixture({ workspaceError: new Error("leaf unavailable") });
+    fixture.controller.selectRoute({ tab: "more", page: "knowledge-tools" });
     const WorkbenchView = createWorkbenchViewClass(ItemViewSurface as unknown as ItemViewConstructor, NORMAL_RUNTIME_POLICY);
     const view = new WorkbenchView({} as WorkspaceLeaf, fixture.controller);
     await view.onOpen();
@@ -2519,6 +2678,7 @@ describe("workbench", () => {
       readonly contentEl = createTestDiv();
     }
     const fixture = controllerFixture({ quickCaptureError: new Error("create failed") });
+    fixture.controller.selectRoute({ tab: "more", page: "knowledge-tools" });
     const WorkbenchView = createWorkbenchViewClass(ItemViewSurface as unknown as ItemViewConstructor, NORMAL_RUNTIME_POLICY);
     const view = new WorkbenchView({} as WorkspaceLeaf, fixture.controller);
     await view.onOpen();
