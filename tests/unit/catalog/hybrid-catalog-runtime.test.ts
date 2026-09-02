@@ -35,6 +35,17 @@ const HASH_C = "c".repeat(64);
 const HASH_D = "d".repeat(64);
 const GROUP_A = `group:${"1".repeat(64)}`;
 const GROUP_B = `group:${"2".repeat(64)}`;
+const GROUP_C = `group:${"3".repeat(64)}`;
+const GROUP_D = `group:${"4".repeat(64)}`;
+const GROUP_E = `group:${"5".repeat(64)}`;
+const FIVE_GROUP_ORDER = [GROUP_D, GROUP_B, GROUP_E, GROUP_A, GROUP_C] as const;
+const GROUP_PATHS: Readonly<Record<string, string>> = {
+  [GROUP_A]: "Science",
+  [GROUP_B]: "History",
+  [GROUP_C]: "Education",
+  [GROUP_D]: "Finance",
+  [GROUP_E]: "Philosophy",
+};
 const DEFAULT_SCOPE: CloudVerificationScope = {
   generation: 1,
   sourceImportSha256: HASH_A,
@@ -162,6 +173,28 @@ const twoGroupPausedCheckpoint = (): LargeCatalogBatchCheckpointV3 => {
   };
 };
 
+const fiveGroupCandidates = (): readonly TxtCandidateRecordV1[] => [
+  candidate("txt:a", "Science/A.pdf", GROUP_A),
+  candidate("txt:b", "History/B.pdf", GROUP_B),
+  candidate("txt:c", "Education/C.pdf", GROUP_C),
+  candidate("txt:d", "Finance/D.pdf", GROUP_D),
+  candidate("txt:e", "Philosophy/E.pdf", GROUP_E),
+];
+
+const fiveGroupPausedCheckpoint = (): LargeCatalogBatchCheckpointV3 => ({
+  ...pausedCheckpoint(),
+  selectedGroupCount: FIVE_GROUP_ORDER.length,
+  groups: FIVE_GROUP_ORDER.map((groupKey, index) => ({
+    groupKey,
+    rootRelativePath: GROUP_PATHS[groupKey]!,
+    mode: "recursive" as const,
+    status: index === 0 ? "scanning" as const : "pending" as const,
+    pending: [{ relativePath: "", start: index === 0 ? 1000 : 0 }],
+    committedPageKeys: index === 0 ? ["e".repeat(64)] : [],
+    completedDirectoryCount: index === 0 ? 1 : 0,
+  })),
+});
+
 const scopedCheckpoint = (
   overrides: Partial<LargeCatalogBatchCheckpointV4> = {},
 ): LargeCatalogBatchCheckpointV4 => {
@@ -274,16 +307,21 @@ const fixture = (options: Readonly<{
   verificationStartPromise?: Promise<LargeCatalogVerificationSummary>;
   verificationRunPromise?: Promise<LargeCatalogVerificationSummary>;
   promotionPromise?: Promise<LoadedLargeCatalogBatchV4>;
+  candidateRecords?: readonly TxtCandidateRecordV1[];
 }> = {}) => {
-  const candidates = [
+  const candidates = [...(options.candidateRecords ?? [
     candidate("txt:root", "Root.pdf", "txt-root-items"),
     candidate("txt:a", "Science/A.pdf", GROUP_A),
     candidate("txt:b", "History/B.pdf", GROUP_B),
-  ];
+  ])];
+  const activeDescriptor = {
+    ...descriptor(),
+    pdfCount: candidates.length,
+  };
   let activeCandidates: Readonly<{
     descriptor: CandidateCatalogDescriptor;
     records: readonly TxtCandidateRecordV1[];
-  }> | null = { descriptor: descriptor(), records: candidates };
+  }> | null = { descriptor: activeDescriptor, records: candidates };
   let activeUnified: Readonly<{
     descriptor: Readonly<{
       schemaVersion: 1;
@@ -806,9 +844,25 @@ describe("HybridCatalogRuntimeService", () => {
     });
   });
 
-  it("keeps an unlisted legacy V3 checkpoint visible but never resumable", async () => {
+  it("rejects a loaded V4 checkpoint whose selected count disagrees with its keys", async () => {
     const value = fixture({
-      latest: pausedCheckpoint(),
+      latest: scopedCheckpoint({ selectedGroupCount: 2 }),
+    });
+
+    await value.runtime.initialize();
+
+    expect(value.runtime.snapshot()).toEqual({
+      status: "error",
+      executionActive: false,
+      messageCode: "hybrid-snapshot-corrupt",
+    });
+    expect(value.verification.runSegment).not.toHaveBeenCalled();
+  });
+
+  it("keeps an unlisted legacy V3 checkpoint as details-only history", async () => {
+    const latest = twoGroupPausedCheckpoint();
+    const value = fixture({
+      latest,
       verificationAuthority: authority(null),
     });
 
@@ -818,7 +872,17 @@ describe("HybridCatalogRuntimeService", () => {
       verificationScope: null,
       legacyPromotionRequired: true,
       resumeAvailable: false,
+      selectedGroupCount: 2,
+      selectedGroupKeys: [GROUP_A, GROUP_B],
+      currentGroupIndex: 0,
+      currentGroupKey: GROUP_A,
     });
+    await expect(value.runtime.resumeLargeVerification({
+      cloudRoot: "/Synthetic",
+      groupKeys: [GROUP_A, GROUP_B],
+    })).rejects.toEqual(new HybridCatalogError("hybrid-batch-unavailable"));
+    expect(value.store.promoteAdoptedLegacyBatch).not.toHaveBeenCalled();
+    expect(value.verification.runSegment).not.toHaveBeenCalled();
   });
 
   it("promotes an exactly adopted V3 before publishing a live execution", async () => {
@@ -913,6 +977,95 @@ describe("HybridCatalogRuntimeService", () => {
     expect(value.verification.runSegment).toHaveBeenCalledWith(expect.objectContaining({
       allowedGroupKeys: [GROUP_A, GROUP_B],
     }));
+  });
+
+  it("restarts a current-scope V4 batch in its exact persisted five-group order", async () => {
+    const legacy = fiveGroupPausedCheckpoint();
+    const latest = scopedCheckpoint({
+      selectedGroupCount: legacy.selectedGroupCount,
+      groups: legacy.groups,
+    });
+    const result = verificationSummary({
+      status: "complete",
+      stopReason: "complete",
+      selectedGroupCount: FIVE_GROUP_ORDER.length,
+      selectedGroupKeys: [...FIVE_GROUP_ORDER],
+      completedGroupCount: FIVE_GROUP_ORDER.length,
+      remainingGroupCount: 0,
+      currentGroupIndex: FIVE_GROUP_ORDER.length,
+      currentGroupKey: null,
+    });
+    const value = fixture({
+      latest,
+      candidateRecords: fiveGroupCandidates(),
+      verificationResults: [result],
+    });
+    await value.runtime.initialize();
+
+    const exposedKeys = value.runtime.snapshot().batch!.selectedGroupKeys as string[];
+    exposedKeys.sort();
+    expect(value.runtime.snapshot().batch).toMatchObject({
+      selectedGroupCount: FIVE_GROUP_ORDER.length,
+      selectedGroupKeys: FIVE_GROUP_ORDER,
+    });
+
+    await value.runtime.resumeLargeVerification({
+      cloudRoot: "/Synthetic",
+      groupKeys: FIVE_GROUP_ORDER,
+    });
+
+    expect(value.verification.runSegment).toHaveBeenCalledWith(expect.objectContaining({
+      allowedGroupKeys: FIVE_GROUP_ORDER,
+    }));
+    expect(value.runtime.snapshot().batch).toMatchObject({
+      selectedGroupCount: FIVE_GROUP_ORDER.length,
+      selectedGroupKeys: FIVE_GROUP_ORDER,
+    });
+  });
+
+  it("keeps an exactly adopted V3 five-group order through local promotion", async () => {
+    const latest = fiveGroupPausedCheckpoint();
+    const promoted = promotedBatch();
+    const promotedCheckpoint = scopedCheckpoint({
+      legacyCheckpointSha256: HASH_B,
+      selectedGroupCount: latest.selectedGroupCount,
+      groups: latest.groups,
+    });
+    const result = verificationSummary({
+      status: "complete",
+      stopReason: "complete",
+      selectedGroupCount: FIVE_GROUP_ORDER.length,
+      selectedGroupKeys: [...FIVE_GROUP_ORDER],
+      completedGroupCount: FIVE_GROUP_ORDER.length,
+      remainingGroupCount: 0,
+      currentGroupIndex: FIVE_GROUP_ORDER.length,
+      currentGroupKey: null,
+    });
+    const value = fixture({
+      latest,
+      candidateRecords: fiveGroupCandidates(),
+      promotionPromise: Promise.resolve({ ...promoted, checkpoint: promotedCheckpoint }),
+      verificationResults: [result],
+    });
+    await value.runtime.initialize();
+
+    await value.runtime.resumeLargeVerification({
+      cloudRoot: "/Synthetic",
+      groupKeys: FIVE_GROUP_ORDER,
+    });
+
+    expect(value.store.promoteAdoptedLegacyBatch).toHaveBeenCalledOnce();
+    expect(value.store.promoteAdoptedLegacyBatch.mock.invocationCallOrder[0])
+      .toBeLessThan(value.verification.runSegment.mock.invocationCallOrder[0]!);
+    expect(value.verification.runSegment).toHaveBeenCalledWith(expect.objectContaining({
+      allowedGroupKeys: FIVE_GROUP_ORDER,
+    }));
+    expect(value.runtime.snapshot().batch).toMatchObject({
+      verificationScope: DEFAULT_SCOPE,
+      legacyPromotionRequired: false,
+      selectedGroupCount: FIVE_GROUP_ORDER.length,
+      selectedGroupKeys: FIVE_GROUP_ORDER,
+    });
   });
 
   it("proxies detached local-only authority and adoption revalidation without network", async () => {
@@ -1204,6 +1357,7 @@ describe("HybridCatalogRuntimeService", () => {
       status: "paused",
       stopReason: "user-canceled",
       selectedGroupCount: 2,
+      selectedGroupKeys: ["txt-root-items", GROUP_A],
       remainingGroupCount: 2,
       currentGroupKey: "txt-root-items",
       pdfCount: 10,
@@ -1258,6 +1412,60 @@ describe("HybridCatalogRuntimeService", () => {
       groupKeys: [GROUP_A, GROUP_B, "txt-root-items", GROUP_A, GROUP_B, GROUP_A],
     })).rejects.toEqual(new HybridCatalogError("hybrid-batch-invalid"));
     expect(value.verification.start).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects a verification summary whose selected count disagrees with its keys", async () => {
+    const resultKeys = [GROUP_A, GROUP_B];
+    const value = fixture({ verificationResults: [verificationSummary({
+      status: "complete",
+      stopReason: "complete",
+      selectedGroupCount: 1,
+      selectedGroupKeys: resultKeys,
+      completedGroupCount: 2,
+      remainingGroupCount: 0,
+      currentGroupIndex: 2,
+      currentGroupKey: null,
+    })] });
+    await value.runtime.initialize();
+
+    await expect(value.runtime.startLargeVerification({
+      cloudRoot: "/Synthetic",
+      groupKeys: [GROUP_A, GROUP_B],
+    })).rejects.toEqual(new HybridCatalogError("hybrid-snapshot-corrupt"));
+
+    expect(value.runtime.snapshot()).toMatchObject({
+      status: "error",
+      executionActive: false,
+      messageCode: "hybrid-snapshot-corrupt",
+    });
+    expect(value.runtime.snapshot().batch).toBeUndefined();
+    expect(resultKeys).toEqual([GROUP_A, GROUP_B]);
+  });
+
+  it("rejects a verification summary whose remaining count disagrees with progress", async () => {
+    const value = fixture({ verificationResults: [verificationSummary({
+      status: "paused",
+      stopReason: "user-canceled",
+      selectedGroupCount: 2,
+      selectedGroupKeys: [GROUP_A, GROUP_B],
+      completedGroupCount: 1,
+      remainingGroupCount: 0,
+      currentGroupIndex: 1,
+      currentGroupKey: GROUP_B,
+    })] });
+    await value.runtime.initialize();
+
+    await expect(value.runtime.startLargeVerification({
+      cloudRoot: "/Synthetic",
+      groupKeys: [GROUP_A, GROUP_B],
+    })).rejects.toEqual(new HybridCatalogError("hybrid-snapshot-corrupt"));
+
+    expect(value.runtime.snapshot()).toMatchObject({
+      status: "error",
+      executionActive: false,
+      messageCode: "hybrid-snapshot-corrupt",
+    });
+    expect(value.runtime.snapshot().batch).toBeUndefined();
   });
 
   it.each(["pdf-limit", "directory-limit", "list-request-limit", "time-limit"] as const)(

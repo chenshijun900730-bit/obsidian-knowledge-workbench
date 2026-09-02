@@ -112,6 +112,7 @@ describe("composition-root dependency graphs", () => {
     );
     const inputs = inputPaths(result);
     const output = outputText(result);
+    expect(inputs).toContain("src/catalog/verification-launch-request.ts");
     const forbiddenInputs = [
       "src/main.ts",
       "src/adapters/obsidian-quick-capture-adapter.ts",
@@ -140,7 +141,7 @@ describe("composition-root dependency graphs", () => {
     expect(inputs.filter((path) => /baidu.*adapter|adapter.*baidu/iu.test(path))).toEqual([]);
     expect(inputs.filter((path) => path.startsWith("node_modules/"))).toEqual([]);
     expect(externalImports(result).filter((path) => nodeExternals.includes(path))).toEqual([]);
-    expect(output).not.toMatch(/node:(?:fs|path|os)/u);
+    expect(output).not.toMatch(/node:(?:crypto|fs|path|os)/u);
     expect(contract.FORBIDDEN_ACCEPTANCE_BUNDLE_TEXT).toEqual([
       "requestUrl",
       "WebSocket",
@@ -182,6 +183,7 @@ describe("composition-root dependency graphs", () => {
       "src/catalog/cloud-directory-discovery-service.ts",
       "src/catalog/cloud-directory-browser.ts",
       "src/catalog/cloud-directory-selection.ts",
+      "src/catalog/verification-launch-request.ts",
       "src/catalog/cloud-directory-locator.ts",
       "src/ui/cloud-directory-browser-view.ts",
       "src/ui/cloud-directory-picker.ts",
@@ -211,6 +213,8 @@ describe("composition-root dependency graphs", () => {
       readFile(join(root, "src/runtime/normal-cloud-catalog-composition.ts"), "utf8"),
     ]);
     expect(normalSource).not.toMatch(/FileSystemAdapter|getBasePath|vault\.configDir/u);
+    expect(normalSource).toContain("cloudVerificationRootHasher: hashNormalCloudVerificationRoot");
+    expect(catalogCompositionSource).toContain("export const hashNormalCloudVerificationRoot");
     expect(catalogCompositionSource).toContain("homedir()");
     expect(catalogCompositionSource).toContain('"Application Support"');
     expect(catalogCompositionSource).not.toMatch(/vaultBasePath|configDirectory/u);

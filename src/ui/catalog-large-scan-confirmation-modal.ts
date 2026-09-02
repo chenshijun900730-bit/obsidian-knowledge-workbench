@@ -1,29 +1,18 @@
 import type { App, Modal } from "obsidian";
-import { normalizeCatalogScanRoot } from "../catalog/catalog-path";
 import { LARGE_CATALOG_RUN_BUDGET } from "../catalog/hybrid-catalog-types";
 import {
-  validateCloudDirectorySelection,
-  type CloudDirectoryPickerPurpose,
-  type CloudDirectorySelection,
-} from "../catalog/cloud-directory-selection";
+  validateVerificationLaunchRequest,
+  type VerificationLaunchGroup,
+  type VerificationLaunchRequest,
+  type VerificationLaunchSelectionValidator,
+} from "../catalog/verification-launch-request";
 import {
   createWorkbenchI18n,
   type WorkbenchLocaleProvider,
 } from "../i18n/workbench-i18n";
 
-export interface CatalogLargeScanConfirmationGroup {
-  readonly groupKey: string;
-  readonly rootRelativePath: string;
-  readonly label: string;
-  readonly pdfCount: number;
-}
-
-export interface CatalogLargeScanConfirmationRequest {
-  readonly kind: "start" | "resume";
-  readonly cloudRoot: string;
-  readonly groups: readonly CatalogLargeScanConfirmationGroup[];
-  readonly directorySelection?: CloudDirectorySelection;
-}
+export type CatalogLargeScanConfirmationGroup = VerificationLaunchGroup;
+export type CatalogLargeScanConfirmationRequest = VerificationLaunchRequest;
 
 export interface CatalogLargeScanConfirmationPresenter {
   request(input: CatalogLargeScanConfirmationRequest): Promise<boolean>;
@@ -31,90 +20,10 @@ export interface CatalogLargeScanConfirmationPresenter {
 
 export type CatalogLargeScanModalConstructor = abstract new (app: App) => Modal;
 
-const GROUP_PATTERN = /^(?:txt-root-items|group:[a-f0-9]{64})$/u;
-
-const checkedRequest = (
-  input: CatalogLargeScanConfirmationRequest,
-): CatalogLargeScanConfirmationRequest => {
-  if (
-    (input.kind !== "start" && input.kind !== "resume")
-    || (input.kind === "start" && (
-      input.groups.length < 1
-      || input.groups.length > LARGE_CATALOG_RUN_BUDGET.maxSelectedTopLevelGroups
-    ))
-    || (input.kind === "resume" && (
-      input.groups.length !== 0
-      || input.directorySelection !== undefined
-    ))
-  ) throw new RangeError("invalid-large-catalog-selection");
-  const seen = new Set<string>();
-  const groups = input.groups.map((group) => {
-    const label = group.label.normalize("NFC").trim();
-    if (
-      !GROUP_PATTERN.test(group.groupKey)
-      || seen.has(group.groupKey)
-      || typeof group.rootRelativePath !== "string"
-      || label.length === 0
-      || /\p{Cc}/u.test(label)
-      || !Number.isSafeInteger(group.pdfCount)
-      || group.pdfCount < 1
-    ) throw new RangeError("invalid-large-catalog-selection");
-    seen.add(group.groupKey);
-    return {
-      groupKey: group.groupKey,
-      rootRelativePath: group.rootRelativePath,
-      label,
-      pdfCount: group.pdfCount,
-    };
-  });
-  const cloudRoot = normalizeCatalogScanRoot(input.cloudRoot);
-  if (input.kind === "resume") return { kind: "resume", cloudRoot, groups: [] };
-  const purpose: CloudDirectoryPickerPurpose = {
-    kind: "verification",
-    groups: groups.map(({ groupKey, rootRelativePath, label }) => ({
-      groupKey,
-      rootRelativePath,
-      label,
-    })),
-  };
-  try {
-    validateCloudDirectorySelection({
-      kind: "directory",
-      selectedPath: cloudRoot,
-      effectiveRoot: cloudRoot,
-    }, purpose);
-  } catch {
-    throw new RangeError("invalid-large-catalog-selection");
-  }
-  let directorySelection: CloudDirectorySelection | undefined;
-  if (input.directorySelection !== undefined) {
-    try {
-      directorySelection = validateCloudDirectorySelection(input.directorySelection, purpose);
-    } catch {
-      throw new RangeError("invalid-large-catalog-selection");
-    }
-    if (directorySelection.effectiveRoot !== cloudRoot) {
-      throw new RangeError("invalid-large-catalog-selection");
-    }
-    if (
-      directorySelection.kind === "category"
-      && (
-        groups.length !== 1
-        || groups[0]?.groupKey !== directorySelection.groupKey
-      )
-    ) throw new RangeError("invalid-large-catalog-selection");
-  }
-  return {
-    kind: "start",
-    cloudRoot,
-    groups,
-    ...(directorySelection === undefined ? {} : { directorySelection }),
-  };
-};
-
 export function createCatalogLargeScanConfirmationModalClass(
   ModalBase: CatalogLargeScanModalConstructor,
   getLocale: WorkbenchLocaleProvider = () => "en",
+  validateSelection?: VerificationLaunchSelectionValidator,
 ) {
   return class CatalogLargeScanConfirmationModal extends ModalBase
     implements CatalogLargeScanConfirmationPresenter {
@@ -126,7 +35,7 @@ export function createCatalogLargeScanConfirmationModalClass(
 
     request(input: CatalogLargeScanConfirmationRequest): Promise<boolean> {
       if (this.result !== null) return this.result;
-      this.requestValue = checkedRequest(input);
+      this.requestValue = validateVerificationLaunchRequest(input, validateSelection);
       this.opener = this.contentEl.ownerDocument.activeElement as HTMLElement | null;
       this.result = new Promise((resolve) => { this.settleResult = resolve; });
       this.open();

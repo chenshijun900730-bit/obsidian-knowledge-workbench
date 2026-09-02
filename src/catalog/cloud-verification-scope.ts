@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import type { BoundCloudLibraryV1 } from "../storage/plugin-data";
 import { normalizeCatalogScanRoot } from "./catalog-path";
 import { HybridCatalogError } from "./hybrid-catalog-types";
@@ -7,6 +6,8 @@ const SHA256_PATTERN = /^[a-f0-9]{64}$/u;
 const SAFE_LOCAL_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
 const SAFE_GROUP_KEY_PATTERN = /^(?:txt-root-items|group:[a-f0-9]{64})$/u;
 const MAX_LEGACY_OVERLAYS = 128;
+
+export type CloudVerificationRootHasher = (normalizedRoot: string) => string | null;
 
 export interface CloudVerificationScope {
   readonly generation: number;
@@ -194,6 +195,7 @@ export const decodeCloudVerificationAuthority = (
 
 export const deriveCloudVerificationScope = (
   binding: BoundCloudLibraryV1 | null,
+  hashRoot: CloudVerificationRootHasher,
 ): CloudVerificationScope | null => {
   if (binding === null) return null;
   if (
@@ -203,10 +205,13 @@ export const deriveCloudVerificationScope = (
     || !SHA256_PATTERN.test(binding.sourceImportSha256)
   ) return invalid();
   const root = normalizeCatalogScanRoot(binding.path);
+  const cloudRootSha256 = hashRoot(root);
+  if (cloudRootSha256 === null) return null;
+  if (!SHA256_PATTERN.test(cloudRootSha256)) return invalid();
   return {
     generation: binding.verificationGeneration,
     sourceImportSha256: binding.sourceImportSha256,
-    cloudRootSha256: createHash("sha256").update(root, "utf8").digest("hex"),
+    cloudRootSha256,
   };
 };
 

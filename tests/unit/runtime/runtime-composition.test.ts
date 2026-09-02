@@ -15,8 +15,14 @@ import {
   NORMAL_RUNTIME_POLICY,
   READ_ONLY_ACCEPTANCE_POLICY,
 } from "../../../src/runtime/safety-policy";
+import { hashNormalCloudVerificationRoot } from "../../../src/runtime/normal-cloud-catalog-composition";
 
 describe("runtime composition", () => {
+  it("provides the normal-only SHA-256 root hashing capability", () => {
+    expect(hashNormalCloudVerificationRoot("/科学文库"))
+      .toBe("7d5d019db88e67493bc4415a5885bd32fe67d6c716346eba047d79ecca6da029");
+  });
+
   it("accepts matching policy and artifact modes", () => {
     expect(() => assertRuntimeCompositionCoherence(
       NORMAL_RUNTIME_POLICY,

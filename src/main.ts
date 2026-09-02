@@ -19,6 +19,7 @@ import { createSettingsTabClass } from "./ui/settings-tab";
 import { createSettingsSectionsSurface } from "./ui/settings-sections";
 import {
   createNormalCloudCatalogRuntime,
+  hashNormalCloudVerificationRoot,
   resolveCatalogRoot,
 } from "./runtime/normal-cloud-catalog-composition";
 import { createCatalogScanConfirmationModalClass } from "./ui/catalog-scan-confirmation-modal";
@@ -95,6 +96,7 @@ const runtime = Object.freeze({
       createSecretComponent: (hostApp, root) => new SecretComponent(hostApp, root),
     }, presentCatalogProgress);
   },
+  cloudVerificationRootHasher: hashNormalCloudVerificationRoot,
   createCatalog: (app) => createNormalCloudCatalogRuntime({
     catalogRoot: resolveCatalogRoot(),
     host: {
@@ -134,6 +136,7 @@ const runtime = Object.freeze({
     const ConcreteCatalogLargeScanConfirmationModal = createCatalogLargeScanConfirmationModalClass(
       Modal,
       getLocale,
+      validateCloudDirectorySelection,
     );
     return {
       request: (input) => new ConcreteCatalogLargeScanConfirmationModal(app).request(input),

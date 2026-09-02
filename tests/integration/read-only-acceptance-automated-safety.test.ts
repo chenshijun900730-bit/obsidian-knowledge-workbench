@@ -336,6 +336,7 @@ const createAcceptanceControllerFixture = async () => {
       delay: vi.fn(async () => undefined),
     },
     catalog: DISABLED_CLOUD_CATALOG_RUNTIME,
+    cloudVerificationRootHasher: () => null,
     catalogConfirmation: { request: async () => false },
   };
   const controller = new WorkbenchController(dependencies);
@@ -394,6 +395,7 @@ describe("read-only acceptance automated safety", () => {
       "createChangePreview",
       "createHistoryConfirmation",
       "createSettingsTab",
+      "cloudVerificationRootHasher",
       "createCatalog",
       "createCatalogConfirmation",
     ]);
@@ -409,6 +411,7 @@ describe("read-only acceptance automated safety", () => {
     expect("createAi" in runtime).toBe(false);
     expect("createWorkbenchSettingsSurface" in runtime).toBe(false);
     expect("createCatalogDirectoryPicker" in runtime).toBe(false);
+    expect(runtime.cloudVerificationRootHasher("/样本")).toBeNull();
 
     const candidateWrites = {
       renameFile: vi.fn(async () => undefined),

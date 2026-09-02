@@ -1,8 +1,9 @@
 import { createHash } from "node:crypto";
 import type { CloudVerificationScope } from "./cloud-verification-scope";
-import type {
-  LargeCatalogBatchCheckpoint,
-  LargeCatalogStopReason,
+import {
+  HybridCatalogError,
+  type LargeCatalogBatchCheckpoint,
+  type LargeCatalogStopReason,
 } from "./hybrid-catalog-types";
 
 export interface LargeVerificationProgressMarker {
@@ -65,6 +66,11 @@ export const summarizeLargeCatalogVerification = (
   checkpoint: LargeCatalogBatchCheckpoint,
   committedPdfCount: number,
 ): LargeCatalogVerificationSummary => {
+  const selectedGroupKeys = checkpoint.groups.map((group) => group.groupKey);
+  if (checkpoint.selectedGroupCount !== selectedGroupKeys.length) {
+    throw new HybridCatalogError("hybrid-snapshot-corrupt");
+  }
+  const selectedGroupCount = checkpoint.selectedGroupCount;
   const completedGroupCount = checkpoint.groups.filter((group) => group.status === "complete").length;
   const committedPageCount = checkpoint.groups.reduce(
     (total, group) => total + group.committedPageKeys.length,
@@ -96,10 +102,10 @@ export const summarizeLargeCatalogVerification = (
     status: checkpoint.status,
     stopReason: checkpoint.stopReason,
     runOrdinal: checkpoint.runOrdinal,
-    selectedGroupCount: checkpoint.selectedGroupCount,
-    selectedGroupKeys: checkpoint.groups.map((group) => group.groupKey),
+    selectedGroupCount,
+    selectedGroupKeys,
     completedGroupCount,
-    remainingGroupCount: checkpoint.selectedGroupCount - completedGroupCount,
+    remainingGroupCount: selectedGroupCount - completedGroupCount,
     currentGroupIndex: checkpoint.currentGroupIndex,
     currentGroupKey,
     pdfCount: checkpoint.pdfCount,

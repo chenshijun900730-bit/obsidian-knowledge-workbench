@@ -184,6 +184,7 @@ export function createKnowledgeWorkbenchPluginClass(runtime: RuntimeComposition)
         clock: systemClock,
         ai: runtime.createAi?.(this.app, getLocale),
         catalog,
+        cloudVerificationRootHasher: runtime.cloudVerificationRootHasher,
         catalogConfirmation,
         ...(catalogTxtImportConfirmation === undefined
           ? {}

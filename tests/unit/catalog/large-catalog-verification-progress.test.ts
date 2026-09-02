@@ -4,6 +4,7 @@ import {
   summarizeLargeCatalogVerification,
 } from "../../../src/catalog/large-catalog-verification-progress";
 import {
+  HybridCatalogError,
   LARGE_CATALOG_RUN_BUDGET,
   type LargeCatalogBatchCheckpointV3,
   type LargeCatalogBatchCheckpointV4,
@@ -130,6 +131,32 @@ describe("large catalog verification progress", () => {
     });
     expect(value.progressMarker.pendingStateSha256).toMatch(/^[a-f0-9]{64}$/u);
     expect(JSON.stringify(value)).not.toContain("Sub");
+  });
+
+  it("rejects a selected-group count that disagrees with persisted keys", () => {
+    const source = {
+      ...checkpoint(),
+      selectedGroupCount: 1,
+    };
+
+    expect(() => summarizeLargeCatalogVerification(source, 11_870))
+      .toThrow(new HybridCatalogError("hybrid-snapshot-corrupt"));
+  });
+
+  it("returns a detached copy of the persisted selected-key order", () => {
+    const source = checkpoint();
+    const value = summarizeLargeCatalogVerification(source, 11_870);
+
+    expect(value.selectedGroupKeys).toEqual([
+      `group:${"1".repeat(64)}`,
+      `group:${"2".repeat(64)}`,
+    ]);
+
+    (value.selectedGroupKeys as string[]).reverse();
+    expect(source.groups.map((group) => group.groupKey)).toEqual([
+      `group:${"1".repeat(64)}`,
+      `group:${"2".repeat(64)}`,
+    ]);
   });
 
   it("accepts only persisted structural progress", () => {

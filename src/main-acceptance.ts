@@ -93,6 +93,7 @@ const runtime = Object.freeze({
     plugin,
     getLocale,
   ),
+  cloudVerificationRootHasher: () => null,
   createCatalog: () => DISABLED_CLOUD_CATALOG_RUNTIME,
   createCatalogConfirmation: (_app, getLocale) => {
     void getLocale;

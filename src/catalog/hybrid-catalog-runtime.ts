@@ -205,11 +205,30 @@ const cloneActive = (value: HybridCatalogActiveSummary): HybridCatalogActiveSumm
   groups: value.groups.map(cloneGroup),
 });
 
-const cloneBatch = (value: LargeCatalogBatchSummary): LargeCatalogBatchSummary => ({
-  ...value,
-  verificationScope: cloneScope(value.verificationScope),
-  selectedGroupKeys: [...value.selectedGroupKeys],
-});
+type SelectedGroupProgress = Pick<
+  LargeCatalogVerificationSummary,
+  "selectedGroupCount" | "selectedGroupKeys" | "completedGroupCount" | "remainingGroupCount"
+>;
+
+const validatedSelectedGroupKeys = (value: SelectedGroupProgress): readonly string[] => {
+  const selectedGroupKeys = [...value.selectedGroupKeys];
+  if (
+    value.selectedGroupCount !== selectedGroupKeys.length
+    || value.completedGroupCount < 0
+    || value.completedGroupCount > value.selectedGroupCount
+    || value.remainingGroupCount !== value.selectedGroupCount - value.completedGroupCount
+  ) throw new HybridCatalogError("hybrid-snapshot-corrupt");
+  return selectedGroupKeys;
+};
+
+const cloneBatch = (value: LargeCatalogBatchSummary): LargeCatalogBatchSummary => {
+  const selectedGroupKeys = validatedSelectedGroupKeys(value);
+  return {
+    ...value,
+    verificationScope: cloneScope(value.verificationScope),
+    selectedGroupKeys,
+  };
+};
 
 type ScopedCloudVerificationAuthority = Extract<
   CloudVerificationAuthority,
@@ -316,6 +335,7 @@ const batchFromVerification = (
   resumeAllowed = true,
 ): LargeCatalogBatchSummary => {
   const status = summary.status;
+  const selectedGroupKeys = validatedSelectedGroupKeys(summary);
   return {
     batchId: summary.batchId,
     verificationScope: cloneScope(summary.verificationScope),
@@ -331,7 +351,7 @@ const batchFromVerification = (
     listRequestCount: summary.listRequestCount,
     cumulativeListRequestCount: summary.cumulativeListRequestCount,
     selectedGroupCount: summary.selectedGroupCount,
-    selectedGroupKeys: [...summary.selectedGroupKeys],
+    selectedGroupKeys,
     completedGroupCount: summary.completedGroupCount,
     currentGroupIndex: summary.currentGroupIndex,
     currentGroupKey: summary.currentGroupKey,

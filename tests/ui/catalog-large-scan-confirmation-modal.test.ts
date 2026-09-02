@@ -5,17 +5,20 @@ import {
   createCatalogLargeScanConfirmationModalClass,
   type CatalogLargeScanModalConstructor,
 } from "../../src/ui/catalog-large-scan-confirmation-modal";
+import { validateCloudDirectorySelection } from "../../src/catalog/cloud-directory-selection";
 import {
   FakeCloudCatalogRuntime,
   FakeHybridCatalogRuntime,
 } from "../fakes/fake-cloud-catalog-runtime";
 import {
   controllerFixture,
+  TEST_CLOUD_VERIFICATION_ROOT_HASHER,
   TEST_HYBRID_ACTIVE_AUTHORITY,
   TEST_LARGE_BATCH_AUTHORITY,
 } from "../helpers/ui-fixtures";
 import type { WorkbenchLocale } from "../../src/i18n/workbench-i18n";
 import { LARGE_CATALOG_AUTO_CHAIN_MAX_SEGMENTS } from "../../src/catalog/hybrid-catalog-types";
+import { deriveCloudVerificationScope } from "../../src/catalog/cloud-verification-scope";
 
 const INACTIVE_AUTO_RESUME = {
   autoResumeState: "inactive" as const,
@@ -40,6 +43,7 @@ const fixture = (locale: WorkbenchLocale = "en") => {
   const Concrete = createCatalogLargeScanConfirmationModalClass(
     ModalSurface as unknown as CatalogLargeScanModalConstructor,
     () => locale,
+    validateCloudDirectorySelection,
   );
   const modal = new Concrete({} as App);
   return { modal, surface: modal as unknown as ModalSurface };
@@ -107,12 +111,12 @@ describe("large catalog scan confirmation", () => {
     expect(surface.contentEl.textContent).not.toContain("private-root");
   });
 
-  it("describes resume separately and rejects more than five categories before opening", async () => {
+  it("describes resume separately with its exact stored category scope", async () => {
     const resumed = fixture();
     const resumeResult = resumed.modal.request({
       kind: "resume",
       cloudRoot: "/Synthetic",
-      groups: [],
+      groups: [request.groups[1]!],
     });
     expect(resumed.surface.title).toBe("Confirm category verification resume");
     expect(resumed.surface.contentEl.textContent).toContain("Resume the saved local checkpoint");
@@ -120,21 +124,9 @@ describe("large catalog scan confirmation", () => {
       '[data-action="resume-large-catalog-verification"]',
     )!.click();
     await expect(resumeResult).resolves.toBe(true);
-
-    const excessive = fixture();
-    expect(() => excessive.modal.request({
-      ...request,
-      groups: Array.from({ length: 6 }, (_, index) => ({
-        groupKey: `group:${String(index).repeat(64)}`,
-        rootRelativePath: `Group-${index}`,
-        label: `Group ${index}`,
-        pdfCount: 1,
-      })),
-    })).toThrow("invalid-large-catalog-selection");
-    expect(excessive.surface.contentEl.textContent).toBe("");
   });
 
-  it("renders a detached category selection and rejects forged or mismatched context", () => {
+  it("renders a detached category selection", () => {
     const groupKey = `group:${"3".repeat(64)}`;
     const input = {
       kind: "start" as const,
@@ -159,29 +151,9 @@ describe("large catalog scan confirmation", () => {
     expect(accepted.surface.contentEl.textContent).toContain("/科学文库");
     expect(accepted.surface.contentEl.textContent).toContain("经济类");
     expect(accepted.surface.contentEl.textContent).not.toContain("/已篡改");
-
-    for (const directorySelection of [{
-      ...input.directorySelection,
-      selectedPath: "/科学文库/其他",
-    }, {
-      ...input.directorySelection,
-      effectiveRoot: "/其他父目录",
-    }, {
-      ...input.directorySelection,
-      groupKey: `group:${"4".repeat(64)}`,
-    }, {
-      kind: "directory" as const,
-      selectedPath: "/",
-      effectiveRoot: "/",
-    }]) {
-      expect(() => fixture().modal.request({
-        ...input,
-        directorySelection,
-      })).toThrow("invalid-large-catalog-selection");
-    }
   });
 
-  it("keeps directory and legacy start flows compatible but rejects selection on resume", () => {
+  it("keeps directory and legacy start flows compatible", () => {
     expect(() => fixture().modal.request(request)).not.toThrow();
     expect(() => fixture().modal.request({
       ...request,
@@ -191,16 +163,16 @@ describe("large catalog scan confirmation", () => {
         effectiveRoot: request.cloudRoot,
       },
     })).not.toThrow();
-    expect(() => fixture().modal.request({
-      kind: "resume",
-      cloudRoot: "/Synthetic",
-      groups: [],
-      directorySelection: {
-        kind: "directory",
-        selectedPath: "/Synthetic",
-        effectiveRoot: "/Synthetic",
-      },
-    })).toThrow("invalid-large-catalog-selection");
+  });
+
+  it("fails closed before opening when composition omits the validator", () => {
+    const Concrete = createCatalogLargeScanConfirmationModalClass(
+      ModalSurface as unknown as CatalogLargeScanModalConstructor,
+    );
+    const modal = new Concrete({} as App);
+
+    expect(() => modal.request(request)).toThrow("invalid-large-catalog-selection");
+    expect((modal as unknown as ModalSurface).contentEl.textContent).toBe("");
   });
 
   it("resolves false on Cancel, Escape, or host close", async () => {
@@ -227,6 +199,16 @@ describe("large catalog scan confirmation", () => {
 
   it("clears a normalized root before explicit start or resume reaches the runtime", async () => {
     const groupKey = `group:${"1".repeat(64)}`;
+    const boundCloudLibrary = {
+      schemaVersion: 1 as const,
+      path: "/Synthetic",
+      sourceImportSha256: TEST_HYBRID_ACTIVE_AUTHORITY.sourceImportSha256,
+      verificationGeneration: 1,
+    };
+    const verificationScope = deriveCloudVerificationScope(
+      boundCloudLibrary,
+      TEST_CLOUD_VERIFICATION_ROOT_HASHER,
+    )!;
     const hybrid = new FakeHybridCatalogRuntime({
       status: "paused",
       active: {
@@ -251,6 +233,7 @@ describe("large catalog scan confirmation", () => {
       },
       batch: {
         ...TEST_LARGE_BATCH_AUTHORITY,
+        verificationScope,
         ...INACTIVE_AUTO_RESUME,
         batchId: "batch-confirmation",
         status: "paused",
@@ -275,10 +258,16 @@ describe("large catalog scan confirmation", () => {
     });
     const confirmation = { request: vi.fn(async () => true) };
     const catalog = new FakeCloudCatalogRuntime({}, undefined, hybrid);
-    const controller = controllerFixture({
+    const controllerHarness = controllerFixture({
       catalog,
       catalogLargeScanConfirmation: confirmation,
-    }).controller;
+    });
+    controllerHarness.store.setSettingsForTest({
+      ...controllerHarness.store.settings(),
+      boundCloudLibrary,
+      cloudVerificationGeneration: 1,
+    });
+    const { controller } = controllerHarness;
     const events: string[] = [];
     hybrid.beforeStart = () => { events.push("start"); };
     hybrid.beforeResume = () => { events.push("resume"); };
@@ -302,7 +291,7 @@ describe("large catalog scan confirmation", () => {
     expect(confirmation.request).toHaveBeenNthCalledWith(2, {
       kind: "resume",
       cloudRoot: "/Synthetic",
-      groups: [],
+      groups: [{ groupKey, rootRelativePath: "Science", label: "Science", pdfCount: 30 }],
     });
     expect(hybrid.startInputs).toEqual([{ cloudRoot: "/Synthetic", groupKeys: [groupKey] }]);
     expect(hybrid.resumeRoots).toEqual(["/Synthetic"]);
@@ -378,10 +367,21 @@ describe("large catalog scan confirmation", () => {
       },
     });
     const confirmation = { request: vi.fn(async () => false) };
-    const controller = controllerFixture({
+    const controllerHarness = controllerFixture({
       catalog: new FakeCloudCatalogRuntime({}, undefined, hybrid),
       catalogLargeScanConfirmation: confirmation,
-    }).controller;
+    });
+    controllerHarness.store.setSettingsForTest({
+      ...controllerHarness.store.settings(),
+      boundCloudLibrary: {
+        schemaVersion: 1,
+        path: "/科学文库",
+        sourceImportSha256: TEST_HYBRID_ACTIVE_AUTHORITY.sourceImportSha256,
+        verificationGeneration: 1,
+      },
+      cloudVerificationGeneration: 1,
+    });
+    const { controller } = controllerHarness;
     const selection = {
       kind: "category" as const,
       selectedPath: "/科学文库/5-艺术",

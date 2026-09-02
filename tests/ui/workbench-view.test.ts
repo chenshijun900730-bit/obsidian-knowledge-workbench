@@ -37,6 +37,7 @@ import {
   noOpWorkbenchActions,
   populatedWorkbenchModel,
   quickCaptureFixture,
+  TEST_CLOUD_VERIFICATION_ROOT_HASHER,
   TEST_HYBRID_ACTIVE_AUTHORITY,
   TEST_INACTIVE_HYBRID_EXECUTION,
   TEST_LARGE_BATCH_AUTHORITY,
@@ -615,7 +616,10 @@ describe("workbench", () => {
     const pausedBatch = {
       ...TEST_LARGE_BATCH_AUTHORITY,
       ...INACTIVE_AUTO_RESUME,
-      verificationScope: deriveCloudVerificationScope(binding),
+      verificationScope: deriveCloudVerificationScope(
+        binding,
+        TEST_CLOUD_VERIFICATION_ROOT_HASHER,
+      ),
       selectedGroupKeys: [groupKey],
       batchId: "batch-paused",
       status: "paused" as const,
@@ -689,7 +693,10 @@ describe("workbench", () => {
     const correctedBinding = { ...binding, path: "/Correct-candidate" };
     const correctedBatch = {
       ...pausedBatch,
-      verificationScope: deriveCloudVerificationScope(correctedBinding),
+      verificationScope: deriveCloudVerificationScope(
+        correctedBinding,
+        TEST_CLOUD_VERIFICATION_ROOT_HASHER,
+      ),
     };
     fixture.store.setSettingsForTest({
       ...fixture.store.settings(),

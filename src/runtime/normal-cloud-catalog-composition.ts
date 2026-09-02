@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { isAbsolute, join, parse, resolve } from "node:path";
 import { BaiduCatalogSourceAdapter } from "../adapters/baidu-catalog-source-adapter";
@@ -34,6 +34,11 @@ import type {
 import { HybridCatalogRuntimeService } from "../catalog/hybrid-catalog-runtime";
 import { LargeCatalogVerificationService } from "../catalog/large-catalog-verification-service";
 import { UnifiedCatalogProjectionService } from "../catalog/unified-catalog-projection-service";
+import type { CloudVerificationRootHasher } from "../catalog/cloud-verification-scope";
+
+export const hashNormalCloudVerificationRoot: CloudVerificationRootHasher = (
+  normalizedRoot,
+) => createHash("sha256").update(normalizedRoot, "utf8").digest("hex");
 
 export interface NormalCatalogEnvironment {
   readonly platform: string;

@@ -66,6 +66,7 @@ import {
   cloudVerificationScopesEqual,
   deriveCloudVerificationScope,
   type CloudVerificationAuthority,
+  type CloudVerificationRootHasher,
   type CloudVerificationScope,
   type LegacyVerificationAllowlist,
 } from "../catalog/cloud-verification-scope";
@@ -75,6 +76,11 @@ import {
   deriveLibraryWorkflowState,
   type PendingCatalogTxtDraft,
 } from "./library-workflow-state";
+import {
+  validateVerificationLaunchRequest,
+  type VerificationLaunchGroup,
+  type VerificationLaunchRequest,
+} from "../catalog/verification-launch-request";
 
 export interface AiSettingsInput {
   readonly enabled: boolean;
@@ -122,6 +128,7 @@ export interface WorkbenchDependencies {
   readonly ai?: WorkbenchAiDependencies;
   readonly projectionScheduler?: WorkbenchProjectionScheduler;
   readonly catalog: CloudCatalogRuntime;
+  readonly cloudVerificationRootHasher: CloudVerificationRootHasher;
   readonly catalogConfirmation: CatalogScanConfirmationPresenter;
   readonly catalogTxtImportConfirmation?: CatalogTxtImportConfirmationPresenter;
   readonly catalogLargeScanConfirmation?: CatalogLargeScanConfirmationPresenter;
@@ -145,6 +152,11 @@ type CatalogAuthorizationAttempt = Readonly<{
   preparedGeneration: number;
 }>;
 
+type TaskActionPermit = Readonly<{
+  revision: number;
+  nonce: symbol;
+}>;
+
 const emptyMap = (): FocusedMap => ({ nodes: [], edges: [], selected: null, truncated: false });
 const idleProgress = (label: string): WorkbenchProgress => ({ status: "idle", completed: 0, label });
 const clone = <T>(value: T): T => structuredClone(value);
@@ -162,6 +174,12 @@ const RECOVERY_LOCK_MESSAGE = "Recovery required; organization writes are locked
 const PROJECTION_REFRESH_ERROR = "Workbench projection refresh failed";
 const PROJECTION_QUIET_DELAY_MS = 50;
 const PROJECTION_MAX_WAIT_MS = 500;
+const assertVerificationLaunchBuildAvailable = (): void => {
+  if (
+    typeof __KNOWLEDGE_WORKBENCH_BUILD_MODE__ !== "undefined"
+    && __KNOWLEDGE_WORKBENCH_BUILD_MODE__ === "read-only-acceptance"
+  ) throw new Error("catalog-unavailable");
+};
 const verificationPickerPurpose = (
   groups: readonly Readonly<{
     groupKey: string;
@@ -299,6 +317,7 @@ const legacyAllowlistFor = (
 
 const scopedAuthorityForSettings = (
   settings: PluginSettings,
+  hashRoot: CloudVerificationRootHasher,
 ): Extract<CloudVerificationAuthority, Readonly<{ kind: "scoped" }>> | null => {
   const binding = settings.boundCloudLibrary;
   if (
@@ -306,7 +325,7 @@ const scopedAuthorityForSettings = (
     || settings.cloudVerificationGeneration < 1
     || binding.verificationGeneration !== settings.cloudVerificationGeneration
   ) return null;
-  const scope = deriveCloudVerificationScope(binding);
+  const scope = deriveCloudVerificationScope(binding, hashRoot);
   if (scope === null) return null;
   if (
     settings.legacyVerificationAdoption.state === "pending"
@@ -413,6 +432,7 @@ export class WorkbenchController {
       verificationBatchTombstones: initialSettings.verificationBatchTombstones,
       legacyVerificationAdoption: initialSettings.legacyVerificationAdoption,
       pendingCatalogTxt: null,
+      cloudVerificationRootHasher: dependencies.cloudVerificationRootHasher,
       capabilityAvailable: initialHybridCatalog !== undefined
         && initialHybridCatalog.status !== "unavailable",
     });
@@ -497,7 +517,10 @@ export class WorkbenchController {
     if (this.disposed) return;
     const hybrid = this.dependencies.catalog.hybrid;
     let settings = this.dependencies.store.settings();
-    let authority: CloudVerificationAuthority | null = scopedAuthorityForSettings(settings);
+    let authority: CloudVerificationAuthority | null = scopedAuthorityForSettings(
+      settings,
+      this.dependencies.cloudVerificationRootHasher,
+    );
     if (
       authority === null
       && settings.boundCloudLibrary === null
@@ -510,7 +533,10 @@ export class WorkbenchController {
       if (this.disposed) return;
       settings = this.dependencies.store.settings();
       if (verificationAuthoritySettingsKey(settings) !== expectedSettingsKey) {
-        authority = scopedAuthorityForSettings(settings);
+        authority = scopedAuthorityForSettings(
+          settings,
+          this.dependencies.cloudVerificationRootHasher,
+        );
         if (
           authority === null
           && settings.boundCloudLibrary === null
@@ -625,75 +651,29 @@ export class WorkbenchController {
 
   async startSelectedVerification(): Promise<void> {
     if (this.disposed) return;
-    await this.withCloudAuthorityPermit("verification-launch", async () => {
-      this.assertNoLiveCloudExecution();
-      this.clearVerificationHybridMessageSuppression();
-      const groupKeys = [...this.model.selectedVerificationGroupKeys];
-      if (groupKeys.length === 0) throw new RangeError("verification-group-required");
-      let normalized: string;
-      try {
-        normalized = this.validateCatalogScanRoot(this.model.verificationRoot);
-      } catch (error) {
-        this.captureVerificationValidation(error);
-        throw error;
-      }
-      const before = this.dependencies.catalog.hybrid?.snapshot();
-      const alreadyLocked = this.lockedVerificationRoot !== null;
-      let lockedForAttempt = false;
-      try {
-        await this.requestLargeCatalogVerificationWithPermit(normalized, groupKeys, () => {
-          lockedForAttempt = !alreadyLocked;
-          this.lockVerificationRoot(normalized);
-        }, this.model.verificationDirectorySelection);
-        this.clearVerificationActionMessage();
-      } catch (error) {
-        const after = this.dependencies.catalog.hybrid?.snapshot();
-        if (lockedForAttempt && !verificationBatchAdvanced(before, after)) {
-          this.unlockVerificationRoot();
-        }
-        this.captureVerificationValidation(error);
-        throw error;
-      }
+    assertVerificationLaunchBuildAvailable();
+    await this.runVerifiedLaunch({
+      kind: "start",
+      cloudRoot: this.model.verificationRoot,
+      groupKeys: [...this.model.selectedVerificationGroupKeys],
+      ...(this.model.verificationDirectorySelection === undefined
+        ? {}
+        : { directorySelection: this.model.verificationDirectorySelection }),
+      confirm: true,
     });
   }
 
   async resumeSelectedVerification(): Promise<void> {
     if (this.disposed) return;
-    await this.withCloudAuthorityPermit("verification-launch", async () => {
-      this.assertNoLiveCloudExecution();
-      this.clearVerificationHybridMessageSuppression();
-      const groupKeys = [...this.model.selectedVerificationGroupKeys];
-      if (groupKeys.length === 0) throw new RangeError("verification-group-required");
-      const alreadyLocked = this.lockedVerificationRoot !== null;
-      const candidate = this.lockedVerificationRoot ?? this.model.verificationRoot;
-      let normalized: string;
-      try {
-        normalized = this.validateCatalogScanRoot(candidate);
-      } catch (error) {
-        this.captureVerificationValidation(error);
-        throw error;
-      }
-      let lockedForAttempt = false;
-      try {
-        this.assertResumeAuthority(normalized, groupKeys);
-        await this.requestResumeLargeCatalogVerificationWithPermit(normalized, groupKeys, () => {
-          if (alreadyLocked) return;
-          lockedForAttempt = true;
-          this.lockVerificationRoot(normalized);
-        });
-        this.clearVerificationActionMessage();
-      } catch (error) {
-        if (lockedForAttempt) this.unlockVerificationRoot();
-        if (
-          error instanceof HybridCatalogError
-          && error.code === "hybrid-cloud-root-mismatch"
-        ) {
-          this.unlockVerificationRoot();
-          this.setVerificationActionMessage("hybrid-cloud-root-mismatch");
-        }
-        this.captureVerificationValidation(error);
-        throw error;
-      }
+    assertVerificationLaunchBuildAvailable();
+    const batch = this.dependencies.catalog.hybrid?.snapshot().batch;
+    if (batch === undefined) throw new HybridCatalogError("hybrid-batch-unavailable");
+    const boundRoot = this.dependencies.store.settings().boundCloudLibrary?.path;
+    await this.runVerifiedLaunch({
+      kind: "resume",
+      cloudRoot: this.lockedVerificationRoot ?? boundRoot ?? this.model.verificationRoot,
+      groupKeys: [...batch.selectedGroupKeys],
+      confirm: true,
     });
   }
 
@@ -1013,10 +993,7 @@ export class WorkbenchController {
 
   async previewTaskCatalogTxt(path: string, expectedRevision: number): Promise<void> {
     if (this.disposed) return;
-    if (expectedRevision !== this.model.taskActionRevision) {
-      throw new Error("task-action-stale");
-    }
-    await this.withTaskActionPermit(async () => {
+    await this.withTaskActionPermit(expectedRevision, async () => {
       const hybrid = this.dependencies.catalog.hybrid;
       if (hybrid === undefined) throw new Error("catalog-unavailable");
       const priorDraft = this.pendingCatalogTxt;
@@ -1053,7 +1030,7 @@ export class WorkbenchController {
 
   async requestCatalogTxtImport(path: string, onConfirmed?: () => void): Promise<void> {
     if (this.disposed) return;
-    await this.withTaskActionPermit(async () => {
+    await this.withTaskActionPermit(this.model.taskActionRevision, async () => {
       const candidate = this.dependencies.catalog.hybrid?.snapshot().candidate;
       if (candidate === undefined) throw new Error("catalog-unavailable");
       if (
@@ -1071,7 +1048,63 @@ export class WorkbenchController {
 
   async importPreviewedTaskCatalogTxt(): Promise<void> {
     if (this.disposed) return;
-    await this.withTaskActionPermit(() => this.importCatalogTxtDraft());
+    await this.withTaskActionPermit(
+      this.model.taskActionRevision,
+      () => this.importCatalogTxtDraft(),
+    );
+  }
+
+  async performTaskVerificationAction(
+    kind: "start" | "resume",
+    expectedRevision: number,
+  ): Promise<void> {
+    if (this.disposed) return;
+    assertVerificationLaunchBuildAvailable();
+    const priorRevision = this.model.taskActionRevision;
+    this.reconcileTaskProjection();
+    if (this.model.taskActionRevision !== priorRevision) this.emit();
+    await this.withTaskActionPermit(expectedRevision, async (permit) => {
+      const primaryAction = this.model.workflow.primaryAction;
+      if (
+        (kind === "start" && primaryAction !== "start")
+        || (kind === "resume" && primaryAction !== "resume" && primaryAction !== "retry")
+      ) throw new Error("task-action-stale");
+      const hybrid = this.dependencies.catalog.hybrid;
+      const settings = this.dependencies.store.settings();
+      const binding = settings.boundCloudLibrary;
+      if (hybrid === undefined || binding === null) {
+        throw new HybridCatalogError("hybrid-batch-unavailable");
+      }
+      if (kind === "resume") {
+        const batch = hybrid.snapshot().batch;
+        if (batch === undefined) throw new HybridCatalogError("hybrid-batch-unavailable");
+        await this.runVerifiedLaunch({
+          kind,
+          expectedRevision,
+          cloudRoot: binding.path,
+          groupKeys: [...batch.selectedGroupKeys],
+          confirm: false,
+        }, permit);
+        return;
+      }
+      const selectedGroupKeys = this.model.selectedVerificationGroupKeys;
+      const recommendedGroup = this.model.workflow.recommendedGroup;
+      const groupKeys = selectedGroupKeys.length > 0
+        ? [...selectedGroupKeys]
+        : recommendedGroup === null
+          ? []
+          : [recommendedGroup.groupKey];
+      await this.runVerifiedLaunch({
+        kind,
+        expectedRevision,
+        cloudRoot: binding.path,
+        groupKeys,
+        ...(this.model.verificationDirectorySelection === undefined
+          ? {}
+          : { directorySelection: this.model.verificationDirectorySelection }),
+        confirm: false,
+      }, permit);
+    });
   }
 
   async requestLargeCatalogVerification(
@@ -1081,62 +1114,15 @@ export class WorkbenchController {
     directorySelection?: CloudDirectorySelection,
   ): Promise<void> {
     if (this.disposed) return;
-    await this.withCloudAuthorityPermit("verification-launch", async () => {
-      this.assertNoLiveCloudExecution();
-      await this.requestLargeCatalogVerificationWithPermit(
-        rootPath,
-        groupKeys,
-        onConfirmed,
-        directorySelection,
-      );
-    });
-  }
-
-  private async requestLargeCatalogVerificationWithPermit(
-    rootPath: string,
-    groupKeys: readonly string[],
-    onConfirmed?: () => void,
-    directorySelection?: CloudDirectorySelection,
-  ): Promise<void> {
-    const normalized = this.validateCatalogScanRoot(rootPath);
-    const hybrid = this.dependencies.catalog.hybrid;
-    const confirmation = this.dependencies.catalogLargeScanConfirmation;
-    const active = hybrid?.snapshot().active;
-    if (hybrid === undefined || confirmation === undefined || active === undefined) {
-      throw new Error("catalog-unavailable");
-    }
-    const groupsByKey = new Map(active.groups.map((group) => [group.groupKey, group]));
-    const groups = groupKeys.map((groupKey) => {
-      const group = groupsByKey.get(groupKey);
-      if (group === undefined) throw new Error("catalog-unavailable");
-      return {
-        groupKey,
-        rootRelativePath: group.rootRelativePath,
-        label: group.label,
-        pdfCount: group.pdfCount,
-      };
-    });
-    if (isSelectedCategoryRoot(normalized, groups)) {
-      throw new Error("invalid-large-catalog-root");
-    }
-    this.assertStartAuthority(normalized, groupKeys);
-    const confirmed = await confirmation.request({
+    assertVerificationLaunchBuildAvailable();
+    await this.runVerifiedLaunch({
       kind: "start",
-      cloudRoot: normalized,
-      groups,
+      cloudRoot: rootPath,
+      groupKeys,
       ...(directorySelection === undefined ? {} : { directorySelection }),
+      confirm: true,
+      ...(onConfirmed === undefined ? {} : { onConfirmed }),
     });
-    if (this.disposed || !confirmed) return;
-    this.assertNoLiveCloudExecution();
-    this.assertStartAuthority(normalized, groupKeys);
-    const latestActive = hybrid.snapshot().active;
-    if (
-      latestActive === undefined
-      || groupKeys.some((groupKey) => !latestActive.groups.some((group) => group.groupKey === groupKey))
-    ) throw new Error("catalog-unavailable");
-    onConfirmed?.();
-    await hybrid.startLargeVerification({ cloudRoot: normalized, groupKeys });
-    if (!this.disposed) await refreshCatalogProjection(this.dependencies.catalog);
   }
 
   async requestResumeLargeCatalogVerification(
@@ -1145,43 +1131,14 @@ export class WorkbenchController {
     onConfirmed?: () => void,
   ): Promise<void> {
     if (this.disposed) return;
-    await this.withCloudAuthorityPermit("verification-launch", async () => {
-      this.assertNoLiveCloudExecution();
-      this.assertResumeAuthority(rootPath, groupKeys);
-      await this.requestResumeLargeCatalogVerificationWithPermit(rootPath, groupKeys, onConfirmed);
-    });
-  }
-
-  private async requestResumeLargeCatalogVerificationWithPermit(
-    rootPath: string,
-    groupKeys: readonly string[],
-    onConfirmed?: () => void,
-  ): Promise<void> {
-    const normalized = this.validateCatalogScanRoot(rootPath);
-    const hybrid = this.dependencies.catalog.hybrid;
-    const confirmation = this.dependencies.catalogLargeScanConfirmation;
-    if (
-      hybrid === undefined
-      || confirmation === undefined
-      || hybrid.snapshot().batch?.resumeAvailable !== true
-    ) throw new Error("catalog-unavailable");
-    const active = hybrid.snapshot().active;
-    if (active === undefined) throw new Error("catalog-unavailable");
-    const activeGroupKeys = new Set(active.groups.map((group) => group.groupKey));
-    if (groupKeys.some((groupKey) => !activeGroupKeys.has(groupKey))) {
-      throw new Error("catalog-unavailable");
-    }
-    const confirmed = await confirmation.request({
+    assertVerificationLaunchBuildAvailable();
+    await this.runVerifiedLaunch({
       kind: "resume",
-      cloudRoot: normalized,
-      groups: [],
+      cloudRoot: rootPath,
+      groupKeys,
+      confirm: true,
+      ...(onConfirmed === undefined ? {} : { onConfirmed }),
     });
-    if (this.disposed || !confirmed) return;
-    this.assertNoLiveCloudExecution();
-    this.assertResumeAuthority(normalized, groupKeys);
-    onConfirmed?.();
-    await hybrid.resumeLargeVerification({ cloudRoot: normalized, groupKeys });
-    if (!this.disposed) await refreshCatalogProjection(this.dependencies.catalog);
   }
 
   cancelLargeCatalogVerification(): void {
@@ -2343,14 +2300,172 @@ export class WorkbenchController {
     this.clearAiDisplay();
   }
 
-  private async withTaskActionPermit<T>(action: () => Promise<T>): Promise<T> {
+  private validatedVerificationLaunch(input: Readonly<{
+    kind: "start" | "resume";
+    cloudRoot: string;
+    groupKeys: readonly string[];
+    directorySelection?: CloudDirectorySelection;
+  }>): VerificationLaunchRequest {
+    if (input.groupKeys.length === 0) throw new RangeError("verification-group-required");
+    const active = this.dependencies.catalog.hybrid?.snapshot().active;
+    if (active === undefined) throw new Error("catalog-unavailable");
+    const groupsByKey = new Map(active.groups.map((group) => [group.groupKey, group]));
+    const groups: VerificationLaunchGroup[] = input.groupKeys.map((groupKey) => {
+      const group = groupsByKey.get(groupKey);
+      if (group === undefined) throw new Error("catalog-unavailable");
+      return {
+        groupKey,
+        rootRelativePath: group.rootRelativePath,
+        label: group.label,
+        pdfCount: group.pdfCount,
+      };
+    });
+    const normalized = this.validateCatalogScanRoot(input.cloudRoot);
+    if (input.kind === "start" && isSelectedCategoryRoot(normalized, groups)) {
+      throw new Error("invalid-large-catalog-root");
+    }
+    const request: VerificationLaunchRequest = input.kind === "start"
+      ? {
+          kind: "start",
+          cloudRoot: normalized,
+          groups,
+          ...(input.directorySelection === undefined
+            ? {}
+            : { directorySelection: input.directorySelection }),
+        }
+      : { kind: "resume", cloudRoot: normalized, groups };
+    return validateVerificationLaunchRequest(
+      request,
+      this.dependencies.catalogDirectorySelectionValidator,
+    );
+  }
+
+  private async runVerifiedLaunch(input: Readonly<{
+    kind: "start" | "resume";
+    expectedRevision?: number;
+    cloudRoot: string;
+    groupKeys: readonly string[];
+    directorySelection?: CloudDirectorySelection;
+    confirm: boolean;
+    onConfirmed?: () => void;
+  }>, permit?: TaskActionPermit): Promise<void> {
+    if (this.disposed) return;
+    if (input.expectedRevision !== undefined) {
+      if (
+        permit === undefined
+        || permit.revision !== input.expectedRevision
+        || this.taskActionNonce !== permit.nonce
+      ) throw new Error("task-action-stale");
+    } else if (permit !== undefined) {
+      throw new Error("task-action-stale");
+    }
+    await this.withCloudAuthorityPermit("verification-launch", async () => {
+      this.assertNoLiveCloudExecution();
+      this.assertTaskActionPermit(permit);
+      this.clearVerificationHybridMessageSuppression();
+      const hybrid = this.dependencies.catalog.hybrid;
+      if (hybrid === undefined) throw new Error("catalog-unavailable");
+      const batchAtLaunch = input.kind === "resume" ? hybrid.snapshot().batch : undefined;
+      if (input.kind === "resume" && batchAtLaunch === undefined) {
+        throw new HybridCatalogError("hybrid-batch-unavailable");
+      }
+      const groupKeys = input.kind === "resume"
+        ? [...batchAtLaunch!.selectedGroupKeys]
+        : [...input.groupKeys];
+      if (
+        input.kind === "resume"
+        && input.expectedRevision === undefined
+        && (
+          input.groupKeys.length !== groupKeys.length
+          || input.groupKeys.some((groupKey, index) => groupKey !== groupKeys[index])
+        )
+      ) throw new HybridCatalogError("hybrid-batch-unavailable");
+      const launchInput = { ...input, groupKeys };
+      const before = hybrid.snapshot();
+      const alreadyLocked = this.lockedVerificationRoot !== null;
+      let lockedForAttempt = false;
+      try {
+        let request = this.validatedVerificationLaunch(launchInput);
+        if (request.kind === "start") {
+          this.assertStartAuthority(request.cloudRoot, groupKeys);
+        } else {
+          this.assertResumeAuthority(request.cloudRoot, groupKeys);
+        }
+        if (input.confirm) {
+          const confirmation = this.dependencies.catalogLargeScanConfirmation;
+          if (confirmation === undefined) throw new Error("catalog-unavailable");
+          const confirmed = await confirmation.request(request);
+          if (this.disposed || !confirmed) return;
+          this.assertTaskActionPermit(permit);
+        }
+        this.assertNoLiveCloudExecution();
+        request = this.validatedVerificationLaunch(launchInput);
+        if (request.kind === "start") {
+          this.assertStartAuthority(request.cloudRoot, groupKeys);
+        } else {
+          this.assertResumeAuthority(request.cloudRoot, groupKeys);
+        }
+        this.assertTaskActionPermit(permit);
+        input.onConfirmed?.();
+        if (!alreadyLocked) {
+          lockedForAttempt = true;
+          this.lockVerificationRoot(request.cloudRoot);
+        }
+        if (request.kind === "start") {
+          await hybrid.startLargeVerification({
+            cloudRoot: request.cloudRoot,
+            groupKeys: request.groups.map((group) => group.groupKey),
+          });
+        } else {
+          await hybrid.resumeLargeVerification({
+            cloudRoot: request.cloudRoot,
+            groupKeys: request.groups.map((group) => group.groupKey),
+          });
+        }
+        if (!this.disposed) await refreshCatalogProjection(this.dependencies.catalog);
+        if (lockedForAttempt && !verificationBatchAdvanced(before, hybrid.snapshot())) {
+          this.unlockVerificationRoot();
+        }
+        this.clearVerificationActionMessage();
+      } catch (error) {
+        if (lockedForAttempt) this.unlockVerificationRoot();
+        if (
+          error instanceof HybridCatalogError
+          && error.code === "hybrid-cloud-root-mismatch"
+        ) {
+          this.unlockVerificationRoot();
+          this.setVerificationActionMessage("hybrid-cloud-root-mismatch");
+        }
+        this.captureVerificationValidation(error);
+        throw error;
+      }
+    });
+  }
+
+  private assertTaskActionPermit(permit: TaskActionPermit | undefined): void {
+    if (permit === undefined) return;
+    this.reconcileTaskProjection();
+    if (
+      this.taskActionNonce !== permit.nonce
+      || this.model.taskActionRevision !== permit.revision
+    ) throw new Error("task-action-stale");
+  }
+
+  private async withTaskActionPermit<T>(
+    expectedRevision: number,
+    action: (permit: TaskActionPermit) => Promise<T>,
+  ): Promise<T> {
     if (this.taskActionNonce !== null) throw new Error("task-action-busy");
+    if (expectedRevision !== this.model.taskActionRevision) {
+      throw new Error("task-action-stale");
+    }
     const nonce = Symbol("task-action");
+    const permit = Object.freeze({ revision: expectedRevision, nonce });
     this.taskActionNonce = nonce;
     this.model = { ...this.model, taskActionPending: true };
     this.emit();
     try {
-      return await action();
+      return await action(permit);
     } finally {
       if (this.taskActionNonce === nonce) {
         this.taskActionNonce = null;
@@ -2582,7 +2697,10 @@ export class WorkbenchController {
       || groupKeys.some((groupKey, index) => batch.selectedGroupKeys[index] !== groupKey)
       || groupKeys.some((groupKey) => !active.groups.some((group) => group.groupKey === groupKey))
     ) throw new HybridCatalogError("hybrid-batch-unavailable");
-    const scope = deriveCloudVerificationScope(binding);
+    const scope = deriveCloudVerificationScope(
+      binding,
+      this.dependencies.cloudVerificationRootHasher,
+    );
     if (scope === null || !cloudVerificationScopesEqual(batch.verificationScope, scope)) {
       throw new HybridCatalogError("hybrid-batch-unavailable");
     }
@@ -2641,6 +2759,7 @@ export class WorkbenchController {
       verificationBatchTombstones: settings.verificationBatchTombstones,
       legacyVerificationAdoption: settings.legacyVerificationAdoption,
       pendingCatalogTxt: this.pendingCatalogTxt,
+      cloudVerificationRootHasher: this.dependencies.cloudVerificationRootHasher,
       capabilityAvailable: hybrid !== undefined && hybrid.status !== "unavailable",
     });
     const semanticKey = this.taskProjectionSemanticKey(

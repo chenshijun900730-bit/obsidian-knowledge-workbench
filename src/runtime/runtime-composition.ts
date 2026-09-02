@@ -19,6 +19,7 @@ import type {
   WorkbenchLocaleProvider,
 } from "../i18n/workbench-i18n";
 import type { CloudDirectoryPickerPresenter } from "../ui/cloud-directory-picker";
+import type { CloudVerificationRootHasher } from "../catalog/cloud-verification-scope";
 
 export type { WorkbenchLocaleProvider } from "../i18n/workbench-i18n";
 
@@ -59,6 +60,7 @@ export interface RuntimeComposition {
     getLocale: WorkbenchLocaleProvider,
   ) => WorkbenchAiDependencies;
   readonly createCatalog: (app: App) => CloudCatalogRuntime;
+  readonly cloudVerificationRootHasher: CloudVerificationRootHasher;
   readonly createCatalogConfirmation: (
     app: App,
     getLocale: WorkbenchLocaleProvider,

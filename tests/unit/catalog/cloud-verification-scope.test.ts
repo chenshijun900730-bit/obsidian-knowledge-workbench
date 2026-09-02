@@ -5,6 +5,7 @@ import {
   decodeCloudVerificationScope,
   decodeLegacyVerificationAllowlist,
   deriveCloudVerificationScope,
+  type CloudVerificationRootHasher,
 } from "../../../src/catalog/cloud-verification-scope";
 import { HybridCatalogError } from "../../../src/catalog/hybrid-catalog-types";
 
@@ -12,6 +13,13 @@ const HASH_A = "a".repeat(64);
 const HASH_B = "b".repeat(64);
 const HASH_C = "c".repeat(64);
 const HASH_D = "d".repeat(64);
+const SCIENCE_LIBRARY_ROOT_SHA256 =
+  "7d5d019db88e67493bc4415a5885bd32fe67d6c716346eba047d79ecca6da029";
+const NFC_ROOT_SHA256 =
+  "a2ec51c5fe3ba6650e8056e60b1033aeeeb25398a6ebb3d683934b99b84c57cc";
+const hashVerificationRoot: CloudVerificationRootHasher = (normalizedRoot) => (
+  createHash("sha256").update(normalizedRoot, "utf8").digest("hex")
+);
 
 const allowlist = () => ({
   candidate: {
@@ -43,12 +51,64 @@ describe("cloud verification authority contracts", () => {
       path: "/科学文库",
       sourceImportSha256: HASH_A,
       verificationGeneration: 3,
-    })).toEqual({
+    }, hashVerificationRoot)).toEqual({
       generation: 3,
       sourceImportSha256: HASH_A,
-      cloudRootSha256: createHash("sha256").update("/科学文库", "utf8").digest("hex"),
+      cloudRootSha256: SCIENCE_LIBRARY_ROOT_SHA256,
     });
-    expect(deriveCloudVerificationScope(null)).toBeNull();
+  });
+
+  it("normalizes the root to NFC before invoking the injected hasher", () => {
+    const observedRoots: string[] = [];
+    const hasher: CloudVerificationRootHasher = (normalizedRoot) => {
+      observedRoots.push(normalizedRoot);
+      return hashVerificationRoot(normalizedRoot);
+    };
+
+    expect(deriveCloudVerificationScope({
+      schemaVersion: 1,
+      path: "/Cafe\u0301",
+      sourceImportSha256: HASH_A,
+      verificationGeneration: 3,
+    }, hasher)).toEqual({
+      generation: 3,
+      sourceImportSha256: HASH_A,
+      cloudRootSha256: NFC_ROOT_SHA256,
+    });
+    expect(observedRoots).toEqual(["/Café"]);
+  });
+
+  it("fails closed when hashing is unavailable and never hashes an absent binding", () => {
+    let calls = 0;
+    const unavailableHasher: CloudVerificationRootHasher = () => {
+      calls += 1;
+      return null;
+    };
+    const binding = {
+      schemaVersion: 1 as const,
+      path: "/科学文库",
+      sourceImportSha256: HASH_A,
+      verificationGeneration: 3,
+    };
+
+    expect(deriveCloudVerificationScope(binding, unavailableHasher)).toBeNull();
+    expect(calls).toBe(1);
+    expect(deriveCloudVerificationScope(null, unavailableHasher)).toBeNull();
+    expect(calls).toBe(1);
+  });
+
+  it("rejects an injected digest that is not an exact lowercase SHA-256", () => {
+    const binding = {
+      schemaVersion: 1 as const,
+      path: "/科学文库",
+      sourceImportSha256: HASH_A,
+      verificationGeneration: 3,
+    };
+
+    for (const digest of ["A".repeat(64), "a".repeat(63), "not-a-digest"]) {
+      expect(() => deriveCloudVerificationScope(binding, () => digest))
+        .toThrow(new HybridCatalogError("hybrid-record-invalid"));
+    }
   });
 
   it("rejects zero generation, malformed source identity, and a root binding", () => {
@@ -72,7 +132,7 @@ describe("cloud verification authority contracts", () => {
         verificationGeneration: 1,
       },
     ]) {
-      expect(() => deriveCloudVerificationScope(binding as never)).toThrow();
+      expect(() => deriveCloudVerificationScope(binding as never, hashVerificationRoot)).toThrow();
     }
   });
 

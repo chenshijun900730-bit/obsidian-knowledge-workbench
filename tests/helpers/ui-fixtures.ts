@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type { WorkbenchActions, WorkbenchViewModel } from "../../src/ui/workbench-view";
 import type { CloudCatalogRuntime } from "../../src/catalog/cloud-catalog-runtime";
 import { FakeCloudCatalogRuntime } from "../fakes/fake-cloud-catalog-runtime";
@@ -40,6 +41,9 @@ import type {
 import type { LibraryWorkflowState } from "../../src/ui/library-workflow-state";
 
 export const TEST_SOURCE_IMPORT_SHA256 = "a".repeat(64);
+export const TEST_CLOUD_VERIFICATION_ROOT_HASHER = (normalizedRoot: string): string => (
+  createHash("sha256").update(normalizedRoot, "utf8").digest("hex")
+);
 
 export const TEST_HYBRID_ACTIVE_AUTHORITY = {
   sourceImportSha256: TEST_SOURCE_IMPORT_SHA256,
@@ -889,6 +893,7 @@ export function controllerFixture(options: ControllerFixtureOptions = {}) {
     clock,
     ai,
     catalog,
+    cloudVerificationRootHasher: TEST_CLOUD_VERIFICATION_ROOT_HASHER,
     catalogConfirmation,
     catalogDirectorySelectionValidator: validateCloudDirectorySelection,
     ...(options.catalogTxtImportConfirmation === undefined

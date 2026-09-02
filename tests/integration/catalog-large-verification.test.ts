@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -18,7 +19,7 @@ const SCOPE = deriveCloudVerificationScope({
   path: "/Library",
   sourceImportSha256: SOURCE_HASH,
   verificationGeneration: 1,
-})!;
+}, (normalizedRoot) => createHash("sha256").update(normalizedRoot, "utf8").digest("hex"))!;
 const AUTHORITY = {
   kind: "scoped" as const,
   scope: SCOPE,

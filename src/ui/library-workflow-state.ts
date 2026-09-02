@@ -2,6 +2,7 @@ import type { CloudCatalogConnectionViewModel } from "../catalog/cloud-catalog-r
 import {
   cloudVerificationScopesEqual,
   deriveCloudVerificationScope,
+  type CloudVerificationRootHasher,
   type CloudVerificationScope,
 } from "../catalog/cloud-verification-scope";
 import type {
@@ -61,6 +62,7 @@ export interface LibraryWorkflowInput {
   readonly verificationBatchTombstones: VerificationBatchTombstonesV1;
   readonly legacyVerificationAdoption: LegacyVerificationAdoptionV1;
   readonly pendingCatalogTxt: PendingCatalogTxtDraft | null;
+  readonly cloudVerificationRootHasher: CloudVerificationRootHasher;
   readonly capabilityAvailable: boolean;
 }
 
@@ -214,6 +216,7 @@ const currentScopeFor = (
   binding: BoundCloudLibraryV1 | null,
   generation: number,
   activeSourceSha256: string,
+  hashRoot: CloudVerificationRootHasher,
 ): CloudVerificationScope | null => {
   if (
     binding === null
@@ -223,7 +226,7 @@ const currentScopeFor = (
     || binding.sourceImportSha256 !== activeSourceSha256
   ) return null;
   try {
-    return deriveCloudVerificationScope(binding);
+    return deriveCloudVerificationScope(binding, hashRoot);
   } catch {
     return null;
   }
@@ -302,6 +305,7 @@ export const deriveLibraryWorkflowState = (
     input.boundCloudLibrary,
     input.cloudVerificationGeneration,
     active.sourceImportSha256,
+    input.cloudVerificationRootHasher,
   );
   if (currentScope === null) return state("needs-library");
   if (input.legacyVerificationAdoption.state === "pending") return state("repair-library");

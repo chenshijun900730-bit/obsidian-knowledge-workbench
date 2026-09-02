@@ -154,6 +154,7 @@ const baseInput = (): LibraryWorkflowInput => ({
   verificationBatchTombstones: validTombstones(),
   legacyVerificationAdoption: noAdoption(),
   pendingCatalogTxt: null,
+  cloudVerificationRootHasher: () => CLOUD_ROOT_SHA256,
   capabilityAvailable: true,
 });
 
@@ -362,6 +363,21 @@ describe("library workflow state", () => {
       hybrid: previewed,
       pendingCatalogTxt: { path: "/synthetic/catalog.txt", sourceSha256: SOURCE_B },
     }).kind).toBe("needs-txt");
+  });
+
+  it("fails closed to library repair when the composition cannot derive a valid root digest", () => {
+    const paused = hybrid({ status: "paused", batch: batch() });
+
+    expect(deriveLibraryWorkflowState({
+      ...baseInput(),
+      hybrid: paused,
+      cloudVerificationRootHasher: () => null,
+    })).toMatchObject({ kind: "needs-library", primaryAction: "choose-library" });
+    expect(deriveLibraryWorkflowState({
+      ...baseInput(),
+      hybrid: paused,
+      cloudVerificationRootHasher: () => "invalid-digest",
+    })).toMatchObject({ kind: "needs-library", primaryAction: "choose-library" });
   });
 
   it("does not let superseded, unlisted legacy, or scope-mismatched batches block a fresh start", () => {
