@@ -9,7 +9,6 @@ import type {
 import { CloudDirectoryBrowserService } from "../../src/catalog/cloud-directory-browser";
 import type {
   CloudDirectoryPickerPurpose,
-  CloudDirectorySelection,
 } from "../../src/catalog/cloud-directory-selection";
 import { createDirectoryPickerI18n } from "../../src/i18n/workbench-directory-picker-i18n";
 import {
@@ -82,7 +81,9 @@ const fixture = (initial = state()) => {
   const events = {
     enter: vi.fn<(path: string) => void>(),
     highlight: vi.fn<(path: string) => void>(),
-    select: vi.fn<(selection: CloudDirectorySelection) => void>(),
+    selectCurrent: vi.fn<() => void>(),
+    selectHighlighted: vi.fn<() => void>(),
+    selectCategory: vi.fn<(path: string) => void>(),
     breadcrumb: vi.fn<(path: string) => void>(),
     continueLayer: vi.fn<() => void>(),
     retry: vi.fn<() => void>(),
@@ -95,7 +96,9 @@ const fixture = (initial = state()) => {
     {
       onEnter: events.enter,
       onHighlight: events.highlight,
-      onSelect: events.select,
+      onSelectCurrent: events.selectCurrent,
+      onSelectHighlighted: events.selectHighlighted,
+      onSelectCategory: events.selectCategory,
       onBreadcrumb: events.breadcrumb,
       onContinue: events.continueLayer,
       onRetry: events.retry,
@@ -108,8 +111,8 @@ const fixture = (initial = state()) => {
 afterEach(() => document.body.replaceChildren());
 
 describe("cloud directory browser view", () => {
-  it("separates entering, highlighting, directory selection, and category selection", () => {
-    const { host, events } = fixture();
+  it("forwards navigation and path-only selection actions without constructing selections", () => {
+    const { host, surface, events } = fixture();
 
     host.querySelector<HTMLButtonElement>(
       '[data-action="enter-directory"][data-directory-path="/科学文库/9-文学"]',
@@ -119,17 +122,25 @@ describe("cloud directory browser view", () => {
     )!.click();
     expect(events.enter).toHaveBeenCalledWith("/科学文库/9-文学");
     expect(events.highlight).toHaveBeenCalledWith("/科学文库/9-文学");
-    expect(events.select).not.toHaveBeenCalled();
+    expect(events.selectCurrent).not.toHaveBeenCalled();
+    expect(events.selectHighlighted).not.toHaveBeenCalled();
+    expect(events.selectCategory).not.toHaveBeenCalled();
+
+    host.querySelector<HTMLButtonElement>(
+      '[data-action="select-current-directory"]',
+    )!.click();
+    expect(events.selectCurrent).toHaveBeenCalledOnce();
+
+    surface.update(state({ highlightedPath: "/科学文库/9-文学" }));
+    host.querySelector<HTMLButtonElement>(
+      '[data-action="select-highlighted-directory"]',
+    )!.click();
+    expect(events.selectHighlighted).toHaveBeenCalledOnce();
 
     host.querySelector<HTMLButtonElement>(
       '[data-action="select-category"][data-directory-path="/科学文库/6-经济类"]',
     )!.click();
-    expect(events.select).toHaveBeenCalledWith({
-      kind: "category",
-      selectedPath: "/科学文库/6-经济类",
-      effectiveRoot: "/科学文库",
-      groupKey: GROUP_KEY,
-    });
+    expect(events.selectCategory).toHaveBeenCalledWith("/科学文库/6-经济类");
     expect(events.enter).toHaveBeenCalledTimes(1);
   });
 
@@ -143,6 +154,7 @@ describe("cloud directory browser view", () => {
 
     expect(host.querySelector<HTMLButtonElement>('[data-action="select-current-directory"]')
       ?.disabled).toBe(true);
+    expect(host.querySelector('[data-action="select-category"]')).toBeNull();
     host.querySelector<HTMLButtonElement>('[data-action="browse-breadcrumb"]')!.click();
     expect(events.breadcrumb).toHaveBeenCalledWith("/");
   });

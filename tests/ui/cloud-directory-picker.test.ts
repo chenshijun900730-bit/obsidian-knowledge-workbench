@@ -374,12 +374,13 @@ describe("cloud directory picker", () => {
     expect(fixture.surface.contentEl.textContent).toBe("");
   });
 
-  it("selects a uniquely matched category without loading that category", async () => {
+  it("drafts a uniquely matched category without loading it and remembers only on Use", async () => {
     const groupKey = `group:${"b".repeat(64)}`;
     const browser = new FakeBrowser();
     browser.layers.set("/科学文库", browserLayer("/科学文库", ["6-经济类"]));
+    const candidates = new FakeCandidates([exact("/科学文库")]);
     const fixture = pickerFixture(
-      new FakeCandidates([exact("/科学文库")]),
+      candidates,
       undefined,
       "zh-CN",
       {
@@ -393,8 +394,29 @@ describe("cloud directory picker", () => {
     fixture.surface.contentEl.querySelector<HTMLButtonElement>(
       '[data-action="browse-candidate-directory"]',
     )!.click();
-    fixture.surface.contentEl.querySelector<HTMLButtonElement>(
+    const category = fixture.surface.contentEl.querySelector<HTMLButtonElement>(
       '[data-action="select-category"]',
+    )!;
+    category.dispatchEvent(new KeyboardEvent("keydown", {
+      key: "Enter",
+      bubbles: true,
+      cancelable: true,
+    }));
+    expect(fixture.surface.contentEl.textContent).toContain("当前路径：/科学文库");
+    expect(browser.loads).toEqual([]);
+    category.click();
+    let settled = false;
+    void fixture.result.then(() => { settled = true; });
+    await flush();
+    expect(settled).toBe(false);
+    expect(fixture.surface.contentEl.querySelector('[data-selected-path="true"]')?.textContent)
+      .toContain("/科学文库/6-经济类");
+    expect(fixture.surface.contentEl.querySelector<HTMLButtonElement>(
+      '[data-action="use-directory"]',
+    )?.disabled).toBe(false);
+    expect(candidates.rememberCalls).toEqual([]);
+    fixture.surface.contentEl.querySelector<HTMLButtonElement>(
+      '[data-action="use-directory"]',
     )!.click();
     await expect(fixture.result).resolves.toEqual({
       kind: "category",
@@ -402,6 +424,7 @@ describe("cloud directory picker", () => {
       effectiveRoot: "/科学文库",
       groupKey,
     });
+    expect(candidates.rememberCalls).toEqual(["/科学文库/6-经济类"]);
     expect(browser.loads).toEqual([]);
     expect(fixture.surface.contentEl.textContent).not.toContain("private");
   });
@@ -446,6 +469,12 @@ describe("cloud directory picker", () => {
 
     fixture.surface.contentEl.querySelector<HTMLButtonElement>(
       '[data-action="select-highlighted-directory"]',
+    )!.click();
+    await flush();
+    expect(settled).toBe(false);
+    expect(candidates.rememberCalls).toEqual([]);
+    fixture.surface.contentEl.querySelector<HTMLButtonElement>(
+      '[data-action="use-directory"]',
     )!.click();
     await expect(fixture.result).resolves.toEqual({
       kind: "directory",
@@ -814,7 +843,7 @@ describe("cloud directory picker", () => {
     await expect(result).resolves.toBeNull();
   });
 
-  it("returns the exact path when recent persistence fails and emits one fixed notice", async () => {
+  it("keeps the picker open when recent persistence fails and emits one fixed notice", async () => {
     const candidates = new FakeCandidates([exact("/Synthetic/Chosen", "recent")]);
     candidates.rememberFailure = new Error("private-storage-detail");
     const { notices, result, surface } = pickerFixture(candidates);
@@ -823,13 +852,17 @@ describe("cloud directory picker", () => {
     )!.click();
     surface.contentEl.querySelector<HTMLButtonElement>('[data-action="use-directory"]')!.click();
 
-    await expect(result).resolves.toEqual({
-      kind: "directory",
-      selectedPath: "/Synthetic/Chosen",
-      effectiveRoot: "/Synthetic/Chosen",
-    });
-    expect(notices).toEqual(["目录已选中，但最近目录保存失败；本次选择仍然有效。"]);
+    let settled = false;
+    void result.then(() => { settled = true; });
+    await flush();
+    expect(settled).toBe(false);
+    expect(surface.contentEl.querySelector('[data-selected-path="true"]')?.textContent)
+      .toContain("/Synthetic/Chosen");
+    expect(notices).toEqual(["最近目录保存失败，因此未应用本次选择；请重试或取消。"]);
     expect(JSON.stringify(notices)).not.toContain("private-storage-detail");
+    surface.contentEl.querySelector<HTMLButtonElement>('[data-action="cancel-directory-picker"]')!
+      .click();
+    await expect(result).resolves.toBeNull();
   });
 
   it("aborts and ignores a late lookup after dispose", async () => {
@@ -953,7 +986,7 @@ describe("cloud directory picker", () => {
     await expect(result).resolves.toBeNull();
   });
 
-  it("treats use as committed while settling despite Escape, cancel, host close, and dispose", async () => {
+  it("settles null once when the host closes during remember and ignores late completion", async () => {
     let release!: () => void;
     const candidates = new FakeCandidates([exact("/Synthetic/Chosen", "recent")]);
     candidates.beforeRemember = () => new Promise<void>((resolve) => { release = resolve; });
@@ -977,18 +1010,14 @@ describe("cloud directory picker", () => {
     cancel.click();
     surface.close();
     picker.dispose();
-    let settled = false;
-    void result.then(() => { settled = true; });
-    await flush();
-    expect(settled).toBe(false);
+    let settlements = 0;
+    void result.then(() => { settlements += 1; });
+    await expect(result).resolves.toBeNull();
     expect(surface.contentEl.textContent).toBe("");
 
     release();
-    await expect(result).resolves.toEqual({
-      kind: "directory",
-      selectedPath: "/Synthetic/Chosen",
-      effectiveRoot: "/Synthetic/Chosen",
-    });
+    await flush();
+    expect(settlements).toBe(1);
     expect(notices).toEqual([]);
     expect(surface.contentEl.textContent).toBe("");
     expect(surface.closeCalls).toBe(1);

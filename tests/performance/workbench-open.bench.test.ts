@@ -148,7 +148,9 @@ it("keeps a 68,959-entry catalog and one 20,000-folder browser surface allocatio
     {
       onEnter: () => undefined,
       onHighlight: () => undefined,
-      onSelect: () => undefined,
+      onSelectCurrent: () => undefined,
+      onSelectHighlighted: () => undefined,
+      onSelectCategory: () => undefined,
       onBreadcrumb: () => undefined,
       onContinue: () => undefined,
       onRetry: () => undefined,

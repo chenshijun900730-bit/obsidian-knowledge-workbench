@@ -3,11 +3,7 @@ import {
   type CloudDirectoryBrowserStopReason,
   type CloudDirectoryLayerSnapshot,
 } from "../catalog/cloud-directory-browser";
-import {
-  resolveCloudDirectorySelection,
-  type CloudDirectoryPickerPurpose,
-  type CloudDirectorySelection,
-} from "../catalog/cloud-directory-selection";
+import type { CloudDirectoryPickerPurpose } from "../catalog/cloud-directory-selection";
 import type {
   DirectoryPickerI18n,
   DirectoryPickerMessageKey,
@@ -40,7 +36,9 @@ export interface CloudDirectoryBrowserViewState {
 export interface CloudDirectoryBrowserViewActions {
   readonly onEnter: (path: string) => void;
   readonly onHighlight: (path: string) => void;
-  readonly onSelect: (selection: CloudDirectorySelection) => void;
+  readonly onSelectCurrent: () => void;
+  readonly onSelectHighlighted: () => void;
+  readonly onSelectCategory: (path: string) => void;
   readonly onBreadcrumb: (path: string) => void;
   readonly onContinue: () => void;
   readonly onRetry: () => void;
@@ -70,37 +68,18 @@ const fixedErrorKey = (
   return "directoryPicker.browser.error.fixed";
 };
 
-const safeCategorySelection = (
+const categoryForPath = (
   state: CloudDirectoryBrowserViewState,
   selectedPath: string,
-): CloudDirectorySelection | null => {
-  if (state.purpose.kind !== "verification") return null;
-  try {
-    return resolveCloudDirectorySelection({
-      selectionKind: "category",
-      purpose: state.purpose,
-      currentPath: state.currentPath,
-      selectedPath,
-    });
-  } catch {
-    return null;
-  }
-};
-
-const safeDirectorySelection = (
-  state: CloudDirectoryBrowserViewState,
-  selectedPath: string,
-): CloudDirectorySelection | null => {
-  try {
-    return resolveCloudDirectorySelection({
-      selectionKind: "directory",
-      purpose: state.purpose,
-      currentPath: state.currentPath,
-      selectedPath,
-    });
-  } catch {
-    return null;
-  }
+): Extract<CloudDirectoryPickerPurpose, { kind: "verification" }>["groups"][number] | null => {
+  if (state.purpose.kind !== "verification" || state.currentPath === "/") return null;
+  const matches = state.purpose.groups.filter((group) => (
+    group.groupKey !== "txt-root-items"
+    && group.rootRelativePath.length > 0
+    && !group.rootRelativePath.includes("/")
+    && `${state.currentPath}/${group.rootRelativePath}` === selectedPath
+  ));
+  return matches.length === 1 ? matches[0] ?? null : null;
 };
 
 let browserViewSequence = 0;
@@ -144,23 +123,22 @@ export function createCloudDirectoryBrowserView(
     } else if (action === "highlight-directory" && path !== undefined && isVisibleDirectory) {
       actions.onHighlight(path);
     } else if (action === "select-category" && path !== undefined && isVisibleDirectory) {
-      const selection = safeCategorySelection(state, path);
-      if (selection?.kind === "category") actions.onSelect(selection);
+      actions.onSelectCategory(path);
     } else if (
       action === "browse-breadcrumb"
       && path !== undefined
       && state.ancestors.some((ancestor) => ancestor.path === path)
     ) {
       actions.onBreadcrumb(path);
-    } else if (action === "select-current-directory") {
-      const selection = safeDirectorySelection(state, state.currentPath);
-      if (selection !== null && state.activity !== "running") actions.onSelect(selection);
+    } else if (action === "select-current-directory" && state.activity !== "running") {
+      actions.onSelectCurrent();
     } else if (action === "select-highlighted-directory") {
       const highlightedPath = state.highlightedPath;
-      const selection = highlightedPath === null
-        ? null
-        : safeDirectorySelection(state, highlightedPath);
-      if (selection !== null && state.activity !== "running") actions.onSelect(selection);
+      if (
+        highlightedPath !== null
+        && state.activity !== "running"
+        && directories.some((directory) => directory.path === highlightedPath)
+      ) actions.onSelectHighlighted();
     } else if (
       action === "continue-directory-layer"
       && state.activity === "incomplete"
@@ -215,8 +193,7 @@ export function createCloudDirectoryBrowserView(
     selectCurrent.type = "button";
     selectCurrent.dataset.action = "select-current-directory";
     selectCurrent.textContent = i18n.t("directoryPicker.browser.selectFolder");
-    const currentSelection = safeDirectorySelection(state, state.currentPath);
-    selectCurrent.disabled = currentSelection === null || state.activity === "running";
+    selectCurrent.disabled = state.currentPath === "/" || state.activity === "running";
     if (state.currentPath === "/") {
       const rootWarning = doc.createElement("p");
       rootWarning.className = "knowledge-workbench__directory-browser-warning";
@@ -354,23 +331,18 @@ export function createCloudDirectoryBrowserView(
           highlight.setAttribute("aria-pressed", String(state.highlightedPath === directory.path));
           highlight.textContent = i18n.t("directoryPicker.browser.highlight");
           row.append(enter, highlight);
-          const category = safeCategorySelection(state, directory.path);
-          if (category?.kind === "category") {
-            const group = state.purpose.kind === "verification"
-              ? state.purpose.groups.find((candidate) => candidate.groupKey === category.groupKey)
-              : undefined;
-            if (group !== undefined) {
-              const selectCategory = doc.createElement("button");
-              selectCategory.type = "button";
-              selectCategory.className = "knowledge-workbench__directory-browser-category";
-              selectCategory.dataset.action = "select-category";
-              selectCategory.dataset.directoryPath = directory.path;
-              selectCategory.dataset.groupKey = category.groupKey;
-              selectCategory.textContent = i18n.t("directoryPicker.browser.selectCategory", {
-                label: group.label,
-              });
-              row.append(selectCategory);
-            }
+          const group = categoryForPath(state, directory.path);
+          if (group !== null) {
+            const selectCategory = doc.createElement("button");
+            selectCategory.type = "button";
+            selectCategory.className = "knowledge-workbench__directory-browser-category";
+            selectCategory.dataset.action = "select-category";
+            selectCategory.dataset.directoryPath = directory.path;
+            selectCategory.dataset.groupKey = group.groupKey;
+            selectCategory.textContent = i18n.t("directoryPicker.browser.selectCategory", {
+              label: group.label,
+            });
+            row.append(selectCategory);
           }
           return row;
         },
@@ -436,8 +408,8 @@ export function createCloudDirectoryBrowserView(
       select.type = "button";
       select.dataset.action = "select-highlighted-directory";
       select.textContent = i18n.t("directoryPicker.browser.selectFolder");
-      const selection = safeDirectorySelection(state, state.highlightedPath);
-      select.disabled = selection === null || state.activity === "running";
+      select.disabled = state.activity === "running"
+        || !directories.some((directory) => directory.path === state.highlightedPath);
       root.append(highlighted, select);
     }
 

@@ -6,6 +6,18 @@ const placeholders = (value: string): readonly string[] => (
 );
 
 describe("workbench directory picker i18n", () => {
+  it("reports recent-folder persistence failure as a fail-closed selection", () => {
+    const zh = createDirectoryPickerI18n("zh-CN");
+    const en = createDirectoryPickerI18n("en");
+
+    expect(zh.t("directoryPicker.notice.persistenceFailure")).toBe(
+      "最近目录保存失败，因此未应用本次选择；请重试或取消。",
+    );
+    expect(en.t("directoryPicker.notice.persistenceFailure")).toBe(
+      "Saving to Recent failed, so this selection was not applied. Retry or cancel.",
+    );
+  });
+
   it("provides paired browse, progress, recovery, and safety messages", () => {
     const zh = createDirectoryPickerI18n("zh-CN");
     const en = createDirectoryPickerI18n("en");
