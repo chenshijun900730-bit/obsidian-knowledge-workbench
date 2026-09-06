@@ -43,6 +43,7 @@ describe("start page", () => {
     expect(root.querySelector('[aria-label="知识地图"]')).not.toBeNull();
     expect(root.querySelector('[data-start-section="suggestions"]')).not.toBeNull();
     expect(root.querySelector('[data-action="quick-capture"]')).not.toBeNull();
+    expect(root.textContent).not.toContain("笔记改动");
   });
 
   it("routes catalog search and verification recommendations through shell navigation", () => {

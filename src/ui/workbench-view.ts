@@ -32,6 +32,7 @@ import {
 } from "../i18n/workbench-i18n";
 import { renderWorkbenchShell } from "./workbench-shell";
 import { renderStartPage, type StartSection } from "./start-page";
+import { renderMorePage } from "./more-page";
 import {
   routeForTab,
   type WorkbenchRoute,
@@ -214,6 +215,7 @@ const STATUS_MESSAGE_KEYS: Readonly<Record<string, WorkbenchMessageKey>> = {
 const verificationPageSurfaces = new WeakMap<HTMLElement, VerificationPageSurface>();
 const folderSelectionPageSurfaces = new WeakMap<HTMLElement, DisposableSurface>();
 const settingsPageSurfaces = new WeakMap<HTMLElement, SettingsSectionsSurface>();
+const settingsPageSections = new WeakMap<HTMLElement, string>();
 const recentLibraryItems = new WeakMap<HTMLElement, readonly RecentLibraryItem[]>();
 
 const recordRecentLibraryItem = (
@@ -289,6 +291,7 @@ const disposeVerificationPage = (root: HTMLElement): void => {
 
 const isSettingsRoute = (route: WorkbenchRoute): boolean => (
   route.tab === "more"
+  && route.page !== "overview"
   && route.page !== "history"
   && route.page !== "knowledge-tools"
 );
@@ -296,6 +299,18 @@ const isSettingsRoute = (route: WorkbenchRoute): boolean => (
 const disposeSettingsPage = (root: HTMLElement): void => {
   settingsPageSurfaces.get(root)?.dispose();
   settingsPageSurfaces.delete(root);
+  settingsPageSections.delete(root);
+};
+
+const settingsSectionForRoute = (route: WorkbenchRoute) => {
+  if (route.tab !== "more") return undefined;
+  switch (route.page) {
+    case "connection": return "baidu" as const;
+    case "catalog-data": return "catalog-data" as const;
+    case "language": return "language" as const;
+    case "advanced": return "privacy-ai" as const;
+    default: return undefined;
+  }
 };
 
 const localizedStatusMessage = (
@@ -386,9 +401,14 @@ export function renderWorkbench(
     "details[data-cloud-directory-advanced]",
   )?.open ?? false;
   const renderedSettingsSurface = settingsPageSurfaces.get(root);
+  const nextSettingsSection = settingsSectionForRoute(model.route);
   if (
     renderedSettingsSurface !== undefined
-    && (!isSettingsRoute(model.route) || renderedSettingsSurface !== settingsSurface)
+    && (
+      !isSettingsRoute(model.route)
+      || renderedSettingsSurface !== settingsSurface
+      || settingsPageSections.get(root) !== nextSettingsSection
+    )
   ) {
     disposeSettingsPage(root);
   }
@@ -526,6 +546,15 @@ export function renderWorkbench(
       onChooseDifferentCategory: surfaceActions.onTaskChooseDifferentCategory,
       onOpenDetails: surfaceActions.onTaskOpenDetails,
     }, verificationRunDetailsOpen);
+  } else if (model.route.tab === "more" && model.route.page === "overview") {
+    renderMorePage(panel, {
+      locale: model.locale,
+      connectionStatus: model.catalogConnection?.status,
+      rememberedLibrary: model.boundLibraryPath,
+      activeCatalogCount: model.hybridCatalog?.active?.pdfCount ?? model.catalog.pdfCount,
+      openAtStartup: false,
+      onSelectRoute: surfaceActions.onSelectRoute,
+    });
   } else if (model.route.page === "history") {
     renderHistory(panel, model.history ?? { entries: [] }, {
       onUndo: surfaceActions.onUndoHistory ?? (() => undefined),
@@ -536,8 +565,10 @@ export function renderWorkbench(
   } else if (model.route.page === "knowledge-tools") {
     renderStartPage(panel, { model, actions: surfaceActions, policy });
   } else if (settingsSurface !== undefined) {
-    settingsSurface.render(panel, model.locale);
+    const section = settingsSectionForRoute(model.route);
+    settingsSurface.render(panel, model.locale, section === undefined ? undefined : { section });
     settingsPageSurfaces.set(root, settingsSurface);
+    if (section !== undefined) settingsPageSections.set(root, section);
   } else {
     const placeholder = doc.createElement("p");
     placeholder.className = "knowledge-workbench__placeholder";

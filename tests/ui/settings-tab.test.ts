@@ -291,7 +291,42 @@ describe("AI settings", () => {
   });
 });
 
-describe("hybrid catalog settings", () => {
+describe("native task handoff", () => {
+  it("uses one enabled task action instead of rendering category controls", () => {
+    const openTaskOverview = vi.fn(async () => undefined);
+    const SettingsTab = createSettingsTabClass(
+      SettingsSurface as unknown as PluginSettingTabConstructor,
+      SecretSurface,
+      NORMAL_RUNTIME_POLICY,
+    );
+    const controller = {
+      settings: () => ({
+        writeEnabled: false, writePreviewAcknowledged: false, locale: "zh-CN" as const,
+        openAtStartup: false, folderRules: [], excludedPrefixes: [], aiEnabled: false,
+        aiEndpoint: "", aiModel: "", secretId: "", recentCloudDirectories: EMPTY_RECENT_CLOUD_DIRECTORIES,
+        boundCloudLibrary: null, cloudVerificationGeneration: 0,
+        verificationBatchTombstones: { schemaVersion: 1, state: "valid", batchIds: [] } as const,
+        legacyVerificationAdoption: { schemaVersion: 1, state: "none" } as const,
+      }),
+      folderRuleProposals: () => [], previewSampleChange: () => undefined,
+      setOpenAtStartup: async () => undefined, setLocale: async () => undefined,
+      setWriteEnabled: async () => undefined, applyFolderRules: async () => undefined,
+      setExcludedPrefixes: async () => undefined,
+    };
+    const tab = new SettingsTab({} as App, {} as never, controller, openTaskOverview);
+    (tab as unknown as { display(): void }).display();
+
+    expect(tab.containerEl.querySelector('[data-catalog-group-key]')).toBeNull();
+    expect(tab.containerEl.querySelector('[data-action="catalog-start-large-verification"]')).toBeNull();
+    expect(tab.containerEl.querySelector('[data-action="catalog-resume-large-verification"]')).toBeNull();
+    const action = tab.containerEl.querySelector<HTMLButtonElement>('[data-action="open-task-overview"]')!;
+    expect(action.disabled).toBe(false);
+    action.click();
+    expect(openTaskOverview).toHaveBeenCalledOnce();
+  });
+});
+
+describe.skip("retired native category-verification controls", () => {
   const baseSettings = {
     writeEnabled: false, writePreviewAcknowledged: false, locale: "zh-CN" as const, openAtStartup: false,
     folderRules: [], excludedPrefixes: [], aiEnabled: false,

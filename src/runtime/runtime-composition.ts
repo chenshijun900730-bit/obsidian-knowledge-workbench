@@ -59,6 +59,7 @@ export interface RuntimeComposition {
     plugin: Plugin,
     controller: WorkbenchController,
     getLocale: WorkbenchLocaleProvider,
+    openTaskOverview?: () => Promise<void>,
   ) => PluginSettingTab;
   readonly createWorkbenchSettingsSurface?: (
     app: App,

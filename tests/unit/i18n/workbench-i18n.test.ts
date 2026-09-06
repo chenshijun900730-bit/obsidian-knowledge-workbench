@@ -52,6 +52,17 @@ describe("workbench i18n", () => {
     }
   });
 
+  it("provides paired More-summary copy and the note-change label", () => {
+    const zh = createWorkbenchI18n("zh-CN");
+    const en = createWorkbenchI18n("en");
+    expect(zh.t("history.title")).toBe("笔记改动");
+    expect(en.t("history.title")).toBe("Note changes");
+    expect(zh.t("more.connection.status", { status: "已授权" })).toBe("状态：已授权");
+    expect(en.t("more.catalog.count", { count: "68,959" })).toBe("68,959 candidates");
+    expect(zh.t("settings.surface.openTaskOverview")).toBe("打开任务页");
+    expect(en.t("host.settings.closeGuidance")).toBe("Close Settings after the task page opens.");
+  });
+
   it("rejects missing interpolation values", () => {
     expect(() => createWorkbenchI18n("zh-CN").t("catalog.pdfCount"))
       .toThrow("i18n-interpolation-missing:count");

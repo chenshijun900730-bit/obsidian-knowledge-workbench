@@ -127,6 +127,17 @@ export async function activateWorkbench(app: App): Promise<void> {
   await app.workspace.revealLeaf(leaf);
 }
 
+/** Narrow feature check for Obsidian's undocumented Settings close capability. */
+export function closeObsidianSettingsIfSupported(app: App): boolean {
+  const host = app as unknown as Readonly<{
+    setting?: Readonly<{ close?: unknown }>;
+  }>;
+  const close = host.setting?.close;
+  if (typeof close !== "function") return false;
+  close.call(host.setting);
+  return true;
+}
+
 export async function activateWorkbenchWithRetry(
   app: App,
   isExpectedView: (view: unknown) => boolean,

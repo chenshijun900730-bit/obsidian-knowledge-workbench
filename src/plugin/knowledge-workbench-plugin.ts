@@ -15,6 +15,7 @@ import {
   initializeRecoveredLayout,
   LifecycleEpoch,
   ObsidianWorkspaceAdapter,
+  closeObsidianSettingsIfSupported,
   requireActivatedWorkbench,
   RetryableAsyncGate,
   runVisibleHostAction,
@@ -238,7 +239,24 @@ export function createKnowledgeWorkbenchPluginClass(runtime: RuntimeComposition)
         name: loadI18n.t("host.command.open"),
         callback: () => this.requestOpenWorkbench(),
       });
-      this.addSettingTab(runtime.createSettingsTab(this.app, this, controller, getLocale));
+      this.addSettingTab(runtime.createSettingsTab(
+        this.app,
+        this,
+        controller,
+        getLocale,
+        async () => {
+          controller.selectRoute({ tab: "task", page: "overview" });
+          const settingsClosed = closeObsidianSettingsIfSupported(this.app);
+          if (!settingsClosed) {
+            new Notice(createWorkbenchI18n(getLocale()).t("host.settings.closeGuidance"));
+          }
+          await requireActivatedWorkbench(
+            this.app,
+            (view) => view instanceof ConcreteWorkbenchView,
+            () => controller.reportError("host.action.openWorkbenchFailed" satisfies HostActionMessageKey),
+          );
+        },
+      ));
       this.app.workspace.onLayoutReady(() => {
         if (!this.lifecycle.owns(epoch)) return;
         this.layoutReady = true;

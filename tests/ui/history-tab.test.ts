@@ -39,6 +39,7 @@ describe("operation history", () => {
       NORMAL_RUNTIME_POLICY,
       createWorkbenchI18n(locale),
     );
+    expect(root.querySelector("h1")?.textContent).toBe(locale === "zh-CN" ? "笔记改动" : "Note changes");
     expect(root.textContent).toContain(status);
     expect(root.textContent).toContain(undo);
     expect(root.textContent).toContain(clear);

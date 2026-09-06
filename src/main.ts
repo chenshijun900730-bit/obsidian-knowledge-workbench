@@ -80,12 +80,13 @@ const runtime = Object.freeze({
       request: () => new ConcreteHistoryConfirmationModal(app).request(),
     };
   },
-  createSettingsTab: (app, plugin, controller, getLocale) => {
+  createSettingsTab: (app, plugin, controller, getLocale, openTaskOverview) => {
     void getLocale;
     return new ConcreteSettingsTab(
       app,
       plugin,
       controller,
+      openTaskOverview,
     );
   },
   createWorkbenchSettingsSurface: (app, controller, getLocale) => {

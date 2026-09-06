@@ -3,6 +3,7 @@ import {
   createCaseSensitiveArtifactPort,
   runStartupGate,
 } from "../../src/runtime/startup-gate";
+import { closeObsidianSettingsIfSupported } from "../../src/adapters/obsidian-workspace-adapter";
 
 describe("plugin startup gate", () => {
   it("finishes binding and durable normalization before composition", async () => {
@@ -62,5 +63,12 @@ describe("plugin startup gate", () => {
     expect(read).toHaveBeenCalledWith(
       "Config/plugins/knowledge-workbench/acceptance-build.json",
     );
+  });
+
+  it("feature-checks the host Settings close capability without DOM guessing", () => {
+    const close = vi.fn();
+    expect(closeObsidianSettingsIfSupported({ setting: { close } } as never)).toBe(true);
+    expect(close).toHaveBeenCalledOnce();
+    expect(closeObsidianSettingsIfSupported({} as never)).toBe(false);
   });
 });

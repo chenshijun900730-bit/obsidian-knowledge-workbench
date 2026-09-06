@@ -158,6 +158,9 @@ export function renderHistory(
     return button;
   };
   root.replaceChildren();
+  const title = doc.createElement("h1");
+  title.textContent = i18n.t("history.title");
+  root.append(title);
   if (model.entries.length === 0) {
     const empty = doc.createElement("p");
     empty.textContent = i18n.t("history.empty");

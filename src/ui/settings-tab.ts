@@ -24,6 +24,8 @@ export type PluginSettingTabConstructor = abstract new (
   plugin: Plugin,
 ) => PluginSettingTab;
 
+export type OpenTaskOverview = () => Promise<void>;
+
 export function createSettingsTabClass(
   PluginSettingTabBase: PluginSettingTabConstructor,
   PrivateCredentialInputBase: SecretComponentConstructor | undefined,
@@ -33,7 +35,12 @@ export function createSettingsTabClass(
   return class KnowledgeWorkbenchSettingsTab extends PluginSettingTabBase {
     private readonly surface: SettingsSectionsSurface;
 
-    constructor(app: App, plugin: Plugin, private readonly controller: SettingsController) {
+    constructor(
+      app: App,
+      plugin: Plugin,
+      private readonly controller: SettingsController,
+      private readonly openTaskOverview?: OpenTaskOverview,
+    ) {
       super(app, plugin);
       this.surface = createSettingsSectionsSurface({
         app,
@@ -42,6 +49,10 @@ export function createSettingsTabClass(
         createSecretComponent: PrivateCredentialInputBase === undefined
           ? undefined
           : (hostApp, root) => new PrivateCredentialInputBase(hostApp, root),
+        onOpenTaskOverview: () => {
+          this.surface.dispose();
+          if (this.openTaskOverview !== undefined) void this.openTaskOverview();
+        },
       }, presentCatalogProgress);
     }
 

@@ -259,7 +259,7 @@ describe("workbench", () => {
     await expect(result).resolves.toBeNull();
   });
 
-  it("mounts the shared grouped settings surface on the settings destination", async () => {
+  it("renders the More summary instead of a second settings surface", async () => {
     const root = createTestDiv();
     const startup = vi.fn(async () => undefined);
     const controller = {
@@ -299,15 +299,10 @@ describe("workbench", () => {
       route: { tab: "more", page: "overview" },
     }, noOpWorkbenchActions(), NORMAL_RUNTIME_POLICY, surface);
 
-    expect(Array.from(root.querySelectorAll("[data-settings-section]"))
-      .map((node) => node.getAttribute("data-settings-section"))).toEqual([
-      "language", "baidu", "large-catalog", "verification", "privacy-ai",
-    ]);
-    const startupInput = root.querySelector<HTMLInputElement>('input[type="checkbox"]')!;
-    startupInput.checked = true;
-    startupInput.dispatchEvent(new Event("change", { bubbles: true }));
-    await Promise.resolve();
-    expect(startup).toHaveBeenCalledWith(true);
+    expect(root.querySelectorAll("[data-settings-section]")).toHaveLength(0);
+    expect(root.textContent).toContain("笔记改动");
+    expect(root.textContent).toContain("高级功能");
+    expect(startup).not.toHaveBeenCalled();
   });
 
   it("dispatches each legal temporary route without reviving the retired five-page shell", () => {
@@ -362,7 +357,6 @@ describe("workbench", () => {
     expect(root.querySelector(".knowledge-workbench__start")).not.toBeNull();
 
     for (const page of [
-      "overview",
       "connection",
       "catalog-data",
       "language",
@@ -376,7 +370,7 @@ describe("workbench", () => {
     }
   });
 
-  it("disposes a rendered settings surface exactly once when its route leaves", () => {
+  it("disposes a rendered settings surface when switching subsection or leaving its route", () => {
     const root = createTestDiv();
     const render = vi.fn((host: HTMLElement) => {
       const marker = host.ownerDocument.createElement("p");
@@ -396,19 +390,24 @@ describe("workbench", () => {
       route: { tab: "more", page: "connection" },
     }, noOpWorkbenchActions(), NORMAL_RUNTIME_POLICY, surface);
 
+    renderWorkbench(root, {
+      ...base,
+      route: { tab: "more", page: "language" },
+    }, noOpWorkbenchActions(), NORMAL_RUNTIME_POLICY, surface);
+
     expect(render).toHaveBeenCalledTimes(2);
-    expect(dispose).not.toHaveBeenCalled();
-
-    renderWorkbench(root, {
-      ...base,
-      route: { tab: "library" },
-    }, noOpWorkbenchActions(), NORMAL_RUNTIME_POLICY, surface);
-    renderWorkbench(root, {
-      ...base,
-      route: { tab: "library" },
-    }, noOpWorkbenchActions(), NORMAL_RUNTIME_POLICY, surface);
-
     expect(dispose).toHaveBeenCalledOnce();
+
+    renderWorkbench(root, {
+      ...base,
+      route: { tab: "library" },
+    }, noOpWorkbenchActions(), NORMAL_RUNTIME_POLICY, surface);
+    renderWorkbench(root, {
+      ...base,
+      route: { tab: "library" },
+    }, noOpWorkbenchActions(), NORMAL_RUNTIME_POLICY, surface);
+
+    expect(dispose).toHaveBeenCalledTimes(2);
   });
 
   it("disposes the active settings surface once when the concrete view closes", async () => {

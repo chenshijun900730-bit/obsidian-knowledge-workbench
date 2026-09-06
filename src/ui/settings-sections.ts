@@ -84,8 +84,23 @@ export interface SecretComponentLike {
   onChange(callback: (value: string) => void): this;
 }
 export type SecretComponentConstructor = new (app: App, containerEl: HTMLElement) => SecretComponentLike;
+export type SettingsSectionId =
+  | "language"
+  | "baidu"
+  | "catalog-data"
+  | "cloud-scan-advanced"
+  | "privacy-ai";
+
+export interface SettingsSectionsRenderOptions {
+  readonly section?: SettingsSectionId;
+}
+
 export interface SettingsSectionsSurface {
-  render(root: HTMLElement, locale: WorkbenchLocale): void;
+  render(
+    root: HTMLElement,
+    locale: WorkbenchLocale,
+    options?: SettingsSectionsRenderOptions,
+  ): void;
   dispose(): void;
 }
 
@@ -94,6 +109,8 @@ export interface SettingsSectionsDependencies {
   readonly controller: SettingsController;
   readonly policy: RuntimeSafetyPolicy;
   readonly createSecretComponent?: (app: App, root: HTMLElement) => SecretComponentLike;
+  /** The host owns navigation so native Settings never changes an invisible route. */
+  readonly onOpenTaskOverview?: () => void;
 }
 
 const SECRET_STORAGE_BRAND = "SecretStorage";
@@ -181,16 +198,13 @@ const actionButton = (
   return button;
 };
 
-type CollapsibleSettingsSection = Exclude<
-  "language" | "baidu" | "large-catalog" | "verification" | "privacy-ai",
-  "language"
->;
+type CollapsibleSettingsSection = Exclude<SettingsSectionId, "language">;
 
 export function createSettingsSectionsSurface(
   dependencies: SettingsSectionsDependencies,
   presentCatalogProgress?: CatalogProgressPresenter,
 ): SettingsSectionsSurface {
-  const { app, controller, policy, createSecretComponent } = dependencies;
+  const { app, controller, policy, createSecretComponent, onOpenTaskOverview } = dependencies;
   return new (class StatefulSettingsSectionsSurface implements SettingsSectionsSurface {
     secretComponent: SecretComponentLike | null = null;
     private catalogAuthorizationExpiryTimer: number | null = null;
@@ -214,7 +228,11 @@ export function createSettingsSectionsSurface(
     private renderAbortController: AbortController | null = null;
     private readonly sessionInputs = new Set<HTMLInputElement>();
     private readonly cloudDirectoryFields = new Set<CloudDirectoryFieldSurface>();
-    render(root: HTMLElement, locale: WorkbenchLocale): void {
+    render(
+      root: HTMLElement,
+      locale: WorkbenchLocale,
+      options: SettingsSectionsRenderOptions = {},
+    ): void {
       this.renderGeneration += 1;
       const generation = this.renderGeneration;
       this.disposed = false;
@@ -249,6 +267,9 @@ export function createSettingsSectionsSurface(
         }
       };
       const isCurrent = (): boolean => !this.disposed && this.renderGeneration === generation;
+      const includesSection = (section: SettingsSectionId): boolean => (
+        options.section === undefined || options.section === section
+      );
       const listen = (
         target: EventTarget,
         type: SettingsUiEvent,
@@ -313,12 +334,12 @@ export function createSettingsSectionsSurface(
         i18n.t("settings.section.baidu.summary"),
       );
       const largeCatalogSection = createCollapsibleSection(
-        "large-catalog",
+        "catalog-data",
         i18n.t("settings.section.largeCatalog"),
         i18n.t("settings.section.largeCatalog.summary"),
       );
       const verificationSection = createCollapsibleSection(
-        "verification",
+        "cloud-scan-advanced",
         i18n.t("settings.section.verification"),
         i18n.t("settings.section.verification.summary"),
       );
@@ -333,13 +354,21 @@ export function createSettingsSectionsSurface(
       const renderVerificationSection = (): HTMLDetailsElement => verificationSection.card;
       const renderPrivacyAiSection = (): HTMLDetailsElement => privacyAiSection.card;
       const renderAdvancedOrganizationSection = (): HTMLElement => privacyAiSection.content;
-      root.append(
-        renderLanguageSection(),
-        renderBaiduConnectionSection(),
-        renderLargeCatalogSection(),
-        renderVerificationSection(),
-        renderPrivacyAiSection(),
-      );
+      const sections: readonly [SettingsSectionId, HTMLElement][] = [
+        ["language", renderLanguageSection()],
+        ["baidu", renderBaiduConnectionSection()],
+        ["catalog-data", renderLargeCatalogSection()],
+        ["cloud-scan-advanced", renderVerificationSection()],
+        ["privacy-ai", renderPrivacyAiSection()],
+      ];
+      root.append(...sections
+        .filter(([id]) => options.section === undefined || options.section === id)
+        .map(([, section]) => section));
+      const openTask = button(i18n.t("settings.surface.openTaskOverview"), () => {
+        onOpenTaskOverview?.();
+      });
+      openTask.dataset.action = "open-task-overview";
+      verificationSection.content.append(openTask);
       const run = async (
         labelKey: SettingsSaveMessageKey,
         operation: () => Promise<void>,
@@ -426,7 +455,7 @@ export function createSettingsSectionsSurface(
         });
         void controller.setLocale(next).then(() => {
           if (!isCurrent()) return;
-          this.render(root, next);
+          this.render(root, next, options);
           if (restoreFocus) {
             root.querySelector<HTMLSelectElement>('select[data-focus-key="settings-locale"]')
               ?.focus({ preventScroll: true });
@@ -440,6 +469,7 @@ export function createSettingsSectionsSurface(
       localeLabel.append(localeText, localeSelect);
       languageSection.append(localeLabel, startup);
 
+      if (includesSection("privacy-ai")) {
       const safety = doc.createElement("section");
       safety.append(heading(doc, 3, i18n.t("settings.surface.writeSafety")));
       if (policy.configuration === "read-only") {
@@ -566,13 +596,16 @@ export function createSettingsSectionsSurface(
         });
       }));
       privacyAiSection.content.append(exclusions);
+      }
 
       const catalog = doc.createElement("section");
       catalog.className = "knowledge-workbench__catalog-settings";
       catalog.append(heading(doc, 3, i18n.t("settings.surface.cloudCatalog")));
       let recomputeLargeVerificationActions = (): void => undefined;
       const connection = controller.catalogConnection?.();
-      if (policy.configuration === "read-only") {
+      if (!includesSection("baidu") && !includesSection("cloud-scan-advanced")) {
+        // The requested subsection has no connection or scan controls to construct.
+      } else if (policy.configuration === "read-only") {
         const locked = doc.createElement("p");
         locked.className = "knowledge-workbench__locked";
         locked.textContent = i18n.t("settings.surface.readOnlyCatalogUnavailable");
@@ -940,7 +973,8 @@ export function createSettingsSectionsSurface(
 
       const hybrid = controller.hybridCatalog?.();
       if (
-        policy.configuration !== "read-only"
+        includesSection("catalog-data")
+        && policy.configuration !== "read-only"
         && hybrid !== undefined
         && controller.subscribeHybridCatalog !== undefined
         && controller.previewCatalogTxt !== undefined
@@ -1031,6 +1065,9 @@ export function createSettingsSectionsSurface(
         importTxt.dataset.action = "catalog-import-txt";
         txtActions.append(previewTxt, importTxt);
 
+        // Category selection and run lifecycle now belong exclusively to Task.
+        const taskOwnsCategoryUi = true;
+        if (!taskOwnsCategoryUi) {
         const selectionTitle = doc.createElement("p");
         selectionTitle.textContent = i18n.t("settings.surface.selectionLimit", {
           maximum: i18n.number(LARGE_CATALOG_RUN_BUDGET.maxSelectedTopLevelGroups),
@@ -1338,24 +1375,47 @@ export function createSettingsSectionsSurface(
           explanation,
           activeSummary,
           previewSummary,
-          batchSummary,
-          verificationDetails,
           txtLabel,
           txtActions,
-          selectionTitle,
-          groupChoices,
-          verificationDirectoryField.root,
-          rootHint,
-          parentRootError,
-          verificationActions,
         );
         largeCatalogSection.content.append(hybridSection);
         renderHybrid();
         this.unsubscribeHybridCatalog = controller.subscribeHybridCatalog(renderHybrid);
+        }
+
+        const renderCatalogData = (): void => {
+          if (!isCurrent()) return;
+          const current = controller.hybridCatalog?.();
+          activeSummary.textContent = current?.active === undefined
+            ? i18n.t("settings.surface.activeCatalogEmpty")
+            : i18n.t("settings.surface.activeCatalogSummary", {
+              pdf: i18n.number(current.active.pdfCount),
+              unverified: i18n.number(current.active.unverifiedCount),
+              verified: i18n.number(current.active.verifiedCount),
+              differences: i18n.number(current.active.differenceCount),
+              verifiedGroups: i18n.number(current.active.verifiedGroupCount),
+              groups: i18n.number(current.active.groupCount),
+            });
+          previewSummary.textContent = current?.candidate === undefined
+            ? i18n.t("settings.surface.previewEmpty")
+            : i18n.t("settings.surface.previewSummary", {
+              pdf: i18n.number(current.candidate.pdfCount),
+              maximum: i18n.number(CATALOG_TXT_IMPORT_BUDGET.maxPdfCount),
+              directories: i18n.number(current.candidate.directoryCount),
+              ignored: i18n.number(current.candidate.ignoredLeafCount),
+            });
+          const busy = current?.status === "importing" || current?.status === "scanning";
+          previewTxt.disabled = busy;
+          importTxt.disabled = busy || current?.candidate === undefined;
+        };
+        hybridSection.append(explanation, activeSummary, previewSummary, txtLabel, txtActions);
+        largeCatalogSection.content.append(hybridSection);
+        renderCatalogData();
+        this.unsubscribeHybridCatalog = controller.subscribeHybridCatalog(renderCatalogData);
       }
       baiduSection.content.append(catalog);
 
-      if (policy.ai === "blocked") {
+      if (includesSection("privacy-ai") && policy.ai === "blocked") {
         const ai = doc.createElement("section");
         ai.className = "knowledge-workbench__ai-settings";
         ai.append(heading(doc, 3, i18n.t("settings.surface.privateAi")));
@@ -1364,7 +1424,11 @@ export function createSettingsSectionsSurface(
         locked.textContent = i18n.t("settings.surface.aiUnavailable");
         ai.append(locked);
         privacyAiSection.content.append(ai);
-      } else if (controller.saveAiSettings !== undefined && controller.setSessionAiSecret !== undefined) {
+      } else if (
+        includesSection("privacy-ai")
+        && controller.saveAiSettings !== undefined
+        && controller.setSessionAiSecret !== undefined
+      ) {
         const ai = doc.createElement("section");
         ai.className = "knowledge-workbench__ai-settings";
         ai.append(heading(doc, 3, i18n.t("settings.surface.privateAi")));
