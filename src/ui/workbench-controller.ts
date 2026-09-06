@@ -548,6 +548,7 @@ export class WorkbenchController {
     });
     this.model = {
       locale: effectiveSettings(dependencies.policy, dependencies.store.settings()).locale,
+      openAtStartup: initialSettings.openAtStartup,
       status: "ready",
       route: defaultWorkbenchRoute(),
       startSection: "overview",
@@ -670,6 +671,10 @@ export class WorkbenchController {
     if (leavingFolderSelection) this.disposeFolderSelection(true, false);
     this.model = { ...this.model, route: clone(route) };
     this.emit();
+  }
+
+  openTaskOverview(): void {
+    this.selectRoute({ tab: "task", page: "overview" });
   }
 
   selectTab(tab: WorkbenchTab): void {
@@ -1794,6 +1799,7 @@ export class WorkbenchController {
     const settings = this.dependencies.store.settings();
     await this.dependencies.store.saveSettings({ ...settings, openAtStartup: value });
     if (this.disposed) return;
+    this.model = { ...this.model, openAtStartup: value };
     this.emit();
   }
 

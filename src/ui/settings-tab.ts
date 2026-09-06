@@ -1,5 +1,6 @@
 import type { App, Plugin, PluginSettingTab } from "obsidian";
 import type { RuntimeSafetyPolicy } from "../runtime/safety-policy";
+import { createWorkbenchI18n } from "../i18n/workbench-i18n";
 import {
   createSettingsSectionsSurface,
   type CatalogProgressPresenter,
@@ -51,7 +52,9 @@ export function createSettingsTabClass(
           : (hostApp, root) => new PrivateCredentialInputBase(hostApp, root),
         onOpenTaskOverview: () => {
           this.surface.dispose();
-          if (this.openTaskOverview !== undefined) void this.openTaskOverview();
+          if (this.openTaskOverview !== undefined) {
+            void this.openTaskOverview().catch(() => this.showHandoffFailure());
+          }
         },
       }, presentCatalogProgress);
     }
@@ -68,6 +71,15 @@ export function createSettingsTabClass(
 
     hide(): void {
       this.surface.dispose();
+    }
+
+    private showHandoffFailure(): void {
+      const error = this.containerEl.ownerDocument.createElement("p");
+      error.dataset.taskHandoffError = "true";
+      error.setAttribute("role", "status");
+      error.textContent = createWorkbenchI18n(this.controller.settings().locale)
+        .t("host.settings.handoffFailed");
+      this.containerEl.replaceChildren(error);
     }
   };
 }

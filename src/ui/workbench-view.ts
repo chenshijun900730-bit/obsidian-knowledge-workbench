@@ -78,6 +78,7 @@ export interface WorkbenchProgress {
 }
 export interface WorkbenchViewModel {
   readonly locale: WorkbenchLocale;
+  readonly openAtStartup?: boolean;
   readonly status: "ready" | "canceled" | "error";
   readonly statusMessage?: string;
   readonly route: WorkbenchRoute;
@@ -113,6 +114,7 @@ export interface WorkbenchViewModel {
 }
 export interface WorkbenchActions {
   readonly onSelectRoute: (route: WorkbenchRoute) => void;
+  readonly onOpenTaskOverview?: () => void;
   readonly onSelectStartSection: (section: StartSection) => void;
   readonly onSetLocale?: (locale: WorkbenchLocale) => void | Promise<void>;
   readonly onSelectTodayFilter: (filter: TodayFilter) => void;
@@ -308,7 +310,7 @@ const settingsSectionForRoute = (route: WorkbenchRoute) => {
     case "connection": return "baidu" as const;
     case "catalog-data": return "catalog-data" as const;
     case "language": return "language" as const;
-    case "advanced": return "privacy-ai" as const;
+    case "advanced": return "cloud-scan-advanced" as const;
     default: return undefined;
   }
 };
@@ -552,7 +554,7 @@ export function renderWorkbench(
       connectionStatus: model.catalogConnection?.status,
       rememberedLibrary: model.boundLibraryPath,
       activeCatalogCount: model.hybridCatalog?.active?.pdfCount ?? model.catalog.pdfCount,
-      openAtStartup: false,
+      openAtStartup: model.openAtStartup ?? false,
       onSelectRoute: surfaceActions.onSelectRoute,
     });
   } else if (model.route.page === "history") {
@@ -566,7 +568,28 @@ export function renderWorkbench(
     renderStartPage(panel, { model, actions: surfaceActions, policy });
   } else if (settingsSurface !== undefined) {
     const section = settingsSectionForRoute(model.route);
-    settingsSurface.render(panel, model.locale, section === undefined ? undefined : { section });
+    if (section === undefined) {
+      settingsSurface.render(panel, model.locale);
+    } else {
+      const subpage = doc.createElement("div");
+      subpage.className = "knowledge-workbench__more-subpage";
+      panel.append(subpage);
+      settingsSurface.render(subpage, model.locale, {
+        section,
+        onBackToMore: () => surfaceActions.onSelectRoute({ tab: "more", page: "overview" }),
+        onOpenTaskOverview: () => surfaceActions.onOpenTaskOverview?.(),
+      });
+      if (model.route.tab === "more" && model.route.page === "advanced") {
+        const knowledgeTools = doc.createElement("button");
+        knowledgeTools.type = "button";
+        knowledgeTools.dataset.action = "open-knowledge-tools";
+        knowledgeTools.textContent = i18n.t("more.advanced.title");
+        knowledgeTools.addEventListener("click", () => surfaceActions.onSelectRoute({
+          tab: "more", page: "knowledge-tools",
+        }));
+        subpage.prepend(knowledgeTools);
+      }
+    }
     settingsPageSurfaces.set(root, settingsSurface);
     if (section !== undefined) settingsPageSections.set(root, section);
   } else {
@@ -603,6 +626,7 @@ export interface WorkbenchViewController {
   snapshot(): WorkbenchViewModel;
   subscribe(listener: () => void): () => void;
   selectRoute(route: WorkbenchRoute): void;
+  openTaskOverview?(): void;
   selectStartSection(section: StartSection): void;
   setTodayFilter(filter: TodayFilter): void;
   setLocale(locale: WorkbenchLocale): Promise<void>;
@@ -736,6 +760,10 @@ export function createWorkbenchViewClass(
       const snapshot = this.controller.snapshot();
       renderWorkbench(this.contentEl, snapshot, {
         onSelectRoute: (route) => this.controller.selectRoute(route),
+        onOpenTaskOverview: () => {
+          if (this.controller.openTaskOverview !== undefined) this.controller.openTaskOverview();
+          else this.controller.selectRoute({ tab: "task", page: "overview" });
+        },
         onSelectStartSection: (section) => this.controller.selectStartSection(section),
         onSetLocale: (locale) => this.runAction("host.action.languageFailed", () => this.controller.setLocale(locale)),
         onSelectTodayFilter: (filter) => this.controller.setTodayFilter(filter),

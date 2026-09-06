@@ -4,6 +4,7 @@ import { createWorkbenchViewClass, renderWorkbench, type ItemViewConstructor } f
 import { createQuickCaptureModalClass, type ModalConstructor } from "../../src/ui/quick-capture-modal";
 import { createSettingsTabClass, type PluginSettingTabConstructor } from "../../src/ui/settings-tab";
 import { createSettingsSectionsSurface } from "../../src/ui/settings-sections";
+import type { WorkbenchRoute } from "../../src/ui/workbench-route";
 import {
   activateWorkbench,
   activateWorkbenchWithRetry,
@@ -368,6 +369,42 @@ describe("workbench", () => {
       }, noOpWorkbenchActions(), NORMAL_RUNTIME_POLICY, settingsSurface);
       expect(root.querySelector('[data-settings-marker="true"]')).not.toBeNull();
     }
+  });
+
+  it("routes Advanced to one scan subsection, knowledge tools, Task, and More back", () => {
+    const root = createTestDiv();
+    const routes: WorkbenchRoute[] = [];
+    const openTaskOverview = vi.fn();
+    const render = vi.fn((host: HTMLElement, _locale: string, options?: {
+      section?: string;
+      onBackToMore?: () => void;
+      onOpenTaskOverview?: () => void;
+    }) => {
+      const back = host.ownerDocument.createElement("button");
+      back.dataset.action = "more-back";
+      back.addEventListener("click", () => options?.onBackToMore?.());
+      const task = host.ownerDocument.createElement("button");
+      task.dataset.action = "open-task-overview";
+      task.addEventListener("click", () => options?.onOpenTaskOverview?.());
+      host.append(back, task);
+    });
+    renderWorkbench(root, {
+      ...populatedWorkbenchModel(),
+      route: { tab: "more", page: "advanced" },
+    }, noOpWorkbenchActions({
+      onSelectRoute: (route) => routes.push(route),
+      onOpenTaskOverview: openTaskOverview,
+    }), NORMAL_RUNTIME_POLICY, { render, dispose: () => undefined });
+
+    expect(render.mock.calls[0]?.[2]).toMatchObject({ section: "cloud-scan-advanced" });
+    root.querySelector<HTMLButtonElement>('[data-action="open-task-overview"]')?.click();
+    root.querySelector<HTMLButtonElement>('[data-action="more-back"]')?.click();
+    root.querySelector<HTMLButtonElement>('[data-action="open-knowledge-tools"]')?.click();
+    expect(openTaskOverview).toHaveBeenCalledOnce();
+    expect(routes).toEqual([
+      { tab: "more", page: "overview" },
+      { tab: "more", page: "knowledge-tools" },
+    ]);
   });
 
   it("disposes a rendered settings surface when switching subsection or leaving its route", () => {
@@ -2959,11 +2996,36 @@ describe("workbench", () => {
       getLeavesOfType(): typeof leaf[] { return this.leaves; },
       getLeaf(): typeof leaf { this.leaves.push(leaf); return leaf; },
       async revealLeaf(value: typeof leaf): Promise<void> { this.revealCalls.push(value); },
+      setActiveLeaf: vi.fn(),
     };
     await activateWorkbench({ workspace } as unknown as App);
     expect(leaf.setViewStateCalls).toBe(1);
     expect(workspace.revealCalls).toEqual([leaf]);
+    expect(workspace.setActiveLeaf).toHaveBeenCalledWith(leaf, true, true);
     expect(workspace.getLeavesOfType()[0]?.view).toBe(view);
+
+    await activateWorkbench({ workspace } as unknown as App);
+    expect(leaf.setViewStateCalls).toBe(1);
+    expect(workspace.revealCalls).toEqual([leaf, leaf]);
+    expect(workspace.setActiveLeaf).toHaveBeenCalledTimes(2);
+  });
+
+  it("surfaces reveal failures instead of leaving activation work unhandled", async () => {
+    const errors: unknown[] = [];
+    runVisibleHostAction(
+      () => activateWorkbench({
+        workspace: {
+          getLeavesOfType: () => [{ view: {} }],
+          getLeaf: () => { throw new Error("new leaf should not be needed"); },
+          revealLeaf: async () => { throw new Error("reveal unavailable"); },
+          setActiveLeaf: vi.fn(),
+        },
+      } as unknown as App),
+      (error) => errors.push(error),
+    );
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(errors).toEqual([expect.objectContaining({ message: "reveal unavailable" })]);
   });
 
   it("reports a first-open activation rejection before a workbench view is mounted", async () => {

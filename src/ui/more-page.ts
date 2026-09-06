@@ -1,4 +1,4 @@
-import type { WorkbenchLocale } from "../i18n/workbench-i18n";
+import type { WorkbenchLocale, WorkbenchMessageKey } from "../i18n/workbench-i18n";
 import { createWorkbenchI18n } from "../i18n/workbench-i18n";
 import type { WorkbenchRoute } from "./workbench-route";
 
@@ -38,9 +38,21 @@ export function renderMorePage(root: HTMLElement, model: MorePageModel): void {
   const i18n = createWorkbenchI18n(model.locale);
   root.replaceChildren();
   root.classList.add("knowledge-workbench__more");
+  const connectionStatusKey: Partial<Record<string, WorkbenchMessageKey>> = {
+    unconfigured: "settings.status.unconfigured",
+    configured: "settings.status.configured",
+    authorizing: "settings.status.authorizing",
+    authorized: "settings.status.authorized",
+    scanning: "settings.status.scanning",
+    paused: "settings.status.paused",
+    error: "settings.status.error",
+    unavailable: "settings.status.unavailable",
+  };
   const connection = model.connectionStatus === undefined
     ? i18n.t("more.connection.unavailable")
-    : i18n.t("more.connection.status", { status: model.connectionStatus });
+    : i18n.t("more.connection.status", {
+      status: i18n.t(connectionStatusKey[model.connectionStatus] ?? "settings.status.unknown"),
+    });
   appendRow(root, i18n.t("more.connection.title"), connection, {
     tab: "more", page: "connection",
   }, model.onSelectRoute);
@@ -59,6 +71,6 @@ export function renderMorePage(root: HTMLElement, model: MorePageModel): void {
     tab: "more", page: "history",
   }, model.onSelectRoute);
   appendRow(root, i18n.t("more.advanced.title"), i18n.t("more.advanced.summary"), {
-    tab: "more", page: "knowledge-tools",
+    tab: "more", page: "advanced",
   }, model.onSelectRoute);
 }

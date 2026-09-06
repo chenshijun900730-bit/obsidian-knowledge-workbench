@@ -20,6 +20,8 @@ describe("More summary", () => {
     });
 
     expect(root.textContent).toContain("连接");
+    expect(root.textContent).toContain("状态：已授权");
+    expect(root.textContent).not.toContain("状态：authorized");
     expect(root.textContent).toContain("已记住的书库");
     expect(root.textContent).toContain("68,959");
     expect(root.textContent).toContain("语言与启动");
@@ -30,7 +32,7 @@ describe("More summary", () => {
     actions[0]?.click();
     expect(onSelectRoute).toHaveBeenCalledWith({ tab: "more", page: "connection" });
     actions.at(-1)?.click();
-    expect(onSelectRoute).toHaveBeenLastCalledWith({ tab: "more", page: "knowledge-tools" });
+    expect(onSelectRoute).toHaveBeenLastCalledWith({ tab: "more", page: "advanced" });
     expect(createWorkbenchI18n("zh-CN").t("history.title")).toBe("笔记改动");
   });
 });

@@ -246,15 +246,25 @@ export function createKnowledgeWorkbenchPluginClass(runtime: RuntimeComposition)
         getLocale,
         async () => {
           controller.selectRoute({ tab: "task", page: "overview" });
-          const settingsClosed = closeObsidianSettingsIfSupported(this.app);
+          let settingsClosed = false;
+          try {
+            settingsClosed = closeObsidianSettingsIfSupported(this.app);
+          } catch {
+            new Notice(createWorkbenchI18n(getLocale()).t("host.settings.handoffFailed"));
+          }
           if (!settingsClosed) {
             new Notice(createWorkbenchI18n(getLocale()).t("host.settings.closeGuidance"));
           }
-          await requireActivatedWorkbench(
-            this.app,
-            (view) => view instanceof ConcreteWorkbenchView,
-            () => controller.reportError("host.action.openWorkbenchFailed" satisfies HostActionMessageKey),
-          );
+          try {
+            await requireActivatedWorkbench(
+              this.app,
+              (view) => view instanceof ConcreteWorkbenchView,
+              () => controller.reportError("host.action.openWorkbenchFailed" satisfies HostActionMessageKey),
+            );
+          } catch (error) {
+            new Notice(createWorkbenchI18n(getLocale()).t("host.settings.handoffFailed"));
+            throw error;
+          }
         },
       ));
       this.app.workspace.onLayoutReady(() => {

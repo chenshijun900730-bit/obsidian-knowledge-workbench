@@ -74,7 +74,7 @@ const deferred = () => {
 };
 
 const connectedControllerFixture = (
-  overrides: Partial<SettingsController> = {},
+  overrides: Partial<SettingsController> & Record<string, unknown> = {},
 ): SettingsController => ({
   ...settingsControllerFixture(),
   settings: () => ({
@@ -123,14 +123,41 @@ describe("shared grouped settings surface", () => {
   it("renders one requested subsection and delegates category checking to Task", () => {
     const openTaskOverview = vi.fn();
     const root = createTestDiv();
+    const active = {
+      ...TEST_HYBRID_ACTIVE_AUTHORITY,
+      importedAt: 1,
+      pdfCount: 1,
+      unverifiedCount: 1,
+      verifiedCount: 0,
+      differenceCount: 0,
+      cloudMissingCount: 0,
+      groupCount: 1,
+      verifiedGroupCount: 0,
+      coveredCandidatePdfCount: 0,
+      groups: [{
+        groupKey: `group:${"a".repeat(64)}`,
+        rootRelativePath: "文学",
+        label: "文学",
+        pdfCount: 1,
+        mode: "recursive" as const,
+        verificationStatus: "unverified" as const,
+      }],
+    };
     createSettingsSectionsSurface({
       app: {} as App,
-      controller: settingsControllerFixture(),
+      controller: connectedControllerFixture({
+        hybridCatalog: () => ({ ...TEST_INACTIVE_HYBRID_EXECUTION, status: "ready", active }),
+        subscribeHybridCatalog: () => () => undefined,
+        previewCatalogTxt: async () => undefined,
+        requestCatalogTxtImport: async () => undefined,
+      }),
       policy: NORMAL_RUNTIME_POLICY,
       onOpenTaskOverview: openTaskOverview,
-    }).render(root, "zh-CN", { section: "cloud-scan-advanced" });
+    }).render(root, "zh-CN");
 
-    expect(sectionNames(root)).toEqual(["cloud-scan-advanced"]);
+    expect(sectionNames(root)).toEqual([
+      "language", "baidu", "catalog-data", "cloud-scan-advanced", "privacy-ai",
+    ]);
     expect(root.querySelector('[data-catalog-group-key]')).toBeNull();
     expect(root.querySelector('[data-action="catalog-start-large-verification"]')).toBeNull();
     expect(root.querySelector('[data-action="catalog-resume-large-verification"]')).toBeNull();
@@ -138,6 +165,59 @@ describe("shared grouped settings surface", () => {
     expect(action.disabled).toBe(false);
     action.click();
     expect(openTaskOverview).toHaveBeenCalledOnce();
+  });
+
+  it("constructs only a requested scan section and returns to More", () => {
+    const root = createTestDiv();
+    const back = vi.fn();
+    const secret = vi.fn();
+    createSettingsSectionsSurface({
+      app: {} as App,
+      controller: connectedControllerFixture(),
+      policy: NORMAL_RUNTIME_POLICY,
+      createSecretComponent: secret,
+    }).render(root, "zh-CN", { section: "cloud-scan-advanced", onBackToMore: back });
+
+    expect(sectionNames(root)).toEqual(["cloud-scan-advanced"]);
+    expect(root.querySelector('[data-catalog-app-key]')).toBeNull();
+    expect(root.querySelector('[data-catalog-authorization-code]')).toBeNull();
+    expect(secret).not.toHaveBeenCalled();
+    root.querySelector<HTMLButtonElement>('[data-action="more-back"]')?.click();
+    expect(back).toHaveBeenCalledOnce();
+  });
+
+  it("validates and de-duplicates a pending scan while retaining the draft across language rerender", async () => {
+    const root = createTestDiv();
+    const pending = deferred();
+    const requestCatalogScan = vi.fn(async () => pending.promise);
+    const surface = createSettingsSectionsSurface({
+      app: {} as App,
+      controller: connectedControllerFixture({ requestCatalogScan }),
+      policy: NORMAL_RUNTIME_POLICY,
+    });
+
+    surface.render(root, "zh-CN", { section: "cloud-scan-advanced" });
+    let input = root.querySelector<HTMLInputElement>('[data-catalog-scan-root="true"]')!;
+    let start = root.querySelector<HTMLButtonElement>('[data-action="catalog-start-scan"]')!;
+    input.value = "/";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    expect(start.disabled).toBe(true);
+
+    input.value = "/session/library";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    expect(start.disabled).toBe(false);
+    surface.render(root, "en", { section: "cloud-scan-advanced" });
+    input = root.querySelector<HTMLInputElement>('[data-catalog-scan-root="true"]')!;
+    start = root.querySelector<HTMLButtonElement>('[data-action="catalog-start-scan"]')!;
+    expect(input.value).toBe("/session/library");
+
+    start.click();
+    start.click();
+    expect(requestCatalogScan).toHaveBeenCalledOnce();
+    expect(requestCatalogScan).toHaveBeenCalledWith("/session/library", expect.any(Function));
+    pending.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
   });
 
   it("keeps cards collapsed while language remains directly usable", () => {
@@ -217,6 +297,9 @@ describe("shared grouped settings surface", () => {
     expect(connectCatalog).not.toHaveBeenCalled();
     expect(submitCatalogAuthorizationCode).not.toHaveBeenCalled();
     expect(revokeCatalog).not.toHaveBeenCalled();
+    const replacement = root.querySelector<HTMLDetailsElement>("[data-settings-replace-identity=\"true\"]");
+    expect(replacement?.textContent).toContain("更换账号或凭据");
+    expect(replacement?.textContent).toContain("需要重新选择书库；旧核验结果仅保留为历史");
 
     const appKey = root.querySelector<HTMLInputElement>('[data-catalog-app-key="true"]')!;
     const secretKey = root.querySelector<HTMLInputElement>('[data-catalog-secret-key="true"]')!;
@@ -400,126 +483,6 @@ describe("shared grouped settings surface", () => {
       .toBe("/Synthetic/9-文学253册");
   });
 
-  it.skip("applies verification categories and directories locally without starting cloud work", async () => {
-    const groupA = `group:${"a".repeat(64)}`;
-    const groupB = `group:${"b".repeat(64)}`;
-    const purpose: CloudDirectoryPickerPurpose = {
-      kind: "verification",
-      groups: [{ groupKey: groupA, rootRelativePath: "A", label: "甲" }, {
-        groupKey: groupB,
-        rootRelativePath: "B",
-        label: "乙",
-      }],
-    };
-    const category: CloudDirectorySelection = {
-      kind: "category",
-      selectedPath: "/科学文库/B",
-      effectiveRoot: "/科学文库",
-      groupKey: groupB,
-    };
-    const directory: CloudDirectorySelection = {
-      kind: "directory",
-      selectedPath: "/另一个父目录",
-      effectiveRoot: "/另一个父目录",
-    };
-    const results: Array<CloudDirectorySelection | null> = [category, directory, null];
-    const chooseCatalogRoot = vi.fn(async () => results.shift() ?? null);
-    const requestCatalogScan = vi.fn(async () => undefined);
-    const requestLargeCatalogVerification = vi.fn(async () => undefined);
-    const active = {
-      ...TEST_HYBRID_ACTIVE_AUTHORITY,
-      importedAt: 1,
-      pdfCount: 3,
-      unverifiedCount: 3,
-      verifiedCount: 0,
-      differenceCount: 0,
-      cloudMissingCount: 0,
-      groupCount: 2,
-      verifiedGroupCount: 0,
-      coveredCandidatePdfCount: 0,
-      groups: [{
-        groupKey: groupA,
-        rootRelativePath: "A",
-        label: "甲",
-        pdfCount: 1,
-        mode: "recursive" as const,
-        verificationStatus: "unverified" as const,
-      }, {
-        groupKey: groupB,
-        rootRelativePath: "B",
-        label: "乙",
-        pdfCount: 2,
-        mode: "recursive" as const,
-        verificationStatus: "unverified" as const,
-      }],
-    };
-    const controller = connectedControllerFixture({
-      chooseCatalogRoot,
-      requestCatalogScan,
-      hybridCatalog: () => ({ ...TEST_INACTIVE_HYBRID_EXECUTION, status: "ready", active }),
-      subscribeHybridCatalog: () => () => undefined,
-      previewCatalogTxt: async () => undefined,
-      requestCatalogTxtImport: async () => undefined,
-      requestLargeCatalogVerification,
-      requestResumeLargeCatalogVerification: async () => undefined,
-      cancelLargeCatalogVerification: () => undefined,
-    });
-    const root = createTestDiv();
-    createSettingsSectionsSurface({
-      app: {} as App,
-      controller,
-      policy: NORMAL_RUNTIME_POLICY,
-    }).render(root, "zh-CN");
-    const groupAInput = root.querySelector<HTMLInputElement>(
-      `[data-catalog-group-key="${groupA}"]`,
-    )!;
-    groupAInput.checked = true;
-    groupAInput.dispatchEvent(new Event("change", { bubbles: true }));
-    const choose = root.querySelector<HTMLButtonElement>(
-      '[data-action="browse-catalog-large-scan-root"]',
-    )!;
-
-    choose.click();
-    await Promise.resolve();
-    await Promise.resolve();
-    expect(chooseCatalogRoot).toHaveBeenNthCalledWith(1, {
-      initialRoot: "",
-      purpose,
-    });
-    expect(root.querySelector<HTMLInputElement>('[data-catalog-large-scan-root="true"]')?.value)
-      .toBe("/科学文库");
-    expect(root.querySelector<HTMLInputElement>(`[data-catalog-group-key="${groupA}"]`)?.checked)
-      .toBe(false);
-    expect(root.querySelector<HTMLInputElement>(`[data-catalog-group-key="${groupB}"]`)?.checked)
-      .toBe(true);
-    expect(root.textContent).toContain("/科学文库/B");
-    expect(root.textContent).toContain("实际核验父目录：/科学文库");
-
-    await vi.waitFor(() => expect(choose.disabled).toBe(false));
-    groupAInput.checked = true;
-    groupAInput.dispatchEvent(new Event("change", { bubbles: true }));
-    choose.click();
-    await Promise.resolve();
-    await Promise.resolve();
-    expect(root.querySelector<HTMLInputElement>('[data-catalog-large-scan-root="true"]')?.value)
-      .toBe("/另一个父目录");
-    expect(root.querySelector<HTMLInputElement>(`[data-catalog-group-key="${groupA}"]`)?.checked)
-      .toBe(true);
-    expect(root.querySelector<HTMLInputElement>(`[data-catalog-group-key="${groupB}"]`)?.checked)
-      .toBe(true);
-
-    choose.click();
-    await Promise.resolve();
-    await Promise.resolve();
-    expect(root.querySelector<HTMLInputElement>('[data-catalog-large-scan-root="true"]')?.value)
-      .toBe("/另一个父目录");
-    const input = root.querySelector<HTMLInputElement>('[data-catalog-large-scan-root="true"]')!;
-    input.value = "/手工父目录";
-    input.dispatchEvent(new Event("input", { bubbles: true }));
-    expect(root.textContent).not.toContain("/另一个父目录");
-    expect(requestCatalogScan).not.toHaveBeenCalled();
-    expect(requestLargeCatalogVerification).not.toHaveBeenCalled();
-  });
 
   it("rejects a category result from the scan-purpose chooser", async () => {
     const requestCatalogScan = vi.fn(async () => undefined);
@@ -544,449 +507,9 @@ describe("shared grouped settings surface", () => {
     expect(requestCatalogScan).not.toHaveBeenCalled();
   });
 
-  it.skip("drops category context when the user manually changes verification groups", async () => {
-    const groupA = `group:${"d".repeat(64)}`;
-    const groupB = `group:${"e".repeat(64)}`;
-    const active = {
-      ...TEST_HYBRID_ACTIVE_AUTHORITY,
-      importedAt: 1,
-      pdfCount: 3,
-      unverifiedCount: 3,
-      verifiedCount: 0,
-      differenceCount: 0,
-      cloudMissingCount: 0,
-      groupCount: 2,
-      verifiedGroupCount: 0,
-      coveredCandidatePdfCount: 0,
-      groups: [{
-        groupKey: groupA,
-        rootRelativePath: "A",
-        label: "甲",
-        pdfCount: 1,
-        mode: "recursive" as const,
-        verificationStatus: "unverified" as const,
-      }, {
-        groupKey: groupB,
-        rootRelativePath: "B",
-        label: "乙",
-        pdfCount: 2,
-        mode: "recursive" as const,
-        verificationStatus: "unverified" as const,
-      }],
-    };
-    const requestLargeCatalogVerification = vi.fn(async () => undefined);
-    const root = createTestDiv();
-    createSettingsSectionsSurface({
-      app: {} as App,
-      controller: connectedControllerFixture({
-        chooseCatalogRoot: async () => ({
-          kind: "category",
-          selectedPath: "/科学文库/B",
-          effectiveRoot: "/科学文库",
-          groupKey: groupB,
-        }),
-        hybridCatalog: () => ({ ...TEST_INACTIVE_HYBRID_EXECUTION, status: "ready", active }),
-        subscribeHybridCatalog: () => () => undefined,
-        previewCatalogTxt: async () => undefined,
-        requestCatalogTxtImport: async () => undefined,
-        requestLargeCatalogVerification,
-        requestResumeLargeCatalogVerification: async () => undefined,
-        cancelLargeCatalogVerification: () => undefined,
-      }),
-      policy: NORMAL_RUNTIME_POLICY,
-    }).render(root, "zh-CN");
-    root.querySelector<HTMLButtonElement>(
-      '[data-action="browse-catalog-large-scan-root"]',
-    )?.click();
-    await vi.waitFor(() => expect(root.textContent).toContain("/科学文库/B"));
 
-    const groupAInput = root.querySelector<HTMLInputElement>(
-      `[data-catalog-group-key="${groupA}"]`,
-    )!;
-    groupAInput.checked = true;
-    groupAInput.dispatchEvent(new Event("change", { bubbles: true }));
 
-    expect(root.querySelector<HTMLInputElement>('[data-catalog-large-scan-root="true"]')?.value)
-      .toBe("/科学文库");
-    expect(root.textContent).not.toContain("/科学文库/B");
-    expect(root.querySelector<HTMLInputElement>(`[data-catalog-group-key="${groupB}"]`)?.checked)
-      .toBe(true);
-    const start = root.querySelector<HTMLButtonElement>(
-      '[data-action="catalog-start-large-verification"]',
-    )!;
-    expect(start.disabled).toBe(false);
-    start.click();
-    expect(requestLargeCatalogVerification).toHaveBeenCalledWith(
-      "/科学文库",
-      [groupB, groupA],
-      expect.any(Function),
-      undefined,
-    );
-  });
 
-  it.skip("keeps scan and category verification gated by a valid non-root draft and busy state", () => {
-    const groupKey = `group:${"c".repeat(64)}`;
-    let connectionListener = (): void => undefined;
-    let hybridListener = (): void => undefined;
-    let connectionStatus: "authorized" | "scanning" = "authorized";
-    let hybridStatus: "ready" | "scanning" = "ready";
-    const controller = connectedControllerFixture({
-      catalogConnection: () => ({ status: connectionStatus }),
-      subscribeCatalogConnection: (listener) => {
-        connectionListener = listener;
-        return () => { connectionListener = (): void => undefined; };
-      },
-      hybridCatalog: () => ({
-        ...TEST_INACTIVE_HYBRID_EXECUTION,
-        status: hybridStatus,
-        active: {
-          ...TEST_HYBRID_ACTIVE_AUTHORITY,
-          importedAt: 1,
-          pdfCount: 1,
-          unverifiedCount: 1,
-          verifiedCount: 0,
-          differenceCount: 0,
-          cloudMissingCount: 0,
-          groupCount: 1,
-          verifiedGroupCount: 0,
-          coveredCandidatePdfCount: 0,
-          groups: [{
-            groupKey,
-            rootRelativePath: "Science",
-            label: "Science",
-            pdfCount: 1,
-            mode: "recursive",
-            verificationStatus: "unverified",
-          }],
-        },
-      }),
-      subscribeHybridCatalog: (listener) => {
-        hybridListener = listener;
-        return () => { hybridListener = (): void => undefined; };
-      },
-      previewCatalogTxt: async () => undefined,
-      requestCatalogTxtImport: async () => undefined,
-      requestLargeCatalogVerification: async () => undefined,
-      requestResumeLargeCatalogVerification: async () => undefined,
-      cancelLargeCatalogVerification: () => undefined,
-      validateCatalogScanRoot: (value) => {
-        if (!value.startsWith("/") || value === "/" || value.includes("//")) {
-          throw new Error("invalid-root");
-        }
-        return value;
-      },
-    });
-    const root = createTestDiv();
-    createSettingsSectionsSurface({
-      app: {} as App,
-      controller,
-      policy: NORMAL_RUNTIME_POLICY,
-    }).render(root, "zh-CN");
-    const scanInput = root.querySelector<HTMLInputElement>('[data-catalog-scan-root="true"]')!;
-    const scanStart = root.querySelector<HTMLButtonElement>('[data-action="catalog-start-scan"]')!;
-    const verificationInput = root.querySelector<HTMLInputElement>(
-      '[data-catalog-large-scan-root="true"]',
-    )!;
-    const verificationStart = root.querySelector<HTMLButtonElement>(
-      '[data-action="catalog-start-large-verification"]',
-    )!;
-    const group = root.querySelector<HTMLInputElement>(`[data-catalog-group-key="${groupKey}"]`)!;
-
-    expect(root.querySelector<HTMLButtonElement>('[data-action="browse-catalog-scan-root"]')?.hidden)
-      .toBe(true);
-    expect(root.querySelector<HTMLButtonElement>(
-      '[data-action="browse-catalog-large-scan-root"]',
-    )?.hidden).toBe(true);
-
-    expect(scanStart.disabled).toBe(true);
-    for (const invalid of ["/", "relative", "/Synthetic//Science"]) {
-      scanInput.value = invalid;
-      scanInput.dispatchEvent(new Event("input", { bubbles: true }));
-      expect(scanStart.disabled).toBe(true);
-    }
-    scanInput.value = "/Synthetic";
-    scanInput.dispatchEvent(new Event("input", { bubbles: true }));
-    expect(scanStart.disabled).toBe(false);
-
-    group.checked = true;
-    group.dispatchEvent(new Event("change", { bubbles: true }));
-    expect(verificationStart.disabled).toBe(true);
-    verificationInput.value = "/Synthetic";
-    verificationInput.dispatchEvent(new Event("input", { bubbles: true }));
-    expect(verificationStart.disabled).toBe(false);
-
-    connectionStatus = "scanning";
-    hybridStatus = "scanning";
-    connectionListener();
-    hybridListener();
-    expect(scanStart.disabled).toBe(true);
-    expect(verificationStart.disabled).toBe(true);
-    expect(scanInput.disabled).toBe(true);
-    expect(verificationInput.disabled).toBe(true);
-  });
-
-  it.skip("keeps status visible and folds verification counters", () => {
-    const groupKey = `group:${"7".repeat(64)}`;
-    const controller = connectedControllerFixture({
-      hybridCatalog: () => ({
-        ...TEST_INACTIVE_HYBRID_EXECUTION,
-        status: "paused",
-        active: {
-          ...TEST_HYBRID_ACTIVE_AUTHORITY,
-          importedAt: 1,
-          pdfCount: 68_959,
-          coveredCandidatePdfCount: 11_870,
-          unverifiedCount: 57_089,
-          verifiedCount: 10_000,
-          differenceCount: 1_870,
-          cloudMissingCount: 0,
-          groupCount: 24,
-          verifiedGroupCount: 7,
-          groups: [{
-            groupKey,
-            rootRelativePath: "Literature",
-            label: "Literature",
-            pdfCount: 252,
-            mode: "recursive",
-            verificationStatus: "unverified",
-          }],
-        },
-        batch: {
-          ...TEST_LARGE_BATCH_AUTHORITY,
-          batchId: "batch-settings-details",
-          status: "paused",
-          stopReason: "pdf-limit",
-          resumeAvailable: true,
-          runOrdinal: 2,
-          selectedGroupCount: 1,
-          completedGroupCount: 0,
-          remainingGroupCount: 1,
-          currentGroupIndex: 0,
-          currentGroupKey: groupKey,
-          pdfCount: 9_500,
-          directoryCount: 120,
-          ignoredFileCount: 3,
-          listRequestCount: 27,
-          cumulativeListRequestCount: 427,
-          committedPdfCount: 11_870,
-          committedPageCount: 14,
-          completedDirectoryCount: 112,
-          pendingDirectoryCount: 8,
-          autoResumeState: "inactive",
-          autoSegmentIndex: 0,
-          autoSegmentLimit: LARGE_CATALOG_AUTO_CHAIN_MAX_SEGMENTS,
-        },
-      }),
-      subscribeHybridCatalog: () => () => undefined,
-      previewCatalogTxt: async () => undefined,
-      requestCatalogTxtImport: async () => undefined,
-      requestLargeCatalogVerification: async () => undefined,
-      requestResumeLargeCatalogVerification: async () => undefined,
-      cancelLargeCatalogVerification: () => undefined,
-    });
-    const root = createTestDiv();
-    createSettingsSectionsSurface({
-      app: {} as App,
-      controller,
-      policy: NORMAL_RUNTIME_POLICY,
-    }).render(root, "zh-CN");
-
-    expect(root.querySelector('[data-catalog-hybrid-batch-summary="true"]')?.textContent)
-      .toContain("已暂停");
-    const details = root.querySelector<HTMLDetailsElement>(
-      'details[data-settings-verification-details="true"]',
-    )!;
-    expect(details.open).toBe(false);
-    expect(details.querySelector('[data-catalog-hybrid-batch-requests="true"]')?.textContent)
-      .toContain("427");
-    expect(details.querySelector('[data-catalog-hybrid-batch-queue="true"]')?.textContent)
-      .toContain("8");
-    expect(details.querySelector('[data-catalog-hybrid-batch-stop="true"]')?.textContent)
-      .toContain("达到 PDF 上限");
-  });
-
-  it.skip("admits only one pending scan or category verification action", async () => {
-    const groupKey = `group:${"e".repeat(64)}`;
-    const scanGate = deferred();
-    const verificationGate = deferred();
-    const resumeGate = deferred();
-    const requestCatalogScan = vi.fn(async () => scanGate.promise);
-    const requestLargeCatalogVerification = vi.fn(async () => verificationGate.promise);
-    const requestResumeLargeCatalogVerification = vi.fn(async () => resumeGate.promise);
-    const controller = connectedControllerFixture({
-      requestCatalogScan,
-      hybridCatalog: () => ({
-        ...TEST_INACTIVE_HYBRID_EXECUTION,
-        status: "paused",
-        active: {
-          ...TEST_HYBRID_ACTIVE_AUTHORITY,
-          importedAt: 1,
-          pdfCount: 1,
-          unverifiedCount: 1,
-          verifiedCount: 0,
-          differenceCount: 0,
-          cloudMissingCount: 0,
-          groupCount: 1,
-          verifiedGroupCount: 0,
-          coveredCandidatePdfCount: 0,
-          groups: [{
-            groupKey,
-            rootRelativePath: "Science",
-            label: "Science",
-            pdfCount: 1,
-            mode: "recursive",
-            verificationStatus: "unverified",
-          }],
-        },
-        batch: {
-          ...TEST_LARGE_BATCH_AUTHORITY,
-          ...INACTIVE_AUTO_RESUME,
-          batchId: "batch-settings-pending-gate",
-          status: "paused",
-          stopReason: "time-limit",
-          resumeAvailable: true,
-          runOrdinal: 1,
-          remainingGroupCount: 1,
-          pdfCount: 1,
-          directoryCount: 1,
-          ignoredFileCount: 0,
-          listRequestCount: 1,
-          cumulativeListRequestCount: 1,
-          selectedGroupCount: 1,
-          completedGroupCount: 0,
-          currentGroupIndex: 0,
-          currentGroupKey: null,
-          committedPdfCount: 0,
-          committedPageCount: 0,
-          completedDirectoryCount: 0,
-          pendingDirectoryCount: 0,
-        },
-      }),
-      subscribeHybridCatalog: () => () => undefined,
-      previewCatalogTxt: async () => undefined,
-      requestCatalogTxtImport: async () => undefined,
-      requestLargeCatalogVerification,
-      requestResumeLargeCatalogVerification,
-      cancelLargeCatalogVerification: () => undefined,
-      validateCatalogScanRoot: (value) => {
-        if (!value.startsWith("/") || value === "/" || value.includes("//")) {
-          throw new Error("invalid-root");
-        }
-        return value;
-      },
-    });
-    const root = createTestDiv();
-    createSettingsSectionsSurface({
-      app: {} as App,
-      controller,
-      policy: NORMAL_RUNTIME_POLICY,
-    }).render(root, "zh-CN");
-
-    const scanInput = root.querySelector<HTMLInputElement>('[data-catalog-scan-root="true"]')!;
-    const scanStart = root.querySelector<HTMLButtonElement>('[data-action="catalog-start-scan"]')!;
-    scanInput.value = "/Synthetic/Scan";
-    scanInput.dispatchEvent(new Event("input", { bubbles: true }));
-    scanStart.click();
-    scanStart.click();
-    expect(requestCatalogScan).toHaveBeenCalledOnce();
-    expect(scanStart.disabled).toBe(true);
-    scanGate.resolve();
-    await vi.waitFor(() => expect(scanStart.disabled).toBe(false));
-
-    const group = root.querySelector<HTMLInputElement>(`[data-catalog-group-key="${groupKey}"]`)!;
-    const verificationInput = root.querySelector<HTMLInputElement>(
-      '[data-catalog-large-scan-root="true"]',
-    )!;
-    const verificationStart = root.querySelector<HTMLButtonElement>(
-      '[data-action="catalog-start-large-verification"]',
-    )!;
-    const verificationResume = root.querySelector<HTMLButtonElement>(
-      '[data-action="catalog-resume-large-verification"]',
-    )!;
-    group.checked = true;
-    group.dispatchEvent(new Event("change", { bubbles: true }));
-    verificationInput.value = "/Synthetic/Parent";
-    verificationInput.dispatchEvent(new Event("input", { bubbles: true }));
-
-    verificationStart.click();
-    verificationStart.click();
-    expect(requestLargeCatalogVerification).toHaveBeenCalledOnce();
-    expect(verificationStart.disabled).toBe(true);
-    expect(verificationResume.disabled).toBe(true);
-    verificationGate.resolve();
-    await vi.waitFor(() => expect(verificationResume.disabled).toBe(false));
-
-    verificationResume.click();
-    verificationResume.click();
-    expect(requestResumeLargeCatalogVerification).toHaveBeenCalledOnce();
-    expect(verificationStart.disabled).toBe(true);
-    expect(verificationResume.disabled).toBe(true);
-    resumeGate.resolve();
-  });
-
-  it.skip("preserves independent scan and verification drafts plus groups across a language rerender", () => {
-    const groupKey = `group:${"b".repeat(64)}`;
-    const controller = connectedControllerFixture({
-      hybridCatalog: () => ({
-        ...TEST_INACTIVE_HYBRID_EXECUTION,
-        status: "ready",
-        active: {
-          ...TEST_HYBRID_ACTIVE_AUTHORITY,
-          importedAt: 1,
-          pdfCount: 1,
-          unverifiedCount: 1,
-          verifiedCount: 0,
-          differenceCount: 0,
-          cloudMissingCount: 0,
-          groupCount: 1,
-          verifiedGroupCount: 0,
-          coveredCandidatePdfCount: 0,
-          groups: [{
-            groupKey,
-            rootRelativePath: "Science",
-            label: "Science",
-            pdfCount: 1,
-            mode: "recursive",
-            verificationStatus: "unverified",
-          }],
-        },
-      }),
-      subscribeHybridCatalog: () => () => undefined,
-      previewCatalogTxt: async () => undefined,
-      requestCatalogTxtImport: async () => undefined,
-      requestLargeCatalogVerification: async () => undefined,
-      requestResumeLargeCatalogVerification: async () => undefined,
-      cancelLargeCatalogVerification: () => undefined,
-    });
-    const root = createTestDiv();
-    const surface = createSettingsSectionsSurface({
-      app: {} as App,
-      controller,
-      policy: NORMAL_RUNTIME_POLICY,
-    });
-    surface.render(root, "zh-CN");
-    const scan = root.querySelector<HTMLInputElement>('[data-catalog-scan-root="true"]')!;
-    const verification = root.querySelector<HTMLInputElement>(
-      '[data-catalog-large-scan-root="true"]',
-    )!;
-    const group = root.querySelector<HTMLInputElement>(`[data-catalog-group-key="${groupKey}"]`)!;
-    scan.value = "/Synthetic/Scan";
-    scan.dispatchEvent(new Event("input", { bubbles: true }));
-    verification.value = "/Synthetic/Verification";
-    verification.dispatchEvent(new Event("input", { bubbles: true }));
-    group.checked = true;
-    group.dispatchEvent(new Event("change", { bubbles: true }));
-
-    surface.render(root, "en");
-
-    expect(root.querySelector<HTMLInputElement>('[data-catalog-scan-root="true"]')?.value)
-      .toBe("/Synthetic/Scan");
-    expect(root.querySelector<HTMLInputElement>('[data-catalog-large-scan-root="true"]')?.value)
-      .toBe("/Synthetic/Verification");
-    expect(root.querySelector<HTMLInputElement>(`[data-catalog-group-key="${groupKey}"]`)?.checked)
-      .toBe(true);
-    expect(root.textContent).toContain("Current directory");
-  });
 
   it("rolls persistent controls back when saving fails", async () => {
     const privateFailure = new Error("private-credential-detail");
@@ -1128,108 +651,6 @@ describe("shared grouped settings surface", () => {
     ]);
   });
 
-  it.skip("localizes save, connection, scan, batch, and verification states", async () => {
-    const controller = connectedControllerFixture({
-      catalogConnection: () => ({ status: "paused" }),
-      hybridCatalog: () => ({
-        ...TEST_INACTIVE_HYBRID_EXECUTION,
-        status: "paused",
-        active: {
-          ...TEST_HYBRID_ACTIVE_AUTHORITY,
-          importedAt: 1,
-          pdfCount: 1,
-          unverifiedCount: 1,
-          verifiedCount: 0,
-          differenceCount: 1,
-          cloudMissingCount: 0,
-          groupCount: 1,
-          verifiedGroupCount: 0,
-          coveredCandidatePdfCount: 0,
-          groups: [{
-            groupKey: `group:${"a".repeat(64)}`,
-            rootRelativePath: "A",
-            label: "A",
-            pdfCount: 1,
-            mode: "recursive",
-            verificationStatus: "difference",
-          }],
-        },
-        batch: {
-          ...TEST_LARGE_BATCH_AUTHORITY,
-          ...INACTIVE_AUTO_RESUME,
-          batchId: "batch-settings-sections",
-          status: "paused",
-          stopReason: "pdf-limit",
-          resumeAvailable: true,
-          runOrdinal: 1,
-          remainingGroupCount: 1,
-          pdfCount: 1,
-          directoryCount: 1,
-          ignoredFileCount: 0,
-          listRequestCount: 1,
-          cumulativeListRequestCount: 1,
-          selectedGroupCount: 1,
-          completedGroupCount: 0,
-          currentGroupIndex: 0,
-          currentGroupKey: null,
-          committedPdfCount: 0,
-          committedPageCount: 0,
-          completedDirectoryCount: 0,
-          pendingDirectoryCount: 0,
-        },
-      }),
-      subscribeHybridCatalog: () => () => undefined,
-      previewCatalogTxt: async () => undefined,
-      requestCatalogTxtImport: async () => undefined,
-      requestLargeCatalogVerification: async () => undefined,
-      requestResumeLargeCatalogVerification: async () => undefined,
-      cancelLargeCatalogVerification: () => undefined,
-    });
-    const zhRoot = createTestDiv();
-    createSettingsSectionsSurface({
-      app: {} as App, controller, policy: NORMAL_RUNTIME_POLICY,
-    }).render(zhRoot, "zh-CN");
-    const startup = zhRoot.querySelector<HTMLInputElement>('input[type="checkbox"]')!;
-    startup.checked = true;
-    startup.dispatchEvent(new Event("change", { bubbles: true }));
-    await Promise.resolve();
-    await Promise.resolve();
-
-    expect(zhRoot.textContent).not.toMatch(
-      /Startup preference|Folder rules|paused|scanning|unverified|difference|pdf limit/u,
-    );
-    expect(zhRoot.textContent).toContain("已暂停");
-    expect(zhRoot.textContent).toContain("存在差异");
-
-    const enRoot = createTestDiv();
-    createSettingsSectionsSurface({
-      app: {} as App, controller, policy: NORMAL_RUNTIME_POLICY,
-    }).render(enRoot, "en");
-    expect(enRoot.textContent).toContain("paused");
-    expect(enRoot.textContent).toContain("difference");
-  });
-
-  it.each([
-    ["zh-CN", "授权码无效"],
-    ["en", "The authorization code is invalid"],
-  ] as const)("shows a safe localized OAuth failure in %s", (locale, expected) => {
-    const controller = connectedControllerFixture({
-      settings: () => ({ ...settingsControllerFixture().settings(), locale }),
-      catalogConnection: () => ({
-        status: "configured",
-        messageCode: "authorization-code-invalid",
-      }),
-    });
-    const root = createTestDiv();
-
-    createSettingsSectionsSurface({
-      app: {} as App, controller, policy: NORMAL_RUNTIME_POLICY,
-    }).render(root, locale);
-
-    expect(root.querySelector('[data-catalog-connection-message="true"]')?.textContent)
-      .toBe(expected);
-    expect(root.textContent).not.toContain("SECRET-RUNTIME-DETAIL");
-  });
 
   it("localizes progress without losing exact requests, elapsed time, or stop reason", () => {
     const progress = presentCatalogProgress({

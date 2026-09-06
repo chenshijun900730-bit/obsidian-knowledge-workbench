@@ -6,9 +6,7 @@ import type { CloudCatalogConnectionViewModel } from "../catalog/cloud-catalog-r
 import type { HybridCatalogViewModel } from "../catalog/hybrid-catalog-runtime";
 import {
   CATALOG_TXT_IMPORT_BUDGET,
-  LARGE_CATALOG_RUN_BUDGET,
   type CatalogVerificationStatus,
-  type LargeCatalogStopReason,
 } from "../catalog/hybrid-catalog-types";
 import {
   createWorkbenchI18n,
@@ -22,9 +20,7 @@ import {
   type CloudDirectoryFieldSurface,
 } from "./cloud-directory-field";
 import { connectionCanVerify } from "./verification-connection-semantics";
-import { normalizeCatalogScanRoot } from "../catalog/catalog-path";
 import {
-  validateCloudDirectorySelection,
   type CloudDirectoryPickerPurpose,
   type CloudDirectorySelection,
 } from "../catalog/cloud-directory-selection";
@@ -63,18 +59,6 @@ export interface SettingsController {
   subscribeHybridCatalog?(listener: () => void): () => void;
   previewCatalogTxt?(path: string): Promise<void>;
   requestCatalogTxtImport?(path: string, onConfirmed?: () => void): Promise<void>;
-  requestLargeCatalogVerification?(
-    rootPath: string,
-    groupKeys: readonly string[],
-    onConfirmed?: () => void,
-    directorySelection?: CloudDirectorySelection,
-  ): Promise<void>;
-  requestResumeLargeCatalogVerification?(
-    rootPath: string,
-    groupKeys: readonly string[],
-    onConfirmed?: () => void,
-  ): Promise<void>;
-  cancelLargeCatalogVerification?(): void;
 }
 
 export type CatalogAuthorizationIntent = "repair-same-account" | "replace-identity";
@@ -93,6 +77,8 @@ export type SettingsSectionId =
 
 export interface SettingsSectionsRenderOptions {
   readonly section?: SettingsSectionId;
+  readonly onBackToMore?: () => void;
+  readonly onOpenTaskOverview?: () => void;
 }
 
 export interface SettingsSectionsSurface {
@@ -156,25 +142,6 @@ const SETTINGS_STATUS_MESSAGE = {
   difference: "settings.status.difference",
 } as const satisfies Record<SettingsDisplayStatus, WorkbenchMessageKey>;
 
-const SETTINGS_STOP_REASON_MESSAGE = {
-  complete: "settings.stop.complete",
-  "user-canceled": "settings.stop.userCanceled",
-  "selection-limit": "settings.stop.selectionLimit",
-  "pdf-limit": "settings.stop.pdfLimit",
-  "directory-limit": "settings.stop.directoryLimit",
-  "list-request-limit": "settings.stop.listRequestLimit",
-  "time-limit": "settings.stop.timeLimit",
-  "baidu-permission-denied": "settings.stop.baiduPermissionDenied",
-  "baidu-not-found": "settings.stop.baiduNotFound",
-  "baidu-rate-limited": "settings.stop.baiduRateLimited",
-  "baidu-token-expired": "settings.stop.baiduTokenExpired",
-  "baidu-access-unavailable": "settings.stop.baiduAccessUnavailable",
-  "invalid-baidu-response": "settings.stop.invalidBaiduResponse",
-  "hybrid-snapshot-corrupt": "settings.stop.hybridSnapshotCorrupt",
-  "hybrid-batch-invalid": "settings.stop.hybridBatchInvalid",
-  "hybrid-batch-unavailable": "settings.stop.hybridBatchUnavailable",
-} as const satisfies Record<LargeCatalogStopReason, WorkbenchMessageKey>;
-
 type SettingsSaveMessageKey = Extract<WorkbenchMessageKey, `settings.save.${string}`>;
 type SettingsErrorMessageKey = Extract<WorkbenchMessageKey, `settings.error.${string}`>;
 type SettingsUiEvent = "change" | "input" | "toggle";
@@ -210,10 +177,7 @@ export function createSettingsSectionsSurface(
     private catalogAuthorizationExpiryTimer: number | null = null;
     private unsubscribeCatalogConnection: (() => void) | null = null;
     private unsubscribeHybridCatalog: (() => void) | null = null;
-    private readonly largeCatalogSelectedGroupKeys = new Set<string>();
     private readonly expandedSections = new Set<CollapsibleSettingsSection>();
-    private largeCatalogVerificationRoot = "";
-    private largeCatalogDirectorySelection: CloudDirectorySelection | undefined;
     private catalogAppKeyDraft = "";
     private catalogSecretKeyDraft = "";
     private catalogAuthorizationCodeDraft = "";
@@ -252,13 +216,6 @@ export function createSettingsSectionsSurface(
       const localizedStatus = (value: SettingsDisplayStatus | undefined): string => value === undefined
         ? "—"
         : i18n.t(SETTINGS_STATUS_MESSAGE[value]);
-      const localizedStopReason = (value: string | null | undefined): string => {
-        if (value === undefined || value === null) return "—";
-        const key = (SETTINGS_STOP_REASON_MESSAGE as Partial<
-          Record<string, WorkbenchMessageKey>
-        >)[value];
-        return i18n.t(key ?? "settings.status.unknown");
-      };
       const localizedOr = (key: string, fallback: string): string => {
         try {
           return i18n.t(key as WorkbenchMessageKey);
@@ -361,11 +318,16 @@ export function createSettingsSectionsSurface(
         ["cloud-scan-advanced", renderVerificationSection()],
         ["privacy-ai", renderPrivacyAiSection()],
       ];
+      if (options.section !== undefined) {
+        const back = button(i18n.t("more.back"), () => options.onBackToMore?.());
+        back.dataset.action = "more-back";
+        root.append(back);
+      }
       root.append(...sections
         .filter(([id]) => options.section === undefined || options.section === id)
         .map(([, section]) => section));
       const openTask = button(i18n.t("settings.surface.openTaskOverview"), () => {
-        onOpenTaskOverview?.();
+        (options.onOpenTaskOverview ?? onOpenTaskOverview)?.();
       });
       openTask.dataset.action = "open-task-overview";
       verificationSection.content.append(openTask);
@@ -598,13 +560,79 @@ export function createSettingsSectionsSurface(
       privacyAiSection.content.append(exclusions);
       }
 
+      const renderScanOnlySection = (): void => {
+        if (
+          policy.configuration === "read-only"
+          || controller.validateCatalogScanRoot === undefined
+          || controller.requestCatalogScan === undefined
+        ) return;
+        const field = createCloudDirectoryField(doc, i18n, {
+          path: this.catalogScanRootDraft,
+          selection: this.catalogScanDirectorySelection,
+          disabled: false,
+          locked: false,
+        }, {
+          onChoose: async () => (
+            await controller.chooseCatalogRoot?.({
+              initialRoot: this.catalogScanRootDraft,
+              purpose: { kind: "scan" },
+            }) ?? null
+          ),
+          onSelection: (selection) => {
+            if (selection.kind !== "directory") return;
+            this.catalogScanDirectorySelection = structuredClone(selection);
+            this.catalogScanRootDraft = selection.effectiveRoot;
+            updateStart();
+          },
+          onManualChange: (value) => {
+            this.catalogScanDirectorySelection = undefined;
+            this.catalogScanRootDraft = value;
+            updateStart();
+          },
+          onValidate: controller.validateCatalogScanRoot.bind(controller),
+        });
+        this.cloudDirectoryFields.add(field);
+        field.manualInput.dataset.catalogScanRoot = "true";
+        const actions = doc.createElement("div");
+        actions.className = "knowledge-workbench__settings-row";
+        let scanActionPending = false;
+        const start = button(i18n.t("settings.surface.startScan"), () => {
+          if (start.disabled || scanActionPending) return;
+          scanActionPending = true;
+          updateStart();
+          void run("settings.save.cloudScan", () => controller.requestCatalogScan!(
+            this.catalogScanRootDraft,
+            () => {
+              this.catalogScanRootDraft = "";
+              this.catalogScanDirectorySelection = undefined;
+              field.setPath("");
+              updateStart();
+            },
+          ), actions, undefined, "settings.error.cloudUnavailable").finally(() => {
+            if (!isCurrent()) return;
+            scanActionPending = false;
+            updateStart();
+          });
+        });
+        start.dataset.action = "catalog-start-scan";
+        const updateStart = (): void => {
+          const connection = controller.catalogConnection?.();
+          start.disabled = !field.valid()
+            || scanActionPending
+            || !connectionCanVerify(connection)
+            || connection?.messageCode !== undefined;
+        };
+        updateStart();
+        actions.append(start);
+        verificationSection.content.append(field.root, actions);
+      };
+
       const catalog = doc.createElement("section");
       catalog.className = "knowledge-workbench__catalog-settings";
       catalog.append(heading(doc, 3, i18n.t("settings.surface.cloudCatalog")));
-      let recomputeLargeVerificationActions = (): void => undefined;
       const connection = controller.catalogConnection?.();
-      if (!includesSection("baidu") && !includesSection("cloud-scan-advanced")) {
-        // The requested subsection has no connection or scan controls to construct.
+      if (!includesSection("baidu")) {
+        if (includesSection("cloud-scan-advanced")) renderScanOnlySection();
       } else if (policy.configuration === "read-only") {
         const locked = doc.createElement("p");
         locked.className = "knowledge-workbench__locked";
@@ -741,6 +769,13 @@ export function createSettingsSectionsSurface(
           () => beginAuthorization("replace-identity"),
         );
         replaceIdentity.dataset.action = "catalog-replace-identity";
+        const replaceIdentitySection = doc.createElement("details");
+        replaceIdentitySection.dataset.settingsReplaceIdentity = "true";
+        const replaceIdentitySummary = doc.createElement("summary");
+        replaceIdentitySummary.textContent = i18n.t("settings.surface.replaceIdentity");
+        const replaceIdentityConsequence = doc.createElement("p");
+        replaceIdentityConsequence.textContent = i18n.t("cloudAuthority.replaceIdentity");
+        replaceIdentitySection.append(replaceIdentitySummary, replaceIdentityConsequence, replaceIdentity);
         const revoke = button(i18n.t("settings.surface.removeCredentials"), () => {
           authorizationCode.value = "";
           this.catalogAuthorizationCodeDraft = "";
@@ -755,7 +790,7 @@ export function createSettingsSectionsSurface(
           );
         });
         revoke.dataset.action = "catalog-revoke";
-        connectionActions.append(connect, replaceIdentity, revoke);
+        connectionActions.append(connect, revoke);
 
         const authorizationCodeLabel = doc.createElement("label");
         authorizationCodeLabel.className = "knowledge-workbench__settings-row";
@@ -940,7 +975,6 @@ export function createSettingsSectionsSurface(
               || !scanDirectoryField.valid();
           };
           recomputeScanActions();
-          recomputeLargeVerificationActions();
           if (cancel !== undefined) {
             const scanning = current?.status === "scanning";
             cancel.hidden = !scanning;
@@ -961,6 +995,7 @@ export function createSettingsSectionsSurface(
           appKeyLabel,
           secretKeyLabel,
           connectionActions,
+          replaceIdentitySection,
           authorizationCodeLabel,
           authorizationActions,
         );
@@ -979,18 +1014,9 @@ export function createSettingsSectionsSurface(
         && controller.subscribeHybridCatalog !== undefined
         && controller.previewCatalogTxt !== undefined
         && controller.requestCatalogTxtImport !== undefined
-        && controller.requestLargeCatalogVerification !== undefined
-        && controller.requestResumeLargeCatalogVerification !== undefined
-        && controller.cancelLargeCatalogVerification !== undefined
       ) {
         const previewCatalogTxt = controller.previewCatalogTxt.bind(controller);
         const requestCatalogTxtImport = controller.requestCatalogTxtImport.bind(controller);
-        const requestLargeCatalogVerification = controller.requestLargeCatalogVerification
-          .bind(controller);
-        const requestResumeLargeCatalogVerification = controller
-          .requestResumeLargeCatalogVerification.bind(controller);
-        const cancelLargeCatalogVerification = controller.cancelLargeCatalogVerification
-          .bind(controller);
         const hybridSection = doc.createElement("section");
         hybridSection.className = "knowledge-workbench__hybrid-catalog-settings";
         hybridSection.append(heading(doc, 3, i18n.t("settings.surface.largeCatalog")));
@@ -1001,28 +1027,6 @@ export function createSettingsSectionsSurface(
         activeSummary.dataset.catalogHybridActiveSummary = "true";
         const previewSummary = doc.createElement("p");
         previewSummary.dataset.catalogHybridPreviewSummary = "true";
-        const batchSummary = doc.createElement("p");
-        batchSummary.dataset.catalogHybridBatchSummary = "true";
-        const batchRequests = doc.createElement("p");
-        batchRequests.dataset.catalogHybridBatchRequests = "true";
-        const batchQueue = doc.createElement("p");
-        batchQueue.dataset.catalogHybridBatchQueue = "true";
-        const batchStop = doc.createElement("p");
-        batchStop.dataset.catalogHybridBatchStop = "true";
-        const batchGuidance = doc.createElement("p");
-        batchGuidance.dataset.catalogHybridBatchGuidance = "true";
-        const verificationDetails = doc.createElement("details");
-        verificationDetails.dataset.settingsVerificationDetails = "true";
-        const verificationDetailsTitle = doc.createElement("summary");
-        verificationDetailsTitle.textContent = i18n.t("verification.details.title");
-        verificationDetails.append(
-          verificationDetailsTitle,
-          batchRequests,
-          batchQueue,
-          batchStop,
-          batchGuidance,
-        );
-
         const txtLabel = doc.createElement("label");
         txtLabel.className = "knowledge-workbench__settings-row";
         const txtText = doc.createElement("span");
@@ -1064,324 +1068,6 @@ export function createSettingsSectionsSurface(
         });
         importTxt.dataset.action = "catalog-import-txt";
         txtActions.append(previewTxt, importTxt);
-
-        // Category selection and run lifecycle now belong exclusively to Task.
-        const taskOwnsCategoryUi = true;
-        if (!taskOwnsCategoryUi) {
-        const selectionTitle = doc.createElement("p");
-        selectionTitle.textContent = i18n.t("settings.surface.selectionLimit", {
-          maximum: i18n.number(LARGE_CATALOG_RUN_BUDGET.maxSelectedTopLevelGroups),
-        });
-        const groupChoices = doc.createElement("div");
-        groupChoices.className = "knowledge-workbench__catalog-group-choices";
-        const selectedGroupKeys = this.largeCatalogSelectedGroupKeys;
-
-        let verificationBusy = hybrid.status === "importing" || hybrid.status === "scanning";
-        let verificationActionPending = false;
-        const validateVerificationRoot = controller.validateCatalogScanRoot?.bind(controller)
-          ?? normalizeCatalogScanRoot;
-        const currentVerificationPurpose = (): Extract<
-          CloudDirectoryPickerPurpose,
-          { kind: "verification" }
-        > => ({
-          kind: "verification",
-          groups: (controller.hybridCatalog?.()?.active?.groups ?? [])
-            .filter((group) => group.groupKey !== "txt-root-items")
-            .map((group) => ({
-              groupKey: group.groupKey,
-              rootRelativePath: group.rootRelativePath,
-              label: group.label,
-            })),
-        });
-        const verificationDirectoryField = createCloudDirectoryField(doc, i18n, {
-          path: this.largeCatalogVerificationRoot,
-          selection: this.largeCatalogDirectorySelection,
-          disabled: verificationBusy,
-          locked: false,
-        }, {
-          onChoose: async () => {
-            const purpose = currentVerificationPurpose();
-            const selection = await (controller.chooseCatalogRoot?.({
-              initialRoot: this.largeCatalogVerificationRoot,
-              purpose: structuredClone(purpose),
-            }) ?? Promise.resolve(null));
-            return selection === null
-              ? null
-              : validateCloudDirectorySelection(selection, purpose);
-          },
-          onSelection: (selection) => {
-            const validated = validateCloudDirectorySelection(
-              selection,
-              currentVerificationPurpose(),
-            );
-            this.largeCatalogDirectorySelection = structuredClone(validated);
-            this.largeCatalogVerificationRoot = validated.effectiveRoot;
-            const availableKeys = new Set(
-              controller.hybridCatalog?.()?.active?.groups.map((group) => group.groupKey) ?? [],
-            );
-            if (validated.kind === "category") {
-              selectedGroupKeys.clear();
-              selectedGroupKeys.add(validated.groupKey);
-            } else {
-              for (const key of [...selectedGroupKeys]) {
-                if (!availableKeys.has(key)) selectedGroupKeys.delete(key);
-              }
-            }
-            for (const choice of Array.from(groupChoices.querySelectorAll<HTMLInputElement>(
-              "input[data-catalog-group-key]",
-            ))) {
-              choice.checked = selectedGroupKeys.has(choice.dataset.catalogGroupKey ?? "");
-            }
-            queueMicrotask(() => {
-              if (isCurrent()) recomputeLargeVerificationActions();
-            });
-          },
-          onManualChange: (value) => {
-            this.largeCatalogDirectorySelection = undefined;
-            this.largeCatalogVerificationRoot = value;
-            recomputeLargeVerificationActions();
-          },
-          onValidate: validateVerificationRoot,
-        });
-        this.cloudDirectoryFields.add(verificationDirectoryField);
-        const root = verificationDirectoryField.manualInput;
-        root.dataset.catalogLargeScanRoot = "true";
-        root.dataset.focusKey = "settings-catalog-verification-root";
-        trackSessionInput(root);
-        verificationDirectoryField.chooseButton.dataset.action = "browse-catalog-large-scan-root";
-        verificationDirectoryField.chooseButton.dataset.focusKey = "settings-catalog-verification-root-choose";
-        if (controller.chooseCatalogRoot === undefined) {
-          verificationDirectoryField.chooseButton.hidden = true;
-          verificationDirectoryField.chooseButton.disabled = true;
-        }
-        const rootHint = doc.createElement("p");
-        rootHint.textContent = i18n.t("settings.surface.verificationRootHint");
-        const parentRootError = doc.createElement("p");
-        parentRootError.dataset.catalogParentRootError = "true";
-        parentRootError.setAttribute("role", "status");
-        parentRootError.setAttribute("aria-live", "polite");
-        parentRootError.setAttribute("aria-atomic", "true");
-        parentRootError.textContent = i18n.t("settings.surface.parentRootRequired");
-        parentRootError.hidden = true;
-        const verificationActions = doc.createElement("div");
-        verificationActions.className = "knowledge-workbench__settings-row";
-        const startVerification = button(i18n.t("settings.surface.startVerification"), () => {
-          if (startVerification.disabled || verificationActionPending) return;
-          verificationActionPending = true;
-          recomputeLargeVerificationActions();
-          const rootPath = this.largeCatalogVerificationRoot;
-          const groupKeys = [...selectedGroupKeys];
-          const rootLeaf = rootPath.normalize("NFC").split("/").at(-1) ?? "";
-          const selectedGroupIsRoot = (controller.hybridCatalog?.()?.active?.groups ?? []).some((group) => (
-            group.groupKey !== "txt-root-items"
-            && selectedGroupKeys.has(group.groupKey)
-            && group.rootRelativePath.normalize("NFC") === rootLeaf
-          ));
-          if (selectedGroupIsRoot) {
-            verificationActionPending = false;
-            recomputeLargeVerificationActions();
-            verificationActions.insertAdjacentElement("afterend", status);
-            status.textContent = i18n.t("settings.surface.parentRootRequired");
-            return;
-          }
-          void run(
-            "settings.save.categoryVerification",
-            () => requestLargeCatalogVerification(
-              rootPath,
-              groupKeys,
-              () => {
-                if (!isCurrent()) return;
-                this.largeCatalogVerificationRoot = "";
-                this.largeCatalogDirectorySelection = undefined;
-                verificationDirectoryField.setPath("");
-                recomputeLargeVerificationActions();
-              },
-              this.largeCatalogDirectorySelection,
-            ),
-            verificationActions,
-            undefined,
-            "settings.error.verificationUnavailable",
-          ).finally(() => {
-            if (!isCurrent()) return;
-            verificationActionPending = false;
-            recomputeLargeVerificationActions();
-          });
-        });
-        startVerification.dataset.action = "catalog-start-large-verification";
-        const resumeVerification = button(i18n.t("settings.surface.resumeVerification"), () => {
-          if (resumeVerification.disabled || verificationActionPending) return;
-          verificationActionPending = true;
-          recomputeLargeVerificationActions();
-          const rootPath = this.largeCatalogVerificationRoot;
-          const groupKeys = [...selectedGroupKeys];
-          void run(
-            "settings.save.categoryResume",
-            () => requestResumeLargeCatalogVerification(rootPath, groupKeys, () => {
-              if (!isCurrent()) return;
-              this.largeCatalogVerificationRoot = "";
-              this.largeCatalogDirectorySelection = undefined;
-              verificationDirectoryField.setPath("");
-              recomputeLargeVerificationActions();
-            }),
-            verificationActions,
-            undefined,
-            "settings.error.verificationUnavailable",
-          ).finally(() => {
-            if (!isCurrent()) return;
-            verificationActionPending = false;
-            recomputeLargeVerificationActions();
-          });
-        });
-        resumeVerification.dataset.action = "catalog-resume-large-verification";
-        const cancelVerification = button(i18n.t("settings.surface.cancelVerification"), () => {
-          cancelLargeCatalogVerification();
-        });
-        cancelVerification.dataset.action = "catalog-cancel-large-verification";
-        verificationActions.append(startVerification, resumeVerification, cancelVerification);
-
-        const renderHybrid = (): void => {
-          if (!isCurrent()) return;
-          const current = controller.hybridCatalog?.();
-          const busy = current?.status === "importing" || current?.status === "scanning";
-          activeSummary.textContent = current?.active === undefined
-            ? i18n.t("settings.surface.activeCatalogEmpty")
-            : i18n.t("settings.surface.activeCatalogSummary", {
-              pdf: i18n.number(current.active.pdfCount),
-              unverified: i18n.number(current.active.unverifiedCount),
-              verified: i18n.number(current.active.verifiedCount),
-              differences: i18n.number(current.active.differenceCount),
-              verifiedGroups: i18n.number(current.active.verifiedGroupCount),
-              groups: i18n.number(current.active.groupCount),
-            });
-          previewSummary.textContent = current?.candidate === undefined
-            ? i18n.t("settings.surface.previewEmpty")
-            : i18n.t("settings.surface.previewSummary", {
-              pdf: i18n.number(current.candidate.pdfCount),
-              maximum: i18n.number(CATALOG_TXT_IMPORT_BUDGET.maxPdfCount),
-              directories: i18n.number(current.candidate.directoryCount),
-              ignored: i18n.number(current.candidate.ignoredLeafCount),
-            });
-          batchSummary.textContent = i18n.t("settings.batch.status", {
-            status: localizedStatus(current?.batch?.status),
-            reason: localizedStopReason(current?.batch?.stopReason),
-          });
-          batchRequests.textContent = i18n.t("settings.surface.batchRequests", {
-            segment: i18n.number(current?.batch?.listRequestCount ?? 0),
-            cumulative: i18n.number(current?.batch?.cumulativeListRequestCount ?? 0),
-          });
-          batchQueue.textContent = i18n.t("settings.surface.batchQueue", {
-            count: i18n.number(current?.batch?.pendingDirectoryCount ?? 0),
-          });
-          batchStop.textContent = i18n.t("settings.surface.batchStop", {
-            reason: localizedStopReason(current?.batch?.stopReason),
-          });
-          batchGuidance.hidden = current?.batch?.stopReason !== "baidu-not-found";
-          batchGuidance.textContent = current?.batch?.stopReason === "baidu-not-found"
-            ? i18n.t("settings.surface.notFoundGuidance")
-            : "";
-          const availableKeys = new Set(current?.active?.groups.map((group) => group.groupKey) ?? []);
-          for (const key of [...selectedGroupKeys]) {
-            if (!availableKeys.has(key)) selectedGroupKeys.delete(key);
-          }
-          if (this.largeCatalogDirectorySelection?.kind === "category") {
-            try {
-              this.largeCatalogDirectorySelection = validateCloudDirectorySelection(
-                this.largeCatalogDirectorySelection,
-                currentVerificationPurpose(),
-              );
-            } catch {
-              this.largeCatalogDirectorySelection = undefined;
-              verificationDirectoryField.setPath(this.largeCatalogVerificationRoot);
-            }
-          }
-          groupChoices.replaceChildren();
-          for (const group of current?.active?.groups ?? []) {
-            const row = doc.createElement("label");
-            row.className = "knowledge-workbench__settings-row";
-            const choice = doc.createElement("input");
-            choice.type = "checkbox";
-            choice.checked = selectedGroupKeys.has(group.groupKey);
-            choice.disabled = busy;
-            choice.dataset.catalogGroupKey = group.groupKey;
-            listen(choice, "change", () => {
-              if (choice.checked) {
-                if (selectedGroupKeys.size >= LARGE_CATALOG_RUN_BUDGET.maxSelectedTopLevelGroups) {
-                  choice.checked = false;
-                  status.textContent = i18n.t("settings.surface.selectionMaximum", {
-                    maximum: i18n.number(LARGE_CATALOG_RUN_BUDGET.maxSelectedTopLevelGroups),
-                  });
-                  groupChoices.insertAdjacentElement("afterend", status);
-                  return;
-                }
-                selectedGroupKeys.add(group.groupKey);
-              } else {
-                selectedGroupKeys.delete(group.groupKey);
-              }
-              if (this.largeCatalogDirectorySelection?.kind === "category") {
-                this.largeCatalogDirectorySelection = undefined;
-                verificationDirectoryField.setPath(this.largeCatalogVerificationRoot);
-              }
-              recomputeLargeVerificationActions();
-            });
-            const label = doc.createElement("span");
-            label.textContent = i18n.t("settings.group.verification", {
-              label: group.label,
-              count: group.pdfCount,
-              status: localizedStatus(group.verificationStatus),
-            });
-            row.append(choice, label);
-            groupChoices.append(row);
-          }
-          previewTxt.disabled = busy;
-          importTxt.disabled = busy || current?.candidate === undefined;
-          verificationBusy = busy;
-          verificationDirectoryField.updateState({ disabled: busy, locked: false });
-          if (controller.chooseCatalogRoot === undefined) {
-            verificationDirectoryField.chooseButton.hidden = true;
-            verificationDirectoryField.chooseButton.disabled = true;
-          }
-          recomputeLargeVerificationActions = () => {
-            const connectionNow = controller.catalogConnection?.();
-            const rootPath = this.largeCatalogVerificationRoot;
-            const rootLeaf = rootPath.normalize("NFC").split("/").at(-1) ?? "";
-            const selectedGroupIsRoot = (controller.hybridCatalog?.()?.active?.groups ?? [])
-              .some((group) => (
-                group.groupKey !== "txt-root-items"
-                && selectedGroupKeys.has(group.groupKey)
-                && group.rootRelativePath.normalize("NFC") === rootLeaf
-              ));
-            const connectionReady = connectionCanVerify(connectionNow)
-              && connectionNow?.messageCode === undefined;
-            parentRootError.hidden = !selectedGroupIsRoot;
-            startVerification.disabled = verificationActionPending
-              || verificationBusy
-              || !connectionReady
-              || selectedGroupKeys.size === 0
-              || selectedGroupIsRoot
-              || !verificationDirectoryField.valid();
-            resumeVerification.disabled = verificationActionPending
-              || verificationBusy
-              || !connectionReady
-              || controller.hybridCatalog?.()?.batch?.resumeAvailable !== true
-              || !verificationDirectoryField.valid();
-          };
-          recomputeLargeVerificationActions();
-          resumeVerification.hidden = current?.batch?.resumeAvailable !== true;
-          cancelVerification.hidden = current?.status !== "scanning";
-          cancelVerification.disabled = current?.status !== "scanning";
-        };
-
-        hybridSection.append(
-          explanation,
-          activeSummary,
-          previewSummary,
-          txtLabel,
-          txtActions,
-        );
-        largeCatalogSection.content.append(hybridSection);
-        renderHybrid();
-        this.unsubscribeHybridCatalog = controller.subscribeHybridCatalog(renderHybrid);
-        }
 
         const renderCatalogData = (): void => {
           if (!isCurrent()) return;
@@ -1555,9 +1241,6 @@ export function createSettingsSectionsSurface(
       this.catalogScanDirectorySelection = undefined;
       this.catalogTxtPathDraft = "";
       this.sessionAiSecretDraft = "";
-      this.largeCatalogVerificationRoot = "";
-      this.largeCatalogDirectorySelection = undefined;
-      this.largeCatalogSelectedGroupKeys.clear();
       this.secretComponent = null;
       this.liveStatus = null;
     }

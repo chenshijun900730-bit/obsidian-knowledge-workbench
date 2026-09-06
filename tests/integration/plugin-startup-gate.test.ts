@@ -70,5 +70,8 @@ describe("plugin startup gate", () => {
     expect(closeObsidianSettingsIfSupported({ setting: { close } } as never)).toBe(true);
     expect(close).toHaveBeenCalledOnce();
     expect(closeObsidianSettingsIfSupported({} as never)).toBe(false);
+    expect(() => closeObsidianSettingsIfSupported({
+      setting: { close: () => { throw new Error("host close unavailable"); } },
+    } as never)).toThrow("host close unavailable");
   });
 });

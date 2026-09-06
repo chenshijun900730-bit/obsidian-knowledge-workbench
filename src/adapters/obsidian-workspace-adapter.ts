@@ -1,4 +1,4 @@
-import type { App, TFile } from "obsidian";
+import type { App, TFile, WorkspaceLeaf } from "obsidian";
 import { VIEW_TYPE } from "../constants";
 import type { WorkspacePort } from "../core/ports";
 
@@ -125,6 +125,10 @@ export async function activateWorkbench(app: App): Promise<void> {
     await leaf.setViewState({ type: VIEW_TYPE, active: true });
   }
   await app.workspace.revealLeaf(leaf);
+  const workspace = app.workspace as unknown as Readonly<{
+    setActiveLeaf?: (target: WorkspaceLeaf, focus?: boolean, reveal?: boolean) => void;
+  }>;
+  workspace.setActiveLeaf?.(leaf, true, true);
 }
 
 /** Narrow feature check for Obsidian's undocumented Settings close capability. */
