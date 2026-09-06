@@ -47,7 +47,7 @@
   inline-size: 1.25rem;
   text-align: center;
 }
-.knowledge-workbench__content { min-width: 0; overflow-x: clip; }
+.knowledge-workbench__content { min-width: 0; }
 .knowledge-workbench__content > main { min-width: 0; }
 .knowledge-workbench__page {
   box-sizing: border-box;
@@ -785,6 +785,20 @@
   .knowledge-workbench__task-card,
   .knowledge-workbench__folder-selection {
     grid-template-columns: minmax(0, 1fr);
+  }
+  .knowledge-workbench__verification-progress {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .knowledge-workbench__verification-progress-card,
+  .knowledge-workbench__verification-auto-state,
+  .knowledge-workbench__verification-progress details {
+    grid-column: 1;
+  }
+  .knowledge-workbench__verification-progress dl {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .knowledge-workbench__verification-progress dd {
+    text-align: start;
   }
 }
 

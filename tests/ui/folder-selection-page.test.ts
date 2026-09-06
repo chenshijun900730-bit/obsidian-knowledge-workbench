@@ -194,7 +194,10 @@ describe("folder selection page", () => {
   it("keeps simple candidate results keyboard-focusable without exposing advanced controls", () => {
     const { host } = fixture();
     const results = host.querySelector<HTMLElement>("[data-folder-selection-results]")!;
-    expect(results.querySelectorAll<HTMLButtonElement>("button:not(:disabled)").length).toBeGreaterThan(0);
+    const candidate = results.querySelector<HTMLButtonElement>("button:not(:disabled)")!;
+    expect(candidate.tabIndex).toBe(0);
+    candidate.focus();
+    expect(document.activeElement).toBe(candidate);
     expect(host.querySelector("[data-folder-selection-advanced] button, [data-folder-selection-advanced] input"))
       .toBeNull();
   });

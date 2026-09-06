@@ -28,6 +28,13 @@ describe("workbench accessibility contracts", () => {
     second.remove();
   });
 
+  it("renders one main region and one current navigation item", () => {
+    const root = renderRoot();
+    expect(root.querySelectorAll("main")).toHaveLength(1);
+    expect(root.querySelectorAll('[data-workbench-page][aria-current="page"]')).toHaveLength(1);
+    root.remove();
+  });
+
   it("keeps navigation controls named and names every native control", () => {
     const root = renderRoot();
     const pages = Array.from(root.querySelectorAll<HTMLButtonElement>("[data-workbench-page]"));
@@ -56,6 +63,13 @@ describe("workbench accessibility contracts", () => {
     expect(css).toMatch(/\.knowledge-workbench__page\s*\{[^}]*width:\s*min\(100%,\s*72rem\)/su);
     expect(css).toMatch(/@container\s+knowledge-workbench\s*\(max-width:\s*44rem\)/u);
     expect(css).not.toMatch(/background-image:\s*\n?\s*linear-gradient\(/u);
+    expect(css).not.toMatch(/overflow-x:\s*clip/u);
+    const narrowContainer = css.slice(
+      css.indexOf("@container knowledge-workbench (max-width: 44rem)"),
+      css.indexOf("@media (prefers-reduced-motion: reduce)"),
+    );
+    expect(narrowContainer).toMatch(/\.knowledge-workbench__verification-progress\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)/su);
+    expect(narrowContainer).toMatch(/\.knowledge-workbench__verification-progress\s+dl\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)/su);
   });
 
   it("uses named native disabled controls and non-color-only acceptance styling", () => {

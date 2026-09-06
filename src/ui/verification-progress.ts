@@ -253,6 +253,7 @@ export const renderVerificationProgress = (
 
     const details = doc.createElement("details");
     details.dataset.verificationRunDetails = "true";
+    details.dataset.technicalDetails = "true";
     details.open = model.detailsOpen;
     const summary = doc.createElement("summary");
     summary.dataset.focusKey = "verification-run-details";

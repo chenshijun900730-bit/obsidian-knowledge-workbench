@@ -127,6 +127,17 @@ const render = (value: TaskPageModel, onPrimary = vi.fn()): HTMLDivElement => {
   return root;
 };
 
+const visibleTextOutsideTechnicalDetails = (root: HTMLElement): string => (
+  Array.from(root.querySelectorAll<HTMLElement>("*")).flatMap((element) => {
+    if (element.closest("[data-technical-details]")) return [];
+    return Array.from(element.childNodes)
+      .filter((node) => node.nodeType === Node.TEXT_NODE)
+      .map((node) => node.textContent ?? "");
+  }).join(" ")
+);
+
+const TECHNICAL_TERMS = /API\s*(?:父目录|parent)|运行片段|\bsegment\b|列表请求|list\s+request|检查点|\bcheckpoint\b/iu;
+
 describe("task page", () => {
   for (const kind of Object.keys(PRESENTATION) as LibraryWorkflowKind[]) {
     it(`renders one primary action for ${kind}`, () => {
@@ -259,5 +270,19 @@ describe("task page", () => {
     expect(primary.textContent?.trim()).toBeTruthy();
     expect(primary.getAttribute("aria-busy")).toBe("false");
     expect(root.querySelector<HTMLDetailsElement>("[data-verification-run-details]")?.open).toBe(false);
+  });
+
+  it.each(["zh-CN", "en"] as const)("isolates technical copy in closed details for %s", (locale) => {
+    const root = render(model("paused", {
+      i18n: createWorkbenchI18n(locale),
+      hybrid: hybrid(),
+    }));
+    const details = root.querySelector<HTMLDetailsElement>(
+      "[data-verification-run-details][data-technical-details]",
+    )!;
+    expect(details.open).toBe(false);
+    expect(details.querySelector("summary")?.textContent?.trim()).toBeTruthy();
+    expect(details.textContent).toMatch(TECHNICAL_TERMS);
+    expect(visibleTextOutsideTechnicalDetails(root)).not.toMatch(TECHNICAL_TERMS);
   });
 });

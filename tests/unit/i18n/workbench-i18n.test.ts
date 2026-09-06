@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   createWorkbenchI18n,
@@ -9,12 +11,32 @@ import { createDirectoryPickerI18n } from "../../../src/i18n/workbench-directory
 
 const MAIN_FLOW_TECHNICAL_TERMS = /API\s*(?:父目录|parent)|运行片段|\bsegment\b|列表请求|list\s+request|检查点|\bcheckpoint\b/iu;
 
+const dictionaryKeys = (source: string, start: string, end: string): readonly string[] => {
+  const dictionary = source.slice(source.indexOf(start), source.indexOf(end));
+  return [...dictionary.matchAll(/^\s{2}"([^"]+)":/gmu)].map((match) => match[1]!);
+};
+const placeholderValues = new Proxy({}, { get: (_target, name) => String(name) }) as Readonly<Record<string, string>>;
+
 describe("workbench i18n", () => {
   it("supports exactly Simplified Chinese and English", () => {
     expect(WORKBENCH_LOCALES).toEqual(["zh-CN", "en"]);
     expect(isWorkbenchLocale("zh-CN")).toBe(true);
     expect(isWorkbenchLocale("en")).toBe(true);
     expect(isWorkbenchLocale("zh")).toBe(false);
+  });
+
+  it("keeps exact bilingual key parity without exposing raw key text", () => {
+    const source = readFileSync(resolve(process.cwd(), "src/i18n/workbench-i18n.ts"), "utf8");
+    const englishKeys = dictionaryKeys(source, "const en = {", "const zhCN:");
+    const chineseKeys = dictionaryKeys(source, "const zhCN:", "const dictionaries:");
+    expect(chineseKeys).toEqual(englishKeys);
+
+    const zh = createWorkbenchI18n("zh-CN");
+    const en = createWorkbenchI18n("en");
+    for (const key of englishKeys) {
+      expect(zh.t(key as WorkbenchMessageKey, placeholderValues), `${key} zh-CN`).not.toBe(key);
+      expect(en.t(key as WorkbenchMessageKey, placeholderValues), `${key} en`).not.toBe(key);
+    }
   });
 
   it("formats translated navigation and counts", () => {
