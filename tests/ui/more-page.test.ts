@@ -37,4 +37,18 @@ describe("More summary", () => {
     expect(onSelectRoute).toHaveBeenLastCalledWith({ tab: "more", page: "privacy-ai" });
     expect(createWorkbenchI18n("zh-CN").t("history.title")).toBe("笔记改动");
   });
+
+  it("uses aligned concise labels in English", () => {
+    const root = createRoot();
+    renderMorePage(root, {
+      locale: "en",
+      connectionStatus: "authorized",
+      rememberedLibrary: "/library",
+      activeCatalogCount: 1,
+      openAtStartup: true,
+      onSelectRoute: vi.fn(),
+    });
+    expect(root.textContent).toContain("Connection");
+    expect(root.textContent).toContain("Advanced features");
+  });
 });

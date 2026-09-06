@@ -252,4 +252,12 @@ describe("task page", () => {
     expect(details.querySelector("[data-verification-segment-budget]")).not.toBeNull();
     expect(details.querySelector("[data-verification-run-requests]")?.textContent).toContain("12");
   });
+
+  it("keeps the primary task action named and implementation details closed", () => {
+    const root = render(model("paused", { hybrid: hybrid() }));
+    const primary = root.querySelector<HTMLButtonElement>("[data-task-primary]")!;
+    expect(primary.textContent?.trim()).toBeTruthy();
+    expect(primary.getAttribute("aria-busy")).toBe("false");
+    expect(root.querySelector<HTMLDetailsElement>("[data-verification-run-details]")?.open).toBe(false);
+  });
 });

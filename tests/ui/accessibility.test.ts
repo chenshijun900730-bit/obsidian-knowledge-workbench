@@ -53,6 +53,9 @@ describe("workbench accessibility contracts", () => {
     expect(css).toMatch(/animation(?:-duration)?:\s*(?:none|0(?:ms|s)?)\s*!important/u);
     expect(css).toMatch(/transition(?:-duration)?:\s*(?:none|0(?:ms|s)?)\s*!important/u);
     expect(css).toMatch(/scroll-behavior:\s*auto\s*!important/u);
+    expect(css).toMatch(/\.knowledge-workbench__page\s*\{[^}]*width:\s*min\(100%,\s*72rem\)/su);
+    expect(css).toMatch(/@container\s+knowledge-workbench\s*\(max-width:\s*44rem\)/u);
+    expect(css).not.toMatch(/background-image:\s*\n?\s*linear-gradient\(/u);
   });
 
   it("uses named native disabled controls and non-color-only acceptance styling", () => {

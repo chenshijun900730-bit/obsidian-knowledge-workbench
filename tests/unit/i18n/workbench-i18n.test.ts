@@ -7,6 +7,8 @@ import {
 } from "../../../src/i18n/workbench-i18n";
 import { createDirectoryPickerI18n } from "../../../src/i18n/workbench-directory-picker-i18n";
 
+const MAIN_FLOW_TECHNICAL_TERMS = /API\s*(?:父目录|parent)|运行片段|\bsegment\b|列表请求|list\s+request|检查点|\bcheckpoint\b/iu;
+
 describe("workbench i18n", () => {
   it("supports exactly Simplified Chinese and English", () => {
     expect(WORKBENCH_LOCALES).toEqual(["zh-CN", "en"]);
@@ -112,16 +114,16 @@ describe("workbench i18n", () => {
       ["verification.action.pause", "暂停核验", "Pause verification"],
       ["verification.progress.overall.title", "全库核验覆盖率", "Whole-library verification coverage"],
       ["verification.progress.overall.value", "17.2% · 11,870 / 68,959 个候选项 · 7 / 24 个分类", "17.2% · 11,870 / 68,959 candidates · 7 / 24 categories"],
-      ["verification.progress.current.title", "正在核验：文学 · 第 2 段", "Verifying 文学 · segment 2"],
+      ["verification.progress.current.title", "正在检查：文学 · 第 2 次", "Checking 文学 · pass 2"],
       ["verification.progress.current.unknown", "云端总量尚未知，正在递归发现目录", "Cloud total is unknown while directories are still being discovered."],
       ["verification.progress.current.aria", "当前分类核验活动；云端总量未知", "Current category verification activity; cloud total unknown"],
-      ["verification.progress.segment.title", "本段安全配额", "This segment's safety quota"],
-      ["verification.progress.segment.value", "2 / 12 个 PDF；这是安全配额，不是完成度。", "2 / 12 PDFs; this is a safety quota, not completion."],
+      ["verification.progress.segment.title", "本次检查的安全限额", "This check's safety allowance"],
+      ["verification.progress.segment.value", "2 / 12 个 PDF；这是安全配额，不是完成度。", "2 / 12 PDFs; this is a safety allowance, not completion."],
       ["verification.auto.inactive", "当前未自动续跑。", "Automatic continuation is not active."],
-      ["verification.auto.running", "正在自动续跑 · 第 2 / 12 段", "Automatic continuation is running · segment 2 / 12"],
-      ["verification.auto.next", "检查点已保存，正在开始下一段。", "Checkpoint saved; starting the next segment."],
+      ["verification.auto.running", "正在自动继续 · 第 2 / 12 次", "Automatic continuation is running · pass 2 / 12"],
+      ["verification.auto.next", "进度已保存，正在开始下一次检查。", "Progress saved; starting the next pass."],
       ["verification.auto.noProgress", "因没有持久进展，已停止自动续跑。", "Automatic continuation stopped because no durable progress was made."],
-      ["verification.auto.limit", "已达到 12 段自动续跑安全上限。", "Automatic continuation stopped at the 12-segment safety limit."],
+      ["verification.auto.limit", "已达到 12 次自动继续安全上限。", "Automatic continuation stopped at the 12-pass safety limit."],
       ["verification.details.title", "运行详情", "Run details"],
       ["verification.details.segment", "自动片段", "Automatic segment"],
       ["verification.details.segmentValue", "2 / 12", "2 / 12"],
@@ -172,9 +174,9 @@ describe("workbench i18n", () => {
       ["workflow.repairConnection.title", "请重新连接百度网盘", "Reconnect Baidu Netdisk"],
       ["workflow.repairConnection.description", "本地搜索和旧核验结果继续可用。", "Local search and prior verification results remain available."],
       ["workflow.repairLibrary.title", "请重新选择书库", "Choose the library again"],
-      ["workflow.repairLibrary.description", "现有活动目录保持不变，不使用手工 API 路径恢复。", "The active catalog remains unchanged. Recovery does not use a manually entered API path."],
+      ["workflow.repairLibrary.description", "现有活动目录保持不变，不需要手动输入路径。", "The active catalog remains unchanged. Recovery does not use a manually entered path."],
       ["workflow.retryLater.title", "任务已安全停止", "Task stopped safely"],
-      ["workflow.retryLater.description", "检查点已保存；请稍后继续。", "The checkpoint is saved. Continue later."],
+      ["workflow.retryLater.description", "进度已保存；请稍后继续。", "Your progress is saved. Continue later."],
       ["workflow.complete.title", "文库检查完成", "Library check complete"],
       ["workflow.complete.description", "可以返回文库继续搜索。", "Return to the library and continue searching."],
       ["workflow.unavailable.title", "当前版本不提供云端检查", "Cloud checking is unavailable in this build"],
@@ -184,6 +186,20 @@ describe("workbench i18n", () => {
     for (const [key, expectedZh, expectedEn] of messages) {
       expect(zh.t(key), `${key} zh-CN`).toBe(expectedZh);
       expect(en.t(key), `${key} en`).toBe(expectedEn);
+    }
+  });
+
+  it("keeps the simplified task flow bilingual and free from implementation terms", () => {
+    const zh = createWorkbenchI18n("zh-CN");
+    const en = createWorkbenchI18n("en");
+    const keys: readonly WorkbenchMessageKey[] = [
+      "nav.library", "nav.task", "nav.more", "library.title", "library.boundary",
+      "task.current", "task.readOnlyBoundary", "task.action.start", "task.pending.starting",
+      "workflow.retryLater.title", "workflow.retryLater.description",
+    ];
+    for (const key of keys) {
+      expect(zh.t(key), `${key} zh-CN`).not.toMatch(MAIN_FLOW_TECHNICAL_TERMS);
+      expect(en.t(key), `${key} en`).not.toMatch(MAIN_FLOW_TECHNICAL_TERMS);
     }
   });
 

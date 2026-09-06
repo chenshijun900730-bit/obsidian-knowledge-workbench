@@ -4,6 +4,7 @@ import { createDirectoryPickerI18n } from "../../../src/i18n/workbench-directory
 const placeholders = (value: string): readonly string[] => (
   [...value.matchAll(/\{([a-zA-Z][a-zA-Z0-9]*)\}/gu)].map((match) => match[1]!).sort()
 );
+const MAIN_FLOW_TECHNICAL_TERMS = /API\s*(?:父目录|parent)|运行片段|\bsegment\b|列表请求|list\s+request|检查点|\bcheckpoint\b/iu;
 
 describe("workbench directory picker i18n", () => {
   it("reports recent-folder persistence failure as a fail-closed selection", () => {
@@ -84,6 +85,19 @@ describe("workbench directory picker i18n", () => {
       expect(zhValue).toContain("500");
       expect(enValue).toContain("500");
       expect(placeholders(zhValue)).toEqual(placeholders(enValue));
+    }
+  });
+
+  it("keeps the simple folder-selection flow bilingual and non-technical", () => {
+    const zh = createDirectoryPickerI18n("zh-CN");
+    const en = createDirectoryPickerI18n("en");
+    const keys = [
+      "folderSelection.title", "folderSelection.browseOther", "folderSelection.advanced",
+      "directoryPicker.query.label", "directoryPicker.use", "directoryPicker.selected.title",
+    ] as const;
+    for (const key of keys) {
+      expect(zh.t(key), `${key} zh-CN`).not.toMatch(MAIN_FLOW_TECHNICAL_TERMS);
+      expect(en.t(key), `${key} en`).not.toMatch(MAIN_FLOW_TECHNICAL_TERMS);
     }
   });
 });

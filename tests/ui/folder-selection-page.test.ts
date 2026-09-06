@@ -191,6 +191,14 @@ describe("folder selection page", () => {
     expect(actions.onBrowseOther).toHaveBeenCalledOnce();
   });
 
+  it("keeps simple candidate results keyboard-focusable without exposing advanced controls", () => {
+    const { host } = fixture();
+    const results = host.querySelector<HTMLElement>("[data-folder-selection-results]")!;
+    expect(results.querySelectorAll<HTMLButtonElement>("button:not(:disabled)").length).toBeGreaterThan(0);
+    expect(host.querySelector("[data-folder-selection-advanced] button, [data-folder-selection-advanced] input"))
+      .toBeNull();
+  });
+
   it("keeps a same-path conflict visible but not selectable on the simple page", () => {
     const conflictState = baseState({
       rankedCandidates: [{

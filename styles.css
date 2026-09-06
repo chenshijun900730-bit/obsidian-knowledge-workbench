@@ -2,16 +2,12 @@
   color: var(--text-normal);
 }
 .knowledge-workbench {
-  --kw-grid: color-mix(in srgb, var(--background-modifier-border) 42%, transparent);
   container-name: knowledge-workbench;
   container-type: inline-size;
   min-height: 100%;
+  min-width: 0;
   color: var(--text-normal);
-  background-color: var(--background-primary);
-  background-image:
-    linear-gradient(var(--kw-grid) 1px, transparent 1px),
-    linear-gradient(90deg, var(--kw-grid) 1px, transparent 1px);
-  background-size: 2rem 2rem;
+  background: var(--background-primary);
   font-family: var(--font-interface);
 }
 
@@ -51,7 +47,25 @@
   inline-size: 1.25rem;
   text-align: center;
 }
-.knowledge-workbench__content { min-width: 0; }
+.knowledge-workbench__content { min-width: 0; overflow-x: clip; }
+.knowledge-workbench__content > main { min-width: 0; }
+.knowledge-workbench__page {
+  box-sizing: border-box;
+  width: min(100%, 72rem);
+  min-width: 0;
+  margin-inline: auto;
+  padding: var(--size-4-4);
+}
+.knowledge-workbench__library-page,
+.knowledge-workbench__task-page,
+.knowledge-workbench__folder-selection-page,
+.knowledge-workbench__more-page {
+  box-sizing: border-box;
+  width: min(100%, 72rem);
+  min-width: 0;
+  margin-inline: auto;
+  padding: var(--size-4-4);
+}
 .knowledge-workbench__header {
   display: flex;
   align-items: center;
@@ -742,11 +756,16 @@
   .knowledge-workbench__today { border-right: 0; border-bottom: 1px solid var(--background-modifier-border); }
 }
 
-@container (max-width: 44rem) {
+@container knowledge-workbench (max-width: 44rem) {
   .knowledge-workbench__shell {
     grid-template-columns: 3.25rem minmax(0, 1fr);
   }
-  .knowledge-workbench__sidebar { align-items: center; padding-inline: var(--size-4-1); }
+  .knowledge-workbench__sidebar {
+    inline-size: 3.25rem;
+    box-sizing: border-box;
+    align-items: center;
+    padding-inline: var(--size-4-1);
+  }
   .knowledge-workbench__sidebar button { justify-content: center; }
   .knowledge-workbench__nav-label {
     position: absolute;
@@ -760,6 +779,11 @@
     border: 0;
   }
   .knowledge-workbench__catalog-disclosure-content dl {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .knowledge-workbench__library-detail,
+  .knowledge-workbench__task-card,
+  .knowledge-workbench__folder-selection {
     grid-template-columns: minmax(0, 1fr);
   }
 }
