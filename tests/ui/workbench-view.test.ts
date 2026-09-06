@@ -552,7 +552,7 @@ describe("workbench", () => {
     expect(root.querySelector('[aria-label="Organization suggestions"]')).toBeNull();
   });
 
-  it("opens the session-only TXT picker only after the visible task action", async () => {
+  it("keeps the real DOM TXT picker alive across an unrelated rerender and rejects a double click", async () => {
     class ItemViewSurface {
       readonly contentEl = createTestDiv();
     }
@@ -569,14 +569,23 @@ describe("workbench", () => {
     document.body.append(view.contentEl);
     await view.onOpen();
 
-    expect(view.contentEl.querySelector('input[type="file"]')).toBeNull();
+    expect(document.querySelector('[data-local-catalog-txt-host] input[type="file"]')).toBeNull();
     view.contentEl.querySelector<HTMLButtonElement>("[data-task-primary]")!.click();
     const picker = await vi.waitFor(() => {
-      const input = view.contentEl.querySelector<HTMLInputElement>('input[type="file"]');
+      const input = document.querySelector<HTMLInputElement>(
+        '[data-local-catalog-txt-host] input[type="file"]',
+      );
       expect(input).not.toBeNull();
       return input!;
     });
     expect(picker.accept).toBe(".txt,text/plain");
+    expect(fixture.controller.snapshot().taskActionPending).toBe(true);
+    expect(view.contentEl.contains(picker)).toBe(false);
+    view.contentEl.querySelector<HTMLButtonElement>("[data-task-primary]")!.click();
+    expect(document.querySelectorAll('[data-local-catalog-txt-host] input[type="file"]')).toHaveLength(1);
+
+    fixture.controller.searchCatalog("unrelated");
+    await vi.waitFor(() => expect(picker.isConnected).toBe(true));
     expect(fixture.controller.snapshot().taskActionPending).toBe(true);
     picker.dispatchEvent(new Event("cancel"));
     await vi.waitFor(() => expect(fixture.controller.snapshot().taskActionPending).toBe(false));
@@ -868,7 +877,7 @@ describe("workbench", () => {
     fixture.controller.dispose();
   });
 
-  it("preserves verification details and focus while a new segment resets its quota", () => {
+  it("preserves Task run details and focus while a new segment resets its quota", () => {
     const root = createTestDiv();
     document.body.append(root);
     const groupKey = `group:${"7".repeat(64)}`;
@@ -922,7 +931,15 @@ describe("workbench", () => {
     });
     const firstModel = {
       ...populatedWorkbenchModel(),
-      route: { tab: "task", page: "folder-selection" } as const,
+      route: { tab: "task", page: "overview" } as const,
+      workflow: {
+        kind: "running" as const,
+        primaryAction: "pause" as const,
+        titleKey: "workflow.running.title" as const,
+        descriptionKey: "workflow.running.description" as const,
+        recommendedGroup: null,
+        canShowTechnicalDetails: true,
+      },
       verificationRoot: "/Synthetic",
       selectedVerificationGroupKeys: [groupKey],
       catalogConnection: { status: "authorized" as const },

@@ -133,6 +133,7 @@ export const renderTaskPage = (
   root: HTMLElement,
   model: TaskPageModel,
   actions: TaskPageActions,
+  detailsOpen = false,
 ): void => {
   const doc = root.ownerDocument;
   root.replaceChildren();
@@ -219,7 +220,7 @@ export const renderTaskPage = (
       ...(batch === undefined ? {} : { batch }),
       busy: model.hybrid?.executionActive === true,
       currentGroupLabel,
-      detailsOpen: false,
+      detailsOpen,
       i18n: model.i18n,
     });
     progress.addEventListener("toggle", (event) => {

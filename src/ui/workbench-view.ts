@@ -525,7 +525,7 @@ export function renderWorkbench(
       onPrimary: surfaceActions.onTaskPrimary,
       onChooseDifferentCategory: surfaceActions.onTaskChooseDifferentCategory,
       onOpenDetails: surfaceActions.onTaskOpenDetails,
-    });
+    }, verificationRunDetailsOpen);
   } else if (model.route.page === "history") {
     renderHistory(panel, model.history ?? { entries: [] }, {
       onUndo: surfaceActions.onUndoHistory ?? (() => undefined),
@@ -644,6 +644,7 @@ export function createWorkbenchViewClass(
   return class WorkbenchView extends ItemViewBase {
     private unsubscribe: (() => void) | null = null;
     private readonly localCatalogTxtPicker = createLocalCatalogTxtPicker();
+    private localCatalogTxtHost: HTMLElement | null = null;
 
     constructor(
       leaf: WorkspaceLeaf,
@@ -675,6 +676,8 @@ export function createWorkbenchViewClass(
       folderSelectionPageSurfaces.delete(this.contentEl);
       recentLibraryItems.delete(this.contentEl);
       this.controller.closeFolderSelection?.();
+      this.localCatalogTxtHost?.remove();
+      this.localCatalogTxtHost = null;
       this.contentEl.replaceChildren();
     }
 
@@ -759,7 +762,7 @@ export function createWorkbenchViewClass(
             if (select === undefined) throw new Error("catalog-unavailable");
             await select(
               revision,
-              () => this.localCatalogTxtPicker.request(this.contentEl),
+              () => this.localCatalogTxtPicker.request(this.localCatalogTxtPickerHost()),
             );
             return;
           }
@@ -822,6 +825,17 @@ export function createWorkbenchViewClass(
       } catch {
         this.controller.reportError("host.action.taskFailed");
       }
+    }
+
+    /** A sibling of the rerendered page root; removed only when the view closes. */
+    private localCatalogTxtPickerHost(): HTMLElement {
+      if (this.localCatalogTxtHost?.isConnected) return this.localCatalogTxtHost;
+      const host = this.contentEl.ownerDocument.createElement("div");
+      host.dataset.localCatalogTxtHost = "true";
+      host.setAttribute("aria-hidden", "true");
+      (this.contentEl.parentElement ?? this.contentEl.ownerDocument.body).append(host);
+      this.localCatalogTxtHost = host;
+      return host;
     }
 
     private runAiAction(operation: () => Promise<AiResult<string>> | undefined): void {

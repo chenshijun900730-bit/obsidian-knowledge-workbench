@@ -4289,6 +4289,47 @@ describe("WorkbenchController unified task action", () => {
     fixture.controller.dispose();
   });
 
+  it.each([
+    ["A to B", [secondKey], false],
+    ["A to A+B", [firstKey, secondKey], false],
+    ["A to A", [firstKey], true],
+  ] as const)("keeps a category directory selection only when scope remains %s", async (
+    _label,
+    groupKeys,
+    retainsSelection,
+  ) => {
+    const fixture = readyFixture();
+    fixture.controller.applyCatalogRootSelection({
+      kind: "category",
+      selectedPath: "/Synthetic/Small",
+      effectiveRoot: "/Synthetic",
+      groupKey: firstKey,
+    });
+    const revision = fixture.controller.snapshot().taskActionRevision;
+
+    fixture.controller.saveTaskCategorySelection(revision, {
+      rootPath: "/Synthetic",
+      groupKeys,
+    });
+    const changed = fixture.controller.snapshot();
+    expect(changed.verificationDirectorySelection).toEqual(retainsSelection
+      ? {
+          kind: "category",
+          selectedPath: "/Synthetic/Small",
+          effectiveRoot: "/Synthetic",
+          groupKey: firstKey,
+        }
+      : undefined);
+
+    await expect(fixture.controller.performTaskPrimaryAction(changed.taskActionRevision))
+      .resolves.toBeUndefined();
+    expect(fixture.hybrid.startInputs).toEqual([{
+      cloudRoot: "/Synthetic",
+      groupKeys,
+    }]);
+    fixture.controller.dispose();
+  });
+
   it("keeps Pause available during an unresolved launch and interrupts exactly once", async () => {
     const gate = deferred();
     const fixture = readyFixture();

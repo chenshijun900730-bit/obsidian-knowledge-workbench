@@ -1412,6 +1412,11 @@ export class WorkbenchController {
       || groupKeys.length !== input.groupKeys.length
     ) throw new RangeError("verification-group-required");
     const selection = this.model.verificationDirectorySelection;
+    const selectionStillMatchesScope = selection?.effectiveRoot === normalizedRoot
+      && (
+        selection.kind !== "category"
+        || (groupKeys.length === 1 && groupKeys[0] === selection.groupKey)
+      );
     const {
       verificationDirectorySelection: _verificationDirectorySelection,
       ...current
@@ -1421,7 +1426,7 @@ export class WorkbenchController {
       route: { tab: "task", page: "overview" },
       verificationRoot: normalizedRoot,
       selectedVerificationGroupKeys: groupKeys,
-      ...(selection?.effectiveRoot === normalizedRoot
+      ...(selectionStillMatchesScope
         ? { verificationDirectorySelection: selection }
         : {}),
     };
