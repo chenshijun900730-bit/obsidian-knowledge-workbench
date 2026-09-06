@@ -786,20 +786,6 @@
   .knowledge-workbench__folder-selection {
     grid-template-columns: minmax(0, 1fr);
   }
-  .knowledge-workbench__verification-progress {
-    grid-template-columns: minmax(0, 1fr);
-  }
-  .knowledge-workbench__verification-progress-card,
-  .knowledge-workbench__verification-auto-state,
-  .knowledge-workbench__verification-progress details {
-    grid-column: 1;
-  }
-  .knowledge-workbench__verification-progress dl {
-    grid-template-columns: minmax(0, 1fr);
-  }
-  .knowledge-workbench__verification-progress dd {
-    text-align: start;
-  }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -913,6 +899,23 @@
 @keyframes knowledge-workbench-verification-activity {
   from { transform: translateX(-110%); }
   to { transform: translateX(300%); }
+}
+
+@container knowledge-workbench (max-width: 44rem) {
+  .knowledge-workbench__verification-progress {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .knowledge-workbench__verification-progress-card,
+  .knowledge-workbench__verification-auto-state,
+  .knowledge-workbench__verification-progress details {
+    grid-column: 1;
+  }
+  .knowledge-workbench__verification-progress dl {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .knowledge-workbench__verification-progress dd {
+    text-align: start;
+  }
 }
 
 @media (max-width: 760px) {

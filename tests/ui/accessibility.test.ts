@@ -64,12 +64,27 @@ describe("workbench accessibility contracts", () => {
     expect(css).toMatch(/@container\s+knowledge-workbench\s*\(max-width:\s*44rem\)/u);
     expect(css).not.toMatch(/background-image:\s*\n?\s*linear-gradient\(/u);
     expect(css).not.toMatch(/overflow-x:\s*clip/u);
-    const narrowContainer = css.slice(
-      css.indexOf("@container knowledge-workbench (max-width: 44rem)"),
-      css.indexOf("@media (prefers-reduced-motion: reduce)"),
-    );
+    const narrowContainerStart = css.lastIndexOf("@container knowledge-workbench (max-width: 44rem)");
+    const narrowContainer = css.slice(narrowContainerStart);
     expect(narrowContainer).toMatch(/\.knowledge-workbench__verification-progress\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)/su);
     expect(narrowContainer).toMatch(/\.knowledge-workbench__verification-progress\s+dl\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)/su);
+
+    const progressBase = css.lastIndexOf(
+      ".knowledge-workbench__verification-progress {\n  display: grid;\n  grid-template-columns: repeat(3, minmax(0, 1fr));",
+    );
+    const metricsBase = css.lastIndexOf(
+      ".knowledge-workbench__verification-progress dl {\n  display: grid;\n  grid-template-columns: minmax(12rem, 1fr) minmax(0, 1fr);",
+    );
+    const narrowProgressOverride = css.indexOf(
+      ".knowledge-workbench__verification-progress {\n    grid-template-columns: minmax(0, 1fr);",
+      narrowContainerStart,
+    );
+    const narrowMetricsOverride = css.indexOf(
+      ".knowledge-workbench__verification-progress dl {\n    grid-template-columns: minmax(0, 1fr);",
+      narrowContainerStart,
+    );
+    expect(narrowProgressOverride).toBeGreaterThan(progressBase);
+    expect(narrowMetricsOverride).toBeGreaterThan(metricsBase);
   });
 
   it("uses named native disabled controls and non-color-only acceptance styling", () => {
