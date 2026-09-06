@@ -410,7 +410,7 @@ describe("verification page", () => {
       },
     }));
     expect(root.querySelector('[data-action="resume-verification"]')).not.toBeNull();
-    expect(root.textContent).toContain("已达到 12 段自动续跑安全上限");
+    expect(root.textContent).toContain("已达到 12 次自动继续安全上限。");
   });
 
   it.each(["authorized", "scanning", "paused", "partial"] as const)(

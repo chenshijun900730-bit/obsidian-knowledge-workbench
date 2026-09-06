@@ -67,8 +67,8 @@ const render = (model: VerificationProgressModel): HTMLDivElement => {
 
 describe("verification progress", () => {
   it.each([
-    ["zh-CN", "云端总量尚未知", "本段安全配额"],
-    ["en", "Cloud total is unknown", "This segment's safety quota"],
+    ["zh-CN", "云端总量尚未知", "本次检查的安全限额"],
+    ["en", "Cloud total is unknown", "This check's safety allowance"],
   ] as const)("renders truthful progress semantics in %s", (locale, unknownText, quotaText) => {
     const root = render(progressModel(locale));
     expect(root.querySelector<HTMLProgressElement>(

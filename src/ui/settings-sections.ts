@@ -216,13 +216,6 @@ export function createSettingsSectionsSurface(
       const localizedStatus = (value: SettingsDisplayStatus | undefined): string => value === undefined
         ? "—"
         : i18n.t(SETTINGS_STATUS_MESSAGE[value]);
-      const localizedOr = (key: string, fallback: string): string => {
-        try {
-          return i18n.t(key as WorkbenchMessageKey);
-        } catch {
-          return fallback;
-        }
-      };
       const isCurrent = (): boolean => !this.disposed && this.renderGeneration === generation;
       const includesSection = (section: SettingsSectionId): boolean => (
         options.section === undefined || options.section === section
@@ -351,24 +344,9 @@ export function createSettingsSectionsSurface(
           onError?.();
           const authorityGuidance = error instanceof Error
             ? ({
-                "verification-must-pause": localizedOr(
-                  "settings.error.verificationMustPause",
-                  locale === "zh-CN"
-                    ? "请先暂停当前核验，再修改百度网盘授权。"
-                    : "Pause the current verification before changing Baidu authorization.",
-                ),
-                "scan-must-cancel": localizedOr(
-                  "settings.error.scanMustCancel",
-                  locale === "zh-CN"
-                    ? "请先取消当前云端扫描，再修改百度网盘授权。"
-                    : "Cancel the current cloud scan before changing Baidu authorization.",
-                ),
-                "cloud-authority-operation-busy": localizedOr(
-                  "settings.error.cloudAuthorityBusy",
-                  locale === "zh-CN"
-                    ? "另一项百度网盘权限操作正在进行，请稍后再试。"
-                    : "Another Baidu authority operation is in progress. Try again later.",
-                ),
+                "verification-must-pause": i18n.t("settings.error.verificationMustPause"),
+                "scan-must-cancel": i18n.t("settings.error.scanMustCancel"),
+                "cloud-authority-operation-busy": i18n.t("settings.error.cloudAuthorityBusy"),
               } as Readonly<Record<string, string>>)[error.message]
             : undefined;
           status.textContent = authorityGuidance ?? (safeErrorKey === undefined
@@ -647,6 +625,7 @@ export function createSettingsSectionsSurface(
           void run("settings.save.cloudScan", () => requestCatalogScan(
             this.catalogScanRootDraft,
             () => {
+              if (!isCurrent()) return;
               this.catalogScanRootDraft = "";
               this.catalogScanDirectorySelection = undefined;
               field.setPath("");
@@ -820,18 +799,12 @@ export function createSettingsSectionsSurface(
           );
         };
         const connect = button(
-          localizedOr(
-            "settings.surface.repairSameAccount",
-            locale === "zh-CN" ? "使用原账号重新连接" : "Reconnect original account",
-          ),
+          i18n.t("settings.surface.repairSameAccount"),
           () => beginAuthorization("repair-same-account"),
         );
         connect.dataset.action = "catalog-connect";
         const replaceIdentity = button(
-          localizedOr(
-            "settings.surface.replaceIdentity",
-            locale === "zh-CN" ? "更换账号或凭据" : "Change account or credentials",
-          ),
+          i18n.t("settings.surface.replaceIdentity"),
           () => beginAuthorization("replace-identity"),
         );
         replaceIdentity.dataset.action = "catalog-replace-identity";

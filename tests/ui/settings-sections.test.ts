@@ -220,6 +220,43 @@ describe("shared grouped settings surface", () => {
     await Promise.resolve();
   });
 
+  it("ignores a stale scan confirmation after a rerender and preserves the newer draft", async () => {
+    const root = createTestDiv();
+    const pending = deferred();
+    let confirmOldScan: (() => void) | undefined;
+    const requestCatalogScan = vi.fn(async (
+      _rootPath: string,
+      onConfirmed?: () => void,
+    ) => {
+      confirmOldScan = onConfirmed;
+      await pending.promise;
+    });
+    const surface = createSettingsSectionsSurface({
+      app: {} as App,
+      controller: connectedControllerFixture({ requestCatalogScan }),
+      policy: NORMAL_RUNTIME_POLICY,
+    });
+
+    surface.render(root, "zh-CN", { section: "cloud-scan-advanced" });
+    let input = root.querySelector<HTMLInputElement>('[data-catalog-scan-root="true"]')!;
+    input.value = "/old-session-library";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    root.querySelector<HTMLButtonElement>('[data-action="catalog-start-scan"]')!.click();
+
+    surface.render(root, "en", { section: "cloud-scan-advanced" });
+    input = root.querySelector<HTMLInputElement>('[data-catalog-scan-root="true"]')!;
+    input.value = "/new-session-library";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    confirmOldScan?.();
+
+    surface.render(root, "zh-CN", { section: "cloud-scan-advanced" });
+    expect(root.querySelector<HTMLInputElement>('[data-catalog-scan-root="true"]')?.value)
+      .toBe("/new-session-library");
+
+    pending.resolve();
+    await Promise.resolve();
+  });
+
   it("keeps cards collapsed while language remains directly usable", () => {
     const root = createTestDiv();
     createSettingsSectionsSurface({

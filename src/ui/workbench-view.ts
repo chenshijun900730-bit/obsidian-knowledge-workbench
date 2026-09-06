@@ -37,7 +37,7 @@ import {
   routeForTab,
   type WorkbenchRoute,
 } from "./workbench-route";
-import type { SettingsSectionsSurface } from "./settings-sections";
+import type { SettingsSectionId, SettingsSectionsSurface } from "./settings-sections";
 import {
   renderVerificationCategoryEditor,
   renderVerificationPage,
@@ -69,6 +69,7 @@ export type { WorkbenchRoute, WorkbenchTab } from "./workbench-route";
 export type { StartSection } from "./start-page";
 export type ProgressStatus = "idle" | "running" | "canceled" | "error" | "complete";
 type HostActionMessageKey = Extract<WorkbenchMessageKey, `host.action.${string}`>;
+const TASK_FAILED_MESSAGE: HostActionMessageKey = "host.action.taskFailed";
 type AiStatusMessageKey = Extract<WorkbenchMessageKey, `ai.${string}`>;
 export interface WorkbenchProgress {
   readonly status: ProgressStatus;
@@ -210,7 +211,7 @@ const STATUS_MESSAGE_KEYS: Readonly<Record<string, WorkbenchMessageKey>> = {
   "scan-must-cancel": "cloudAuthority.scanMustCancel",
   "cloud-authority-operation-busy": "cloudAuthority.operationBusy",
   "authorization-attempt-unavailable": "cloudAuthority.authorizationAttemptUnavailable",
-  "folder-selection-preserved": "folderSelection.preserved",
+  "folder-selection-preserved": "host.status.folderSelectionPreserved",
   "folder-selection-binding-failed": "host.status.actionFailed",
 };
 
@@ -232,7 +233,7 @@ const recordRecentLibraryItem = (
     ? record.pathLabel.slice(0, -filenameSuffix.length)
     : record.pathLabel;
   const directoryTag = record.hierarchyTags
-    .map((tag) => tag.startsWith("folder/") ? tag.slice("folder/".length) : tag)
+    .map((tag) => tag.replace(/^folder\//u, ""))
     .join(" › ") || pathDirectory || "/";
   const recent = Object.freeze({
     catalogId: record.catalogId,
@@ -263,7 +264,9 @@ const visibleTaskGroupScope = (
 ): readonly HybridCatalogGroupViewModel[] => {
   const groups = model.hybridCatalog?.active?.groups ?? [];
   const byKey = new Map(groups.map((group) => [group.groupKey, group]));
-  const batchOwnsScope = ["running", "paused", "retry-later"].includes(model.workflow.kind);
+  const batchOwnsScope = model.workflow.kind === "running"
+    || model.workflow.kind === "paused"
+    || model.workflow.kind === "retry-later";
   const keys = batchOwnsScope && model.hybridCatalog?.batch !== undefined
     ? model.hybridCatalog.batch.selectedGroupKeys
     : model.selectedVerificationGroupKeys.length > 0
@@ -304,17 +307,19 @@ const disposeSettingsPage = (root: HTMLElement): void => {
   settingsPageSections.delete(root);
 };
 
-const settingsSectionForRoute = (route: WorkbenchRoute) => {
-  if (route.tab !== "more") return undefined;
-  switch (route.page) {
-    case "connection": return "baidu" as const;
-    case "catalog-data": return "catalog-data" as const;
-    case "language": return "language" as const;
-    case "advanced": return "cloud-scan-advanced" as const;
-    case "privacy-ai": return "privacy-ai" as const;
-    default: return undefined;
-  }
+const SETTINGS_SECTION_BY_ROUTE: Readonly<Partial<Record<
+  Extract<WorkbenchRoute, { tab: "more" }>["page"], SettingsSectionId
+>>> = {
+  connection: "baidu",
+  "catalog-data": "catalog-data",
+  language: "language",
+  advanced: "cloud-scan-advanced",
+  "privacy-ai": "privacy-ai",
 };
+
+const settingsSectionForRoute = (route: WorkbenchRoute): SettingsSectionId | undefined => (
+  route.tab === "more" ? SETTINGS_SECTION_BY_ROUTE[route.page] : undefined
+);
 
 const localizedStatusMessage = (
   message: string | undefined,
@@ -847,7 +852,7 @@ export function createWorkbenchViewClass(
             if (save === undefined) throw new Error("catalog-unavailable");
             save(revision, input);
           } catch {
-            this.controller.reportError("host.action.taskFailed");
+            this.controller.reportError(TASK_FAILED_MESSAGE);
           }
         },
         onTaskCancelCategorySelection: () => this.controller.selectRoute({
@@ -890,7 +895,7 @@ export function createWorkbenchViewClass(
       try {
         await operation();
       } catch {
-        this.controller.reportError("host.action.taskFailed");
+        this.controller.reportError(TASK_FAILED_MESSAGE);
       }
     }
 

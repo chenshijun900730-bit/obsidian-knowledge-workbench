@@ -65,7 +65,18 @@ describe("workbench accessibility contracts", () => {
     expect(css).not.toMatch(/background-image:\s*\n?\s*linear-gradient\(/u);
     expect(css).not.toMatch(/overflow-x:\s*clip/u);
     const narrowContainerStart = css.lastIndexOf("@container knowledge-workbench (max-width: 44rem)");
-    const narrowContainer = css.slice(narrowContainerStart);
+    expect(narrowContainerStart).toBeGreaterThanOrEqual(0);
+    const openingBrace = css.indexOf("{", narrowContainerStart);
+    expect(openingBrace).toBeGreaterThan(narrowContainerStart);
+    let depth = 1;
+    let narrowContainerEnd = openingBrace + 1;
+    while (depth > 0 && narrowContainerEnd < css.length) {
+      const character = css[narrowContainerEnd++];
+      if (character === "{") depth += 1;
+      if (character === "}") depth -= 1;
+    }
+    expect(depth).toBe(0);
+    const narrowContainer = css.slice(narrowContainerStart, narrowContainerEnd);
     expect(narrowContainer).toMatch(/\.knowledge-workbench__verification-progress\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)/su);
     expect(narrowContainer).toMatch(/\.knowledge-workbench__verification-progress\s+dl\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)/su);
 
@@ -75,16 +86,18 @@ describe("workbench accessibility contracts", () => {
     const metricsBase = css.lastIndexOf(
       ".knowledge-workbench__verification-progress dl {\n  display: grid;\n  grid-template-columns: minmax(12rem, 1fr) minmax(0, 1fr);",
     );
-    const narrowProgressOverride = css.indexOf(
+    expect(progressBase).toBeGreaterThanOrEqual(0);
+    expect(metricsBase).toBeGreaterThanOrEqual(0);
+    const narrowProgressOverride = narrowContainer.indexOf(
       ".knowledge-workbench__verification-progress {\n    grid-template-columns: minmax(0, 1fr);",
-      narrowContainerStart,
     );
-    const narrowMetricsOverride = css.indexOf(
+    const narrowMetricsOverride = narrowContainer.indexOf(
       ".knowledge-workbench__verification-progress dl {\n    grid-template-columns: minmax(0, 1fr);",
-      narrowContainerStart,
     );
-    expect(narrowProgressOverride).toBeGreaterThan(progressBase);
-    expect(narrowMetricsOverride).toBeGreaterThan(metricsBase);
+    expect(narrowProgressOverride).toBeGreaterThanOrEqual(0);
+    expect(narrowMetricsOverride).toBeGreaterThanOrEqual(0);
+    expect(narrowContainerStart + narrowProgressOverride).toBeGreaterThan(progressBase);
+    expect(narrowContainerStart + narrowMetricsOverride).toBeGreaterThan(metricsBase);
   });
 
   it("uses named native disabled controls and non-color-only acceptance styling", () => {
