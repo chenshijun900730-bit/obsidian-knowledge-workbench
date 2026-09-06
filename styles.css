@@ -287,9 +287,9 @@
 .knowledge-workbench__catalog-advanced { width: 100%; }
 .knowledge-workbench__catalog-advanced > summary { cursor: pointer; color: var(--text-muted); }
 .knowledge-workbench__catalog-advanced-content { display: grid; gap: var(--size-4-3); padding-top: var(--size-4-3); }
-.knowledge-workbench__catalog-body { display: grid; grid-template-columns: minmax(0, 2fr) minmax(16rem, 1fr); gap: var(--size-4-4); align-items: start; }
+.knowledge-workbench__catalog-flow { min-width: 0; }
 .knowledge-workbench__catalog-results { list-style: none; padding: 0; margin: 0; display: grid; gap: var(--size-4-2); }
-.knowledge-workbench__catalog-results li { display: flex; align-items: center; justify-content: space-between; gap: var(--size-4-3); padding: var(--size-4-3); border: 1px solid var(--background-modifier-border); border-radius: var(--radius-s); }
+.knowledge-workbench__catalog-results li { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--size-4-3); min-width: 0; padding: var(--size-4-3); border: 1px solid var(--background-modifier-border); border-radius: var(--radius-s); }
 .knowledge-workbench__catalog-results li.is-selected { border-color: var(--interactive-accent); background: var(--background-secondary); }
 .knowledge-workbench__catalog-identity { min-width: 0; display: grid; gap: var(--size-4-1); }
 .knowledge-workbench__catalog-identity code { overflow-wrap: anywhere; color: var(--text-muted); }
@@ -298,12 +298,15 @@
 .knowledge-workbench__catalog-verification.is-difference { color: var(--text-error); }
 .knowledge-workbench__catalog-differences { color: var(--text-error); }
 .knowledge-workbench__catalog-directory-tags { color: var(--text-muted); }
-.knowledge-workbench__catalog-details { position: sticky; top: var(--size-4-4); display: grid; gap: var(--size-4-3); padding: var(--size-4-4); border: 1px solid var(--background-modifier-border); border-radius: var(--radius-m); background: var(--background-secondary); }
-.knowledge-workbench__catalog-details h3,
-.knowledge-workbench__catalog-details p { margin: 0; }
-.knowledge-workbench__catalog-details dl { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: var(--size-4-2) var(--size-4-3); margin: 0; }
-.knowledge-workbench__catalog-details dt { color: var(--text-muted); }
-.knowledge-workbench__catalog-details dd { margin: 0; overflow-wrap: anywhere; }
+.knowledge-workbench__catalog-disclosure { min-width: 0; border-top: 1px solid var(--background-modifier-border); padding-top: var(--size-4-2); }
+.knowledge-workbench__catalog-disclosure > summary { width: fit-content; cursor: pointer; color: var(--text-muted); }
+.knowledge-workbench__catalog-disclosure > summary:focus-visible { outline: 2px solid var(--interactive-accent); outline-offset: 2px; }
+.knowledge-workbench__catalog-disclosure-content { display: grid; gap: var(--size-4-3); min-width: 0; padding-top: var(--size-4-3); }
+.knowledge-workbench__catalog-disclosure-content h3,
+.knowledge-workbench__catalog-disclosure-content p { margin: 0; }
+.knowledge-workbench__catalog-disclosure-content dl { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: var(--size-4-2) var(--size-4-3); margin: 0; }
+.knowledge-workbench__catalog-disclosure-content dt { color: var(--text-muted); }
+.knowledge-workbench__catalog-disclosure-content dd { margin: 0; overflow-wrap: anywhere; }
 .knowledge-workbench__catalog-pagination { justify-content: center; }
 .knowledge-workbench__catalog-notice { color: var(--text-warning); }
 .knowledge-workbench__verification-page {
@@ -653,8 +656,6 @@
 @media (max-width: 800px) {
   .knowledge-workbench__split { grid-template-columns: 1fr; }
   .knowledge-workbench__today { border-right: 0; border-bottom: 1px solid var(--background-modifier-border); }
-  .knowledge-workbench__catalog-body { grid-template-columns: 1fr; }
-  .knowledge-workbench__catalog-details { position: static; }
 }
 
 @container knowledge-workbench (max-width: 50rem) {
@@ -678,6 +679,9 @@
     clip: rect(0, 0, 0, 0);
     white-space: nowrap;
     border: 0;
+  }
+  .knowledge-workbench__catalog-disclosure-content dl {
+    grid-template-columns: minmax(0, 1fr);
   }
 }
 

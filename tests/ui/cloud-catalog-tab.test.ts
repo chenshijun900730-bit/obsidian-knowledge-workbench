@@ -76,6 +76,7 @@ const actionFixture = (): CloudCatalogTabActions & Readonly<{
   cloudMissing: boolean[];
   opened: string[];
   selections: string[];
+  detailOpens: string[];
   expandedStates: boolean[];
 }> => {
   const searches: string[] = [];
@@ -90,6 +91,7 @@ const actionFixture = (): CloudCatalogTabActions & Readonly<{
   const cloudMissing: boolean[] = [];
   const opened: string[] = [];
   const selections: string[] = [];
+  const detailOpens: string[] = [];
   const expandedStates: boolean[] = [];
   return {
     searches,
@@ -104,6 +106,7 @@ const actionFixture = (): CloudCatalogTabActions & Readonly<{
     cloudMissing,
     opened,
     selections,
+    detailOpens,
     expandedStates,
     onSearchCatalog: (value) => searches.push(value),
     onFilterCatalogFolder: (value) => folders.push(value),
@@ -117,6 +120,7 @@ const actionFixture = (): CloudCatalogTabActions & Readonly<{
     onToggleCatalogCloudMissing: (value) => cloudMissing.push(value),
     onOpenBaidu: () => opened.push("open"),
     onSelectCatalogRecord: (catalogId) => selections.push(catalogId),
+    onOpenCatalogDetail: (catalogId) => detailOpens.push(catalogId),
     onSetCatalogFiltersExpanded: (expanded) => expandedStates.push(expanded),
   };
 };
@@ -154,7 +158,7 @@ describe("Cloud Catalog tab", () => {
     expect(actions.expandedStates).toEqual([true]);
   });
 
-  it("renders a Chinese search-first catalog with selected details", () => {
+  it("renders explicitly opened details inline with the selected result", () => {
     const root = createTestDiv();
     const actions = actionFixture();
     renderCloudCatalogTab(root, readyCatalog({
@@ -189,14 +193,23 @@ describe("Cloud Catalog tab", () => {
 
     expect(root.textContent).toContain("当前仅索引文件名和目录标签");
     expect(root.textContent).toContain("68,959 本 PDF");
-    expect(root.querySelector('[data-catalog-search="true"]')).not.toBeNull();
-    expect(root.querySelector('[data-catalog-details="baidu:1"]')).not.toBeNull();
+    const search = root.querySelector('[data-catalog-search="true"]');
+    expect(search).not.toBeNull();
+    expect(root.querySelector("input, button")).toBe(search);
+    const selected = root.querySelector<HTMLElement>('[data-catalog-result="baidu:1"]')!;
+    const details = selected.querySelector<HTMLDetailsElement>(
+      '[data-catalog-details="baidu:1"]',
+    )!;
+    expect(details.open).toBe(true);
+    expect(root.querySelector("aside")).toBeNull();
+    expect(root.querySelector(".knowledge-workbench__catalog-body")).toBeNull();
+    expect(actions.detailOpens).toEqual([]);
     expect(root.querySelector('[data-action="copy-cloud-path"]')?.textContent).toBe("复制云端路径");
     expect(root.querySelector<HTMLDetailsElement>('[data-catalog-advanced-filters="true"]')?.open)
       .toBe(false);
   });
 
-  it("uses a native selection button and keeps TXT-only copy actions independent and disabled", () => {
+  it("opens details only from the native row disclosure and does not record a close", () => {
     const root = createTestDiv();
     const actions = actionFixture();
     const candidateId = `txt:${"b".repeat(64)}`;
@@ -214,25 +227,34 @@ describe("Cloud Catalog tab", () => {
       }],
     }), actions, {
       i18n: createWorkbenchI18n("zh-CN"),
-      selectedCatalogId: candidateId,
+      selectedCatalogId: null,
       filtersExpanded: true,
     });
 
     expect(root.querySelector('[role="listbox"]')).toBeNull();
     expect(root.querySelector('[role="option"]')).toBeNull();
     const result = root.querySelector<HTMLElement>(`[data-catalog-result="${candidateId}"]`)!;
-    const select = result.querySelector<HTMLButtonElement>('[data-action="select-catalog-record"]')!;
-    expect(select.tagName).toBe("BUTTON");
-    expect(select.type).toBe("button");
+    const details = result.querySelector<HTMLDetailsElement>(
+      `[data-catalog-details="${candidateId}"]`,
+    )!;
+    const select = details.querySelector<HTMLElement>('[data-action="open-catalog-detail"]')!;
+    expect(select.tagName).toBe("SUMMARY");
+    expect(select.dataset.focusKey).toBe(`catalog-select-${candidateId}`);
     expect(select.textContent).toBe("选择记录");
+    expect(details.open).toBe(false);
     select.click();
-    expect(actions.selections).toEqual([candidateId]);
+    expect(actions.detailOpens).toEqual([candidateId]);
+    expect(actions.selections).toEqual([]);
+    expect(details.open).toBe(true);
+    select.click();
+    expect(actions.detailOpens).toEqual([candidateId]);
+    expect(details.open).toBe(false);
     expect(result.querySelector<HTMLButtonElement>('[data-action="copy-catalog-filename"]'))
       .not.toBe(select);
     expect(result.querySelector<HTMLButtonElement>('[data-action="copy-cloud-path"]')?.disabled)
       .toBe(true);
-    expect(root.querySelector<HTMLElement>(`[data-catalog-details="${candidateId}"]`)
-      ?.querySelector<HTMLButtonElement>('[data-action="copy-cloud-path"]')?.disabled).toBe(true);
+    expect(details.querySelector<HTMLButtonElement>('[data-action="copy-cloud-path"]')?.disabled)
+      .toBe(true);
     expect(root.querySelector<HTMLDetailsElement>('[data-catalog-advanced-filters="true"]')?.open)
       .toBe(true);
   });
@@ -246,6 +268,7 @@ describe("Cloud Catalog tab", () => {
 
     expect(root.textContent).toContain("100,000 PDFs");
     expect(root.querySelectorAll("[data-catalog-result]")).toHaveLength(50);
+    expect(root.querySelectorAll("[data-catalog-disclosure]")).toHaveLength(50);
     expect(root.querySelector('[aria-label="My catalog"]')).not.toBeNull();
     const first = root.querySelector<HTMLElement>('[data-catalog-result="fs-000001"]')!;
     first.querySelector<HTMLButtonElement>('[data-action="copy-catalog-filename"]')!.click();

@@ -53,6 +53,7 @@ import {
   HybridCatalogError,
 } from "../../src/catalog/hybrid-catalog-types";
 import type { LargeCatalogBatchSummary } from "../../src/catalog/hybrid-catalog-runtime";
+import type { CatalogDisplayItem, CloudCatalogViewModel } from "../../src/catalog/cloud-catalog-runtime";
 import type { CloudDirectorySelection } from "../../src/catalog/cloud-directory-selection";
 import type { CloudDirectoryPickerPresenter } from "../../src/ui/cloud-directory-picker";
 import { deriveCloudVerificationScope } from "../../src/catalog/cloud-verification-scope";
@@ -66,6 +67,29 @@ const createTestDiv = (): HTMLDivElement => document.createElementNS(
   "http://www.w3.org/1999/xhtml",
   "div",
 ) as HTMLDivElement;
+
+const libraryRecord = (index: number): CatalogDisplayItem => ({
+  catalogId: `txt:${String(index).padStart(64, "0")}`,
+  filename: `会话最近查看-${index}.pdf`,
+  pathLabel: `/合成目录-${index}/会话最近查看-${index}.pdf`,
+  cloudPathAvailable: false,
+  verificationStatus: "unverified",
+  differenceKinds: [],
+  hierarchyTags: [`folder/合成目录-${index}`],
+});
+
+const libraryCatalog = (
+  items: readonly CatalogDisplayItem[],
+  query = "",
+): CloudCatalogViewModel => ({
+  ...populatedWorkbenchModel().catalog,
+  status: "ready",
+  source: "unified",
+  pdfCount: 6,
+  query,
+  total: items.length,
+  items,
+});
 
 const inlineFolderSelectionState = (): FolderSelectionRenderState => ({
   revision: 7,
@@ -418,6 +442,86 @@ describe("workbench", () => {
       [{ tab: "task", page: "overview" }],
       [{ tab: "more", page: "overview" }],
     ]);
+  });
+
+  it("keeps only five explicitly opened catalog details in a detached session MRU", () => {
+    const root = createTestDiv();
+    const base = populatedWorkbenchModel();
+    const records = Array.from({ length: 7 }, (_, index) => libraryRecord(index + 1));
+    const onSelectCatalogRecord = vi.fn();
+    const actions = noOpWorkbenchActions({ onSelectCatalogRecord });
+    const renderPage = (items: readonly CatalogDisplayItem[], query = "") => {
+      renderWorkbench(root, {
+        ...base,
+        catalog: libraryCatalog(items, query),
+        selectedCatalogId: null,
+      }, actions);
+    };
+
+    for (const record of records.slice(0, 6)) {
+      renderPage([record]);
+      root.querySelector<HTMLElement>('[data-action="open-catalog-detail"]')?.click();
+    }
+    renderPage([records[2]!]);
+    root.querySelector<HTMLElement>('[data-action="open-catalog-detail"]')?.click();
+    renderPage([records[6]!]);
+    renderPage([]);
+
+    const recentText = root.textContent ?? "";
+    expect(recentText).not.toContain(records[0]!.filename);
+    expect(recentText).not.toContain(records[6]!.filename);
+    for (const record of [records[1]!, records[2]!, records[3]!, records[4]!, records[5]!]) {
+      expect(recentText).toContain(record.filename);
+    }
+    expect(recentText.indexOf(records[2]!.filename)).toBeLessThan(
+      recentText.indexOf(records[5]!.filename),
+    );
+    expect(recentText.split(records[2]!.filename).length - 1).toBe(1);
+    expect(onSelectCatalogRecord).toHaveBeenCalledTimes(7);
+
+    renderPage([], "会话");
+    expect(root.textContent).not.toContain(records[2]!.filename);
+  });
+
+  it("routes the library reminder only to the task overview", () => {
+    const root = createTestDiv();
+    const onSelectRoute = vi.fn();
+    renderWorkbench(root, populatedWorkbenchModel(), noOpWorkbenchActions({
+      onSelectRoute,
+    }));
+
+    root.querySelector<HTMLButtonElement>('[data-action="open-library-task"]')?.click();
+
+    expect(onSelectRoute).toHaveBeenCalledOnce();
+    expect(onSelectRoute).toHaveBeenCalledWith({ tab: "task", page: "overview" });
+  });
+
+  it("clears the catalog-detail MRU when the concrete Workbench view closes", async () => {
+    class ItemViewSurface {
+      readonly contentEl = createTestDiv();
+    }
+    const record = libraryRecord(8);
+    const catalog = new FakeCloudCatalogRuntime(libraryCatalog([record]));
+    const fixture = controllerFixture({ catalog });
+    const WorkbenchView = createWorkbenchViewClass(
+      ItemViewSurface as unknown as ItemViewConstructor,
+      NORMAL_RUNTIME_POLICY,
+    );
+    const view = new WorkbenchView({} as WorkspaceLeaf, fixture.controller);
+
+    await view.onOpen();
+    view.contentEl.querySelector<HTMLElement>('[data-action="open-catalog-detail"]')?.click();
+    await vi.waitFor(() => expect(fixture.controller.snapshot().selectedCatalogId)
+      .toBe(record.catalogId));
+    catalog.setSnapshot(libraryCatalog([]));
+    await vi.waitFor(() => expect(view.contentEl.textContent).toContain(record.filename));
+
+    await view.onClose();
+    await view.onOpen();
+    expect(view.contentEl.textContent).not.toContain(record.filename);
+
+    await view.onClose();
+    fixture.controller.dispose();
   });
 
   it("always renders the dedicated verification page on the verification destination", () => {

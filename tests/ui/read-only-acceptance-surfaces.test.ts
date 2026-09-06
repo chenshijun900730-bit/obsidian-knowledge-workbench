@@ -302,7 +302,9 @@ describe("read-only acceptance surfaces", () => {
     const quickCapture = vi.fn();
     const ai = vi.fn();
     const previewSelected = vi.fn();
+    const selectRoute = vi.fn();
     const actions = workbenchActions({
+      onSelectRoute: selectRoute,
       onQuickCapture: quickCapture,
       onPreviewSuggestionIds: previewSelected,
       onSummarize: ai,
@@ -312,6 +314,7 @@ describe("read-only acceptance surfaces", () => {
     });
 
     for (const route of [
+      { tab: "library" },
       { tab: "more", page: "knowledge-tools" },
       { tab: "task", page: "overview" },
       { tab: "more", page: "history" },
@@ -326,7 +329,17 @@ describe("read-only acceptance surfaces", () => {
         "只读验收模式已启用",
       );
       expect(root.querySelector(".knowledge-workbench__shell")).not.toBeNull();
+      if (route.tab === "library") {
+        expect(root.querySelector('[data-library-recent="true"]')).toBeNull();
+        expect(root.querySelector('[data-catalog-search="true"]')).not.toBeNull();
+        expect(selectRoute).not.toHaveBeenCalled();
+        root.querySelector<HTMLButtonElement>('[data-action="open-library-task"]')?.click();
+        expect(selectRoute).toHaveBeenCalledWith({ tab: "task", page: "overview" });
+      }
     }
+
+    expect(actions.onSearchCatalog).not.toHaveBeenCalled();
+    expect(actions.onOpenBaidu).not.toHaveBeenCalled();
 
     const css = readFileSync(resolve(process.cwd(), "styles.css"), "utf8");
     expect(css).toMatch(/\.knowledge-workbench__acceptance-banner\s*\{[^}]*border:\s*2px solid/su);

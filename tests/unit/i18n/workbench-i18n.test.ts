@@ -33,6 +33,25 @@ describe("workbench i18n", () => {
       .toBe("68,959 PDFs");
   });
 
+  it("provides paired concise library-page copy", () => {
+    const zh = createWorkbenchI18n("zh-CN");
+    const en = createWorkbenchI18n("en");
+    const messages: readonly [WorkbenchMessageKey, string, string][] = [
+      ["library.title", "在文库里找书", "Find a book in your library"],
+      ["library.boundary", "只搜索文件名和目录信息，不下载 PDF。", "Searches filenames and directory information only. PDFs are not downloaded."],
+      ["library.taskReminder.title", "有一项文库任务需要处理", "A library task needs attention"],
+      ["library.taskReminder.action", "打开任务", "Open task"],
+      ["library.recent.title", "最近查看", "Recently viewed"],
+      ["library.recent.directory", "目录：合成目录", "Directory: 合成目录"],
+      ["library.recent.aria", "最近查看的图书", "Recently viewed books"],
+    ];
+
+    for (const [key, expectedZh, expectedEn] of messages) {
+      expect(zh.t(key, { directory: "合成目录" }), `${key} zh-CN`).toBe(expectedZh);
+      expect(en.t(key, { directory: "合成目录" }), `${key} en`).toBe(expectedEn);
+    }
+  });
+
   it("rejects missing interpolation values", () => {
     expect(() => createWorkbenchI18n("zh-CN").t("catalog.pdfCount"))
       .toThrow("i18n-interpolation-missing:count");

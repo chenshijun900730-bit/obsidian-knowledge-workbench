@@ -21,7 +21,6 @@ import type {
   CatalogDifferenceKind,
   CatalogVerificationStatus,
 } from "../catalog/hybrid-catalog-types";
-import { renderCloudCatalogTab } from "./cloud-catalog-tab";
 import {
   createWorkbenchI18n,
   type WorkbenchI18n,
@@ -48,6 +47,10 @@ import type {
   LibraryWorkflowState,
   PendingCatalogTxtDraft,
 } from "./library-workflow-state";
+import {
+  renderLibraryPage,
+  type RecentLibraryItem,
+} from "./library-page";
 import type {
   DisposableSurface,
   FolderSelectionHostActions,
@@ -195,6 +198,32 @@ const STATUS_MESSAGE_KEYS: Readonly<Record<string, WorkbenchMessageKey>> = {
 const verificationPageSurfaces = new WeakMap<HTMLElement, VerificationPageSurface>();
 const folderSelectionPageSurfaces = new WeakMap<HTMLElement, DisposableSurface>();
 const settingsPageSurfaces = new WeakMap<HTMLElement, SettingsSectionsSurface>();
+const recentLibraryItems = new WeakMap<HTMLElement, readonly RecentLibraryItem[]>();
+
+const recordRecentLibraryItem = (
+  root: HTMLElement,
+  model: WorkbenchViewModel,
+  catalogId: string,
+): void => {
+  const record = model.catalog.items.find((item) => item.catalogId === catalogId);
+  if (record === undefined) return;
+  const filenameSuffix = `/${record.filename}`;
+  const pathDirectory = record.pathLabel.endsWith(filenameSuffix)
+    ? record.pathLabel.slice(0, -filenameSuffix.length)
+    : record.pathLabel;
+  const directoryTag = record.hierarchyTags
+    .map((tag) => tag.startsWith("folder/") ? tag.slice("folder/".length) : tag)
+    .join(" › ") || pathDirectory || "/";
+  const recent = Object.freeze({
+    catalogId: record.catalogId,
+    filename: record.filename,
+    directoryTag,
+  });
+  recentLibraryItems.set(root, Object.freeze([
+    recent,
+    ...(recentLibraryItems.get(root) ?? []).filter((item) => item.catalogId !== catalogId),
+  ].slice(0, 5)));
+};
 
 const verificationPickerPurpose = (
   model: WorkbenchViewModel,
@@ -356,10 +385,23 @@ export function renderWorkbench(
   }
   const panel = shell.panel;
   if (model.route.tab === "library") {
-    renderCloudCatalogTab(panel, model.catalog, surfaceActions, {
-      i18n: createWorkbenchI18n(model.locale),
+    renderLibraryPage(panel, {
+      catalog: model.catalog,
       selectedCatalogId: model.selectedCatalogId,
+      recentItems: recentLibraryItems.get(root) ?? [],
       filtersExpanded: model.catalogFiltersExpanded,
+      workflow: model.workflow,
+      i18n: createWorkbenchI18n(model.locale),
+    }, {
+      ...surfaceActions,
+      onOpenTask: () => surfaceActions.onSelectRoute({
+        tab: "task",
+        page: "overview",
+      }),
+      onOpenCatalogDetail: (catalogId) => {
+        recordRecentLibraryItem(root, model, catalogId);
+        surfaceActions.onSelectCatalogRecord(catalogId);
+      },
     });
   } else if (
     model.route.tab === "task"
@@ -562,6 +604,7 @@ export function createWorkbenchViewClass(
       disposeVerificationPage(this.contentEl);
       folderSelectionPageSurfaces.get(this.contentEl)?.dispose();
       folderSelectionPageSurfaces.delete(this.contentEl);
+      recentLibraryItems.delete(this.contentEl);
       this.controller.closeFolderSelection?.();
       this.contentEl.replaceChildren();
     }
