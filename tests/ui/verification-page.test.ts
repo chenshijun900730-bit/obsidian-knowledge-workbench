@@ -7,6 +7,7 @@ import type {
 } from "../../src/catalog/hybrid-catalog-runtime";
 import { createWorkbenchI18n } from "../../src/i18n/workbench-i18n";
 import {
+  renderVerificationCategoryEditor,
   renderVerificationPage,
   type VerificationPageActions,
   type VerificationPageModel,
@@ -60,6 +61,68 @@ const actions = (overrides: Partial<VerificationPageActions> = {}): Verification
   onBrowseRoot: async () => null,
   onDirectorySelection: () => undefined,
   ...overrides,
+});
+
+describe("verification category editor", () => {
+  it("defaults to one category and saves an exact advanced selection without launching", () => {
+    const groups = Array.from({ length: 6 }, (_, index) => ({
+      groupKey: `group:${String(index + 1).repeat(64)}`,
+      rootRelativePath: `Category-${index + 1}`,
+      label: `Category ${index + 1}`,
+      pdfCount: index + 1,
+      mode: "recursive" as const,
+      verificationStatus: "unverified" as const,
+    }));
+    const root = testRoot();
+    const onSave = vi.fn();
+    renderVerificationCategoryEditor(root, {
+      i18n: createWorkbenchI18n("zh-CN"),
+      groups,
+      selectedGroupKeys: [],
+      rootPath: "/Synthetic",
+      expectedRootPath: "/Synthetic",
+    }, { onSave, onCancel: vi.fn() });
+
+    expect(root.querySelectorAll<HTMLInputElement>(
+      "[data-task-category-radio]:checked",
+    )).toHaveLength(1);
+    const checks = Array.from(root.querySelectorAll<HTMLInputElement>(
+      "[data-task-category-check]",
+    ));
+    for (const check of checks.slice(0, 5)) {
+      check.checked = true;
+      check.dispatchEvent(new Event("change", { bubbles: true }));
+    }
+    expect(checks[5]?.disabled).toBe(true);
+    root.querySelector<HTMLButtonElement>("[data-task-category-save]")!.click();
+    expect(onSave).toHaveBeenCalledWith({
+      rootPath: "/Synthetic",
+      groupKeys: groups.slice(0, 5).map((group) => group.groupKey),
+    });
+    expect(root.querySelector('[data-action="start-verification"]')).toBeNull();
+    expect(root.querySelector('[data-action="resume-verification"]')).toBeNull();
+  });
+
+  it("rejects a manually entered child directory locally", () => {
+    const root = testRoot();
+    const onSave = vi.fn();
+    renderVerificationCategoryEditor(root, {
+      i18n: createWorkbenchI18n("zh-CN"),
+      groups: active.groups,
+      selectedGroupKeys: [GROUP_KEY],
+      rootPath: "/Synthetic",
+      expectedRootPath: "/Synthetic",
+    }, { onSave, onCancel: vi.fn() });
+
+    const input = root.querySelector<HTMLInputElement>("[data-task-category-root]")!;
+    input.value = "/Synthetic/9-Literature-253";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    root.querySelector<HTMLButtonElement>("[data-task-category-save]")!.click();
+
+    expect(onSave).not.toHaveBeenCalled();
+    expect(root.querySelector(".knowledge-workbench__category-error")?.textContent)
+      .toBe("请使用已绑定书库的 API 父目录；子目录不能启动本次检查。");
+  });
 });
 
 type HybridCatalogFixture = Omit<HybridCatalogViewModel, "executionActive"> &

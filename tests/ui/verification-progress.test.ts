@@ -95,6 +95,7 @@ describe("verification progress", () => {
       "details[data-verification-run-details]",
     )!;
     expect(details.open).toBe(false);
+    expect(details.contains(segment)).toBe(true);
     expect(details.querySelector("[data-verification-run-requests]")?.textContent)
       .toContain("427");
     expect(details.querySelector("[data-verification-run-queue]")?.textContent)

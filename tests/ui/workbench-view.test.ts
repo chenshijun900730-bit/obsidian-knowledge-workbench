@@ -331,13 +331,23 @@ describe("workbench", () => {
     );
     expect(root.querySelector(".knowledge-workbench__cloud-catalog")).not.toBeNull();
 
-    for (const page of ["overview", "folder-selection", "category-selection"] as const) {
-      renderWorkbench(root, {
-        ...base,
-        route: { tab: "task", page },
-      }, noOpWorkbenchActions(), NORMAL_RUNTIME_POLICY, settingsSurface);
-      expect(root.querySelector(".knowledge-workbench__verification-page")).not.toBeNull();
-    }
+    renderWorkbench(root, {
+      ...base,
+      route: { tab: "task", page: "overview" },
+    }, noOpWorkbenchActions(), NORMAL_RUNTIME_POLICY, settingsSurface);
+    expect(root.querySelector(".knowledge-workbench__task-page")).not.toBeNull();
+
+    renderWorkbench(root, {
+      ...base,
+      route: { tab: "task", page: "category-selection" },
+    }, noOpWorkbenchActions(), NORMAL_RUNTIME_POLICY, settingsSurface);
+    expect(root.querySelector(".knowledge-workbench__category-page")).not.toBeNull();
+
+    renderWorkbench(root, {
+      ...base,
+      route: { tab: "task", page: "folder-selection" },
+    }, noOpWorkbenchActions(), NORMAL_RUNTIME_POLICY, settingsSurface);
+    expect(root.querySelector(".knowledge-workbench__verification-page")).not.toBeNull();
 
     renderWorkbench(root, {
       ...base,
@@ -524,7 +534,7 @@ describe("workbench", () => {
     fixture.controller.dispose();
   });
 
-  it("always renders the dedicated verification page on the verification destination", () => {
+  it("renders the single-action task page on the task destination", () => {
     const root = createTestDiv();
     renderWorkbench(root, {
       ...populatedWorkbenchModel(),
@@ -536,9 +546,45 @@ describe("workbench", () => {
       }],
     }, noOpWorkbenchActions());
 
-    expect(root.querySelector(".knowledge-workbench__verification-page")).not.toBeNull();
-    expect(root.textContent).toContain("云端核验能力不可用");
+    expect(root.querySelector(".knowledge-workbench__task-page")).not.toBeNull();
+    expect(root.querySelectorAll("[data-task-primary]")).toHaveLength(1);
+    expect(root.textContent).toContain("选择目录数据");
     expect(root.querySelector('[aria-label="Organization suggestions"]')).toBeNull();
+  });
+
+  it("opens the session-only TXT picker only after the visible task action", async () => {
+    class ItemViewSurface {
+      readonly contentEl = createTestDiv();
+    }
+    const hybrid = new FakeHybridCatalogRuntime({ status: "empty" });
+    const fixture = controllerFixture({
+      catalog: new FakeCloudCatalogRuntime({}, undefined, hybrid),
+    });
+    fixture.controller.selectRoute({ tab: "task", page: "overview" });
+    const WorkbenchView = createWorkbenchViewClass(
+      ItemViewSurface as unknown as ItemViewConstructor,
+      NORMAL_RUNTIME_POLICY,
+    );
+    const view = new WorkbenchView({} as WorkspaceLeaf, fixture.controller);
+    document.body.append(view.contentEl);
+    await view.onOpen();
+
+    expect(view.contentEl.querySelector('input[type="file"]')).toBeNull();
+    view.contentEl.querySelector<HTMLButtonElement>("[data-task-primary]")!.click();
+    const picker = await vi.waitFor(() => {
+      const input = view.contentEl.querySelector<HTMLInputElement>('input[type="file"]');
+      expect(input).not.toBeNull();
+      return input!;
+    });
+    expect(picker.accept).toBe(".txt,text/plain");
+    expect(fixture.controller.snapshot().taskActionPending).toBe(true);
+    picker.dispatchEvent(new Event("cancel"));
+    await vi.waitFor(() => expect(fixture.controller.snapshot().taskActionPending).toBe(false));
+    expect(hybrid.previewPaths).toEqual([]);
+
+    await view.onClose();
+    view.contentEl.remove();
+    fixture.controller.dispose();
   });
 
   it("renders the injected folder page inline and disposes it before returning to verification", () => {
@@ -648,7 +694,7 @@ describe("workbench", () => {
     const onBrowseVerificationRoot = vi.fn(async () => selection);
     const model = {
       ...populatedWorkbenchModel(),
-      route: { tab: "task", page: "overview" } as const,
+      route: { tab: "task", page: "folder-selection" } as const,
       verificationRoot: "",
       selectedVerificationGroupKeys: [groupKey],
       catalogConnection: { status: "authorized" as const },
@@ -720,7 +766,7 @@ describe("workbench", () => {
     const onSetVerificationRoot = vi.fn();
     const model = {
       ...populatedWorkbenchModel(),
-      route: { tab: "task", page: "overview" } as const,
+      route: { tab: "task", page: "folder-selection" } as const,
       verificationRoot: "/Synthetic/Existing",
       catalogConnection: { status: "authorized" as const },
       hybridCatalog: { ...TEST_INACTIVE_HYBRID_EXECUTION, status: "ready" as const },
@@ -752,7 +798,7 @@ describe("workbench", () => {
     document.body.append(root);
     const model = {
       ...populatedWorkbenchModel(),
-      route: { tab: "task", page: "overview" } as const,
+      route: { tab: "task", page: "folder-selection" } as const,
       verificationRoot: "/Synthetic/Existing",
       catalogConnection: { status: "authorized" as const },
       hybridCatalog: { ...TEST_INACTIVE_HYBRID_EXECUTION, status: "ready" as const },
@@ -778,7 +824,7 @@ describe("workbench", () => {
       readonly contentEl = createTestDiv();
     }
     const fixture = controllerFixture();
-    fixture.controller.selectRoute({ tab: "task", page: "overview" });
+    fixture.controller.selectRoute({ tab: "task", page: "folder-selection" });
     const ConcreteWorkbenchView = createWorkbenchViewClass(
       ItemViewSurface as unknown as ItemViewConstructor,
       NORMAL_RUNTIME_POLICY,
@@ -876,7 +922,7 @@ describe("workbench", () => {
     });
     const firstModel = {
       ...populatedWorkbenchModel(),
-      route: { tab: "task", page: "overview" } as const,
+      route: { tab: "task", page: "folder-selection" } as const,
       verificationRoot: "/Synthetic",
       selectedVerificationGroupKeys: [groupKey],
       catalogConnection: { status: "authorized" as const },
@@ -928,7 +974,7 @@ describe("workbench", () => {
     document.body.append(root);
     let currentModel = {
       ...populatedWorkbenchModel(),
-      route: { tab: "task", page: "overview" } as const,
+      route: { tab: "task", page: "folder-selection" } as const,
       verificationRoot: "",
       catalogConnection: { status: "authorized" as const },
       hybridCatalog: { ...TEST_INACTIVE_HYBRID_EXECUTION, status: "ready" as const },
@@ -1037,7 +1083,7 @@ describe("workbench", () => {
       cloudVerificationGeneration: binding.verificationGeneration,
     });
     fixture.controller.setVerificationRoot("/Wrong-candidate");
-    fixture.controller.selectRoute({ tab: "task", page: "overview" });
+    fixture.controller.selectRoute({ tab: "task", page: "folder-selection" });
     fixture.controller.toggleVerificationGroup(groupKey);
     hybrid.beforeResume = () => {
       hybrid.setSnapshot({ status: "scanning", active, batch: pausedBatch });
@@ -1201,7 +1247,7 @@ describe("workbench", () => {
     });
     fixture.controller.setVerificationRoot("malformed-relative-root");
     fixture.controller.toggleVerificationGroup(groupKey);
-    fixture.controller.selectRoute({ tab: "task", page: "overview" });
+    fixture.controller.selectRoute({ tab: "task", page: "folder-selection" });
     const ConcreteWorkbenchView = createWorkbenchViewClass(
       ItemViewSurface as unknown as ItemViewConstructor,
       NORMAL_RUNTIME_POLICY,
@@ -1401,6 +1447,8 @@ describe("workbench", () => {
       pendingCatalogTxt: null,
       taskActionPending: false,
       taskActionRevision: 1,
+      taskPauseRequested: false,
+      boundLibraryPath: null,
       workflow: TEST_NEEDS_TXT_WORKFLOW,
       verificationRoot: "",
       verificationRootLocked: false,
@@ -1448,6 +1496,11 @@ describe("workbench", () => {
       onStartSelectedVerification: async () => undefined,
       onResumeSelectedVerification: async () => undefined,
       onCancelSelectedVerification: () => undefined,
+      onTaskPrimary: () => undefined,
+      onTaskChooseDifferentCategory: () => undefined,
+      onTaskSaveCategorySelection: () => undefined,
+      onTaskCancelCategorySelection: () => undefined,
+      onTaskOpenDetails: () => undefined,
     });
     expect(root.querySelector('[role="tablist"]')).toBeNull();
     expect(root.textContent).not.toContain("WorkbenchOrganization suggestionsOperation historyCloud CatalogSettings");
@@ -2647,7 +2700,89 @@ describe("workbench", () => {
     await instance.onClose();
   });
 
-  it("builds a detached verification purpose and applies a category draft without starting", async () => {
+  it("saves a detached category draft without starting cloud work", () => {
+    const groupKey = `group:${"7".repeat(64)}`;
+    const secondGroupKey = `group:${"8".repeat(64)}`;
+    const model = {
+      ...populatedWorkbenchModel(),
+      route: { tab: "task", page: "category-selection" } as const,
+      boundLibraryPath: "/科学文库",
+      verificationRoot: "/科学文库",
+      workflow: {
+        kind: "ready" as const,
+        primaryAction: "start" as const,
+        titleKey: "workflow.ready.title" as const,
+        descriptionKey: "workflow.ready.description" as const,
+        recommendedGroup: null,
+        canShowTechnicalDetails: false,
+      },
+      hybridCatalog: {
+        ...TEST_INACTIVE_HYBRID_EXECUTION,
+        status: "ready" as const,
+        active: {
+          ...TEST_HYBRID_ACTIVE_AUTHORITY,
+          importedAt: 1,
+          pdfCount: 6,
+          unverifiedCount: 6,
+          verifiedCount: 0,
+          differenceCount: 0,
+          cloudMissingCount: 0,
+          groupCount: 2,
+          verifiedGroupCount: 0,
+          coveredCandidatePdfCount: 0,
+          groups: [{
+            groupKey,
+            rootRelativePath: "7-医学",
+            label: "医学",
+            pdfCount: 4,
+            mode: "recursive" as const,
+            verificationStatus: "unverified" as const,
+          }, {
+            groupKey: secondGroupKey,
+            rootRelativePath: "8-语言",
+            label: "语言",
+            pdfCount: 2,
+            mode: "recursive" as const,
+            verificationStatus: "unverified" as const,
+          }],
+        },
+      },
+    };
+    const onTaskSaveCategorySelection = vi.fn();
+    const onStartSelectedVerification = vi.fn();
+    const onResumeSelectedVerification = vi.fn();
+    const root = createTestDiv();
+    renderWorkbench(root, model, noOpWorkbenchActions({
+      onTaskSaveCategorySelection,
+      onStartSelectedVerification,
+      onResumeSelectedVerification,
+    }));
+
+    const advanced = root.querySelector<HTMLDetailsElement>(
+      "[data-task-category-advanced]",
+    )!;
+    advanced.open = true;
+    const first = root.querySelector<HTMLInputElement>(
+      `[data-task-category-check="${groupKey}"]`,
+    )!;
+    const second = root.querySelector<HTMLInputElement>(
+      `[data-task-category-check="${secondGroupKey}"]`,
+    )!;
+    first.checked = true;
+    first.dispatchEvent(new Event("change", { bubbles: true }));
+    second.checked = true;
+    second.dispatchEvent(new Event("change", { bubbles: true }));
+    root.querySelector<HTMLButtonElement>("[data-task-category-save]")!.click();
+
+    expect(onTaskSaveCategorySelection).toHaveBeenCalledWith(model.taskActionRevision, {
+      rootPath: "/科学文库",
+      groupKeys: [groupKey, secondGroupKey],
+    });
+    expect(onStartSelectedVerification).not.toHaveBeenCalled();
+    expect(onResumeSelectedVerification).not.toHaveBeenCalled();
+  });
+
+  it("builds a detached verification purpose for the legacy picker bridge", async () => {
     class ItemViewSurface {
       readonly contentEl = createTestDiv();
     }
@@ -2690,7 +2825,7 @@ describe("workbench", () => {
       readonly dependencies: { catalogDirectoryPicker?: CloudDirectoryPickerPresenter };
     };
     internals.dependencies.catalogDirectoryPicker = { request: pickerRequest };
-    fixture.controller.selectRoute({ tab: "task", page: "overview" });
+    fixture.controller.selectRoute({ tab: "task", page: "folder-selection" });
     fixture.controller.setVerificationRoot("/科学文库");
     const WorkbenchView = createWorkbenchViewClass(
       ItemViewSurface as unknown as ItemViewConstructor,

@@ -14,12 +14,16 @@ const boundedCount = (value: number): number => Number.isFinite(value)
 
 export interface VerificationProgressModel {
   readonly active: HybridCatalogActiveSummary;
-  readonly batch: LargeCatalogBatchSummary;
+  readonly batch?: LargeCatalogBatchSummary;
   readonly busy: boolean;
   readonly currentGroupLabel: string | null;
   readonly detailsOpen: boolean;
   readonly i18n: WorkbenchI18n;
 }
+
+type BatchVerificationProgressModel = VerificationProgressModel & Readonly<{
+  batch: LargeCatalogBatchSummary;
+}>;
 
 const progressCard = (
   doc: Document,
@@ -77,7 +81,7 @@ const BATCH_STATUS_KEYS: Readonly<Record<LargeCatalogBatchSummary["status"], Wor
 
 const renderCurrentCard = (
   doc: Document,
-  model: VerificationProgressModel,
+  model: BatchVerificationProgressModel,
   progress: HTMLElement,
 ): HTMLElement => {
   progress.className = "knowledge-workbench__verification-current-indicator";
@@ -116,7 +120,7 @@ const AUTO_STATE_KEYS = {
   "stopped-limit": "verification.auto.limit",
 } as const;
 
-const renderAutoState = (doc: Document, model: VerificationProgressModel): HTMLElement => {
+const renderAutoState = (doc: Document, model: BatchVerificationProgressModel): HTMLElement => {
   const state = doc.createElement("p");
   state.className = "knowledge-workbench__verification-auto-state";
   state.setAttribute("role", "status");
@@ -144,7 +148,7 @@ const appendMetric = (
   list.append(term, description);
 };
 
-const renderRunMetrics = (doc: Document, model: VerificationProgressModel): HTMLElement => {
+const renderRunMetrics = (doc: Document, model: BatchVerificationProgressModel): HTMLElement => {
   const list = doc.createElement("dl");
   appendMetric(
     doc,
@@ -231,30 +235,36 @@ export const renderVerificationProgress = (
   overall.max = Math.max(1, overallTotal);
   overall.value = Math.min(overallTotal, boundedCount(model.active.coveredCandidatePdfCount));
 
-  const current = doc.createElement("div");
-  current.dataset.verificationCurrentProgress = "true";
-  current.setAttribute("role", "progressbar");
-  current.setAttribute("aria-label", model.i18n.t("verification.progress.current.aria"));
+  section.append(renderOverallCard(doc, model, overall));
+  if (model.batch !== undefined) {
+    const batchModel: BatchVerificationProgressModel = {
+      ...model,
+      batch: model.batch,
+    };
+    const current = doc.createElement("div");
+    current.dataset.verificationCurrentProgress = "true";
+    current.setAttribute("role", "progressbar");
+    current.setAttribute("aria-label", model.i18n.t("verification.progress.current.aria"));
 
-  const segment = doc.createElement("progress");
-  segment.dataset.verificationSegmentBudget = "true";
-  segment.max = LARGE_CATALOG_RUN_BUDGET.maxPdfCount;
-  segment.value = Math.min(segment.max, boundedCount(model.batch.pdfCount));
+    const segment = doc.createElement("progress");
+    segment.dataset.verificationSegmentBudget = "true";
+    segment.max = LARGE_CATALOG_RUN_BUDGET.maxPdfCount;
+    segment.value = Math.min(segment.max, boundedCount(model.batch.pdfCount));
 
-  const details = doc.createElement("details");
-  details.dataset.verificationRunDetails = "true";
-  details.open = model.detailsOpen;
-  const summary = doc.createElement("summary");
-  summary.dataset.focusKey = "verification-run-details";
-  summary.textContent = model.i18n.t("verification.details.title");
-  details.append(summary, renderRunMetrics(doc, model));
+    const details = doc.createElement("details");
+    details.dataset.verificationRunDetails = "true";
+    details.open = model.detailsOpen;
+    const summary = doc.createElement("summary");
+    summary.dataset.focusKey = "verification-run-details";
+    summary.textContent = model.i18n.t("verification.details.title");
+    details.append(
+      summary,
+      renderSegmentCard(doc, batchModel, segment),
+      renderAutoState(doc, batchModel),
+      renderRunMetrics(doc, batchModel),
+    );
 
-  section.append(
-    renderOverallCard(doc, model, overall),
-    renderCurrentCard(doc, model, current),
-    renderSegmentCard(doc, model, segment),
-    renderAutoState(doc, model),
-    details,
-  );
+    section.append(renderCurrentCard(doc, batchModel, current), details);
+  }
   return section;
 };

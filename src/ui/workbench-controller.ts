@@ -321,6 +321,16 @@ const verificationBatchAdvanced = (
     || batch.runOrdinal > prior.runOrdinal;
 };
 
+const taskExecutionKey = (hybrid: HybridCatalogViewModel | undefined): string | null => (
+  hybrid?.executionActive === true
+    ? JSON.stringify([
+        hybrid.active?.sourceImportSha256 ?? null,
+        hybrid.batch?.batchId ?? null,
+        hybrid.batch?.runOrdinal ?? null,
+      ])
+    : null
+);
+
 const hybridWithoutMessage = (value: HybridCatalogViewModel): HybridCatalogViewModel => {
   const { messageCode: _messageCode, ...current } = value;
   return current;
@@ -482,6 +492,7 @@ export class WorkbenchController {
   private pendingCatalogTxt: PendingCatalogTxtDraft | null = null;
   private taskActionNonce: symbol | null = null;
   private taskSemanticKey = "";
+  private taskPauseExecutionKey: string | null = null;
   private cloudAuthorityOperation: Readonly<{
     kind: CloudAuthorityOperation;
     nonce: symbol;
@@ -550,6 +561,8 @@ export class WorkbenchController {
       pendingCatalogTxt: null,
       taskActionPending: false,
       taskActionRevision: 1,
+      taskPauseRequested: false,
+      boundLibraryPath: initialSettings.boundCloudLibrary?.path ?? null,
       workflow: initialWorkflow,
       verificationRoot: "",
       verificationRootLocked: false,
@@ -1201,38 +1214,27 @@ export class WorkbenchController {
 
   async previewTaskCatalogTxt(path: string, expectedRevision: number): Promise<void> {
     if (this.disposed) return;
-    await this.withTaskActionPermit(expectedRevision, async () => {
-      const hybrid = this.dependencies.catalog.hybrid;
-      if (hybrid === undefined) throw new Error("catalog-unavailable");
-      const priorDraft = this.pendingCatalogTxt;
-      try {
-        const preview = await hybrid.previewTxt(path);
-        if (this.disposed) return;
-        this.pendingCatalogTxt = Object.freeze({
-          path,
-          sourceSha256: preview.sourceSha256,
-        });
-        this.model = { ...this.model, pendingCatalogTxt: clone(this.pendingCatalogTxt) };
-        this.emit();
-      } catch (error) {
-        if (!this.disposed) {
-          const retainedCandidate = hybrid.snapshot().candidate;
-          this.pendingCatalogTxt = priorDraft !== null
-            && retainedCandidate?.sourceSha256 === priorDraft.sourceSha256
-            ? priorDraft
-            : null;
-          this.model = {
-            ...this.model,
-            pendingCatalogTxt: this.pendingCatalogTxt === null
-              ? null
-              : clone(this.pendingCatalogTxt),
-            status: "error",
-            statusMessage: "task.txtImportFailed",
-          };
-          this.emit();
-        }
-        throw error;
+    await this.withTaskActionPermit(expectedRevision, (permit) => (
+      this.previewTaskCatalogTxtWithPermit(path, permit, false)
+    ));
+  }
+
+  async performTaskTxtSelection(
+    expectedRevision: number,
+    requestPath: () => Promise<string | null>,
+  ): Promise<void> {
+    if (this.disposed) return;
+    const priorRevision = this.model.taskActionRevision;
+    this.reconcileTaskProjection();
+    if (this.model.taskActionRevision !== priorRevision) this.emit();
+    await this.withTaskActionPermit(expectedRevision, async (permit) => {
+      if (this.model.workflow.primaryAction !== "choose-txt") {
+        throw new Error("task-action-stale");
       }
+      const path = await requestPath();
+      if (path === null || this.disposed) return;
+      this.assertTaskActionPermit(permit);
+      await this.previewTaskCatalogTxtWithPermit(path, permit, true);
     });
   }
 
@@ -1313,6 +1315,117 @@ export class WorkbenchController {
         confirm: false,
       }, permit);
     });
+  }
+
+  async performTaskPrimaryAction(expectedRevision: number): Promise<void> {
+    if (this.disposed) return;
+    const priorRevision = this.model.taskActionRevision;
+    this.reconcileTaskProjection();
+    if (this.model.taskActionRevision !== priorRevision) this.emit();
+    if (expectedRevision !== this.model.taskActionRevision) {
+      throw new Error("task-action-stale");
+    }
+    switch (this.model.workflow.primaryAction) {
+      case "choose-txt":
+        throw new RangeError("host-task-action-required");
+      case "import-txt":
+        await this.withTaskActionPermit(expectedRevision, () => this.importCatalogTxtDraft());
+        return;
+      case "open-connection":
+        await this.withTaskActionPermit(expectedRevision, async () => {
+          this.selectRoute({ tab: "more", page: "connection" });
+        });
+        return;
+      case "choose-library":
+        await this.withTaskActionPermit(expectedRevision, async () => {
+          this.openVerificationFolderSelection();
+        });
+        return;
+      case "start":
+        await this.performTaskVerificationAction("start", expectedRevision);
+        return;
+      case "pause":
+        this.requestTaskPause(expectedRevision);
+        return;
+      case "resume":
+      case "retry": {
+        if (this.dependencies.catalog.hybrid?.snapshot().batch?.resumeAvailable !== true) {
+          throw new RangeError("task-resume-unavailable");
+        }
+        await this.performTaskVerificationAction("resume", expectedRevision);
+        return;
+      }
+      case "open-library":
+        await this.withTaskActionPermit(expectedRevision, async () => {
+          this.selectRoute({ tab: "library" });
+        });
+    }
+  }
+
+  requestTaskPause(expectedRevision: number): void {
+    if (this.disposed) return;
+    const priorRevision = this.model.taskActionRevision;
+    this.reconcileTaskProjection();
+    if (this.model.taskActionRevision !== priorRevision) this.emit();
+    const hybrid = this.dependencies.catalog.hybrid?.snapshot();
+    const executionKey = taskExecutionKey(hybrid);
+    if (
+      expectedRevision !== this.model.taskActionRevision
+      || this.model.workflow.primaryAction !== "pause"
+      || hybrid?.executionActive !== true
+      || executionKey === null
+    ) throw new Error("task-action-stale");
+    if (this.taskPauseExecutionKey === executionKey) return;
+    this.taskPauseExecutionKey = executionKey;
+    this.model = { ...this.model, taskPauseRequested: true };
+    this.emit();
+    this.dependencies.catalog.hybrid?.cancelLargeVerification();
+  }
+
+  saveTaskCategorySelection(
+    expectedRevision: number,
+    input: Readonly<{ rootPath: string; groupKeys: readonly string[] }>,
+  ): void {
+    if (this.disposed) return;
+    const priorRevision = this.model.taskActionRevision;
+    this.reconcileTaskProjection();
+    if (this.model.taskActionRevision !== priorRevision) this.emit();
+    if (
+      expectedRevision !== this.model.taskActionRevision
+      || this.model.workflow.kind !== "ready"
+    ) throw new Error("task-action-stale");
+    const active = this.dependencies.catalog.hybrid?.snapshot().active;
+    const binding = this.dependencies.store.settings().boundCloudLibrary;
+    if (active === undefined || binding === null) throw new Error("catalog-unavailable");
+    const normalizedRoot = this.validateCatalogScanRoot(input.rootPath);
+    if (normalizedRoot !== this.validateCatalogScanRoot(binding.path)) {
+      throw new Error("invalid-large-catalog-root");
+    }
+    const requested = new Set(input.groupKeys);
+    const groupKeys = active.groups
+      .filter((group) => requested.has(group.groupKey))
+      .map((group) => group.groupKey);
+    if (
+      input.groupKeys.length < 1
+      || input.groupKeys.length > LARGE_CATALOG_RUN_BUDGET.maxSelectedTopLevelGroups
+      || requested.size !== input.groupKeys.length
+      || groupKeys.length !== input.groupKeys.length
+    ) throw new RangeError("verification-group-required");
+    const selection = this.model.verificationDirectorySelection;
+    const {
+      verificationDirectorySelection: _verificationDirectorySelection,
+      ...current
+    } = this.model;
+    this.model = {
+      ...current,
+      route: { tab: "task", page: "overview" },
+      verificationRoot: normalizedRoot,
+      selectedVerificationGroupKeys: groupKeys,
+      ...(selection?.effectiveRoot === normalizedRoot
+        ? { verificationDirectorySelection: selection }
+        : {}),
+    };
+    this.emit();
   }
 
   async requestLargeCatalogVerification(
@@ -2715,6 +2828,45 @@ export class WorkbenchController {
     }
   }
 
+  private async previewTaskCatalogTxtWithPermit(
+    path: string,
+    permit: TaskActionPermit,
+    revalidateSemanticScope: boolean,
+  ): Promise<void> {
+    const hybrid = this.dependencies.catalog.hybrid;
+    if (hybrid === undefined) throw new Error("catalog-unavailable");
+    const priorDraft = this.pendingCatalogTxt;
+    try {
+      const preview = await hybrid.previewTxt(path);
+      if (this.disposed) return;
+      if (revalidateSemanticScope) this.assertTaskActionPermit(permit);
+      this.pendingCatalogTxt = Object.freeze({
+        path,
+        sourceSha256: preview.sourceSha256,
+      });
+      this.model = { ...this.model, pendingCatalogTxt: clone(this.pendingCatalogTxt) };
+      this.emit();
+    } catch (error) {
+      if (!this.disposed) {
+        const retainedCandidate = hybrid.snapshot().candidate;
+        this.pendingCatalogTxt = priorDraft !== null
+          && retainedCandidate?.sourceSha256 === priorDraft.sourceSha256
+          ? priorDraft
+          : null;
+        this.model = {
+          ...this.model,
+          pendingCatalogTxt: this.pendingCatalogTxt === null
+            ? null
+            : clone(this.pendingCatalogTxt),
+          status: "error",
+          statusMessage: "task.txtImportFailed",
+        };
+        this.emit();
+      }
+      throw error;
+    }
+  }
+
   private async importCatalogTxtDraft(onConfirmed?: () => void): Promise<void> {
     const hybrid = this.dependencies.catalog.hybrid;
     const confirmation = this.dependencies.catalogTxtImportConfirmation;
@@ -3610,6 +3762,8 @@ export class WorkbenchController {
       legacyAdoptionStateAndFingerprint: settings.legacyVerificationAdoption,
       primaryAction,
       selectedGroupKeys: this.model?.selectedVerificationGroupKeys ?? [],
+      verificationRoot: this.model?.verificationRoot ?? "",
+      verificationDirectorySelection: this.model?.verificationDirectorySelection ?? null,
       batchId: batch?.batchId ?? null,
       runOrdinal: batch?.runOrdinal ?? null,
       hybridMessageCode: hybrid?.messageCode ?? null,
@@ -3623,6 +3777,11 @@ export class WorkbenchController {
     const settings = this.dependencies.store.settings();
     const connection = this.dependencies.catalog.connection?.snapshot();
     const hybrid = this.dependencies.catalog.hybrid?.snapshot();
+    const executionKey = taskExecutionKey(hybrid);
+    if (
+      this.taskPauseExecutionKey !== null
+      && this.taskPauseExecutionKey !== executionKey
+    ) this.taskPauseExecutionKey = null;
     const workflow = deriveLibraryWorkflowState({
       connection,
       hybrid,
@@ -3651,6 +3810,8 @@ export class WorkbenchController {
       pendingCatalogTxt: this.pendingCatalogTxt === null ? null : clone(this.pendingCatalogTxt),
       taskActionPending: this.taskActionNonce !== null,
       taskActionRevision,
+      taskPauseRequested: this.taskPauseExecutionKey !== null,
+      boundLibraryPath: settings.boundCloudLibrary?.path ?? null,
       workflow,
     };
   }

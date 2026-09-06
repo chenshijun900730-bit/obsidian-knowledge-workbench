@@ -182,6 +182,8 @@ export function populatedWorkbenchModel(): WorkbenchViewModel {
     pendingCatalogTxt: null,
     taskActionPending: false,
     taskActionRevision: 1,
+    taskPauseRequested: false,
+    boundLibraryPath: null,
     workflow: TEST_NEEDS_TXT_WORKFLOW,
     verificationRoot: "",
     verificationRootLocked: false,
@@ -289,6 +291,11 @@ export function noOpWorkbenchActions(overrides: Partial<WorkbenchActions> = {}):
     onStartSelectedVerification: async () => undefined,
     onResumeSelectedVerification: async () => undefined,
     onCancelSelectedVerification: () => undefined,
+    onTaskPrimary: () => undefined,
+    onTaskChooseDifferentCategory: () => undefined,
+    onTaskSaveCategorySelection: () => undefined,
+    onTaskCancelCategorySelection: () => undefined,
+    onTaskOpenDetails: () => undefined,
     ...overrides,
   };
 }

@@ -16,7 +16,10 @@ import type {
   CloudCatalogConnectionViewModel,
   CloudCatalogViewModel,
 } from "../catalog/cloud-catalog-runtime";
-import type { HybridCatalogViewModel } from "../catalog/hybrid-catalog-runtime";
+import type {
+  HybridCatalogGroupViewModel,
+  HybridCatalogViewModel,
+} from "../catalog/hybrid-catalog-runtime";
 import type {
   CatalogDifferenceKind,
   CatalogVerificationStatus,
@@ -35,6 +38,7 @@ import {
 } from "./workbench-route";
 import type { SettingsSectionsSurface } from "./settings-sections";
 import {
+  renderVerificationCategoryEditor,
   renderVerificationPage,
   type VerificationPageSurface,
 } from "./verification-page";
@@ -51,6 +55,8 @@ import {
   renderLibraryPage,
   type RecentLibraryItem,
 } from "./library-page";
+import { renderTaskPage } from "./task-page";
+import { createLocalCatalogTxtPicker } from "./local-catalog-txt-picker";
 import type {
   DisposableSurface,
   FolderSelectionHostActions,
@@ -81,6 +87,8 @@ export interface WorkbenchViewModel {
   readonly pendingCatalogTxt: PendingCatalogTxtDraft | null;
   readonly taskActionPending: boolean;
   readonly taskActionRevision: number;
+  readonly taskPauseRequested: boolean;
+  readonly boundLibraryPath: string | null;
   readonly workflow: LibraryWorkflowState;
   readonly folderSelection?: FolderSelectionRenderState;
   readonly verificationRoot: string;
@@ -146,6 +154,14 @@ export interface WorkbenchActions {
   readonly onStartSelectedVerification: () => Promise<void>;
   readonly onResumeSelectedVerification: () => Promise<void>;
   readonly onCancelSelectedVerification: () => void;
+  readonly onTaskPrimary: (revision: number) => Promise<void> | void;
+  readonly onTaskChooseDifferentCategory: () => void;
+  readonly onTaskSaveCategorySelection: (
+    revision: number,
+    input: Readonly<{ rootPath: string; groupKeys: readonly string[] }>,
+  ) => void;
+  readonly onTaskCancelCategorySelection: () => void;
+  readonly onTaskOpenDetails: () => void;
   readonly onBrowseVerificationRoot?: () => Promise<CloudDirectorySelection | null>;
   readonly onApplyVerificationDirectorySelection?: (selection: CloudDirectorySelection) => void;
   readonly onOpenVerificationFolderSelection?: () => void;
@@ -236,6 +252,34 @@ const verificationPickerPurpose = (
       rootRelativePath: group.rootRelativePath,
       label: group.label,
     })),
+});
+
+const visibleTaskGroupScope = (
+  model: WorkbenchViewModel,
+): readonly HybridCatalogGroupViewModel[] => {
+  const groups = model.hybridCatalog?.active?.groups ?? [];
+  const byKey = new Map(groups.map((group) => [group.groupKey, group]));
+  const batchOwnsScope = ["running", "paused", "retry-later"].includes(model.workflow.kind);
+  const keys = batchOwnsScope && model.hybridCatalog?.batch !== undefined
+    ? model.hybridCatalog.batch.selectedGroupKeys
+    : model.selectedVerificationGroupKeys.length > 0
+      ? model.selectedVerificationGroupKeys
+      : model.workflow.recommendedGroup === null
+        ? []
+        : [model.workflow.recommendedGroup.groupKey];
+  return keys.flatMap((key) => {
+    const group = byKey.get(key);
+    return group === undefined ? [] : [{ ...group }];
+  });
+};
+
+const acceptanceTaskWorkflow = (): LibraryWorkflowState => ({
+  kind: "unavailable",
+  primaryAction: "open-library",
+  titleKey: "workflow.unavailable.title",
+  descriptionKey: "workflow.unavailable.description",
+  recommendedGroup: null,
+  canShowTechnicalDetails: true,
 });
 
 const disposeVerificationPage = (root: HTMLElement): void => {
@@ -443,30 +487,45 @@ export function renderWorkbench(
         },
       }));
     }
-  } else if (model.route.tab === "task") {
-    verificationPageSurfaces.set(root, renderVerificationPage(panel, {
+  } else if (
+    model.route.tab === "task"
+    && model.route.page === "category-selection"
+  ) {
+    const groups = model.hybridCatalog?.active?.groups ?? [];
+    const selectedGroupKeys = model.selectedVerificationGroupKeys.length > 0
+      ? model.selectedVerificationGroupKeys
+      : model.workflow.recommendedGroup === null
+        ? []
+        : [model.workflow.recommendedGroup.groupKey];
+    verificationPageSurfaces.set(root, renderVerificationCategoryEditor(panel, {
       i18n,
-      rootPath: model.verificationRoot,
-      directorySelection: model.verificationDirectorySelection,
-      rootLocked: model.verificationRootLocked,
-      actionMessageCode: model.verificationActionMessageCode,
-      runDetailsOpen: verificationRunDetailsOpen,
-      selectedGroupKeys: model.selectedVerificationGroupKeys,
-      connection: model.catalogConnection,
-      hybrid: model.hybridCatalog,
-      actions: {
-        onRootChange: surfaceActions.onSetVerificationRoot,
-        onToggleGroup: surfaceActions.onToggleVerificationGroup,
-        onStart: surfaceActions.onStartSelectedVerification,
-        onResume: surfaceActions.onResumeSelectedVerification,
-        onCancel: surfaceActions.onCancelSelectedVerification,
-        onDirectorySelection: surfaceActions.onApplyVerificationDirectorySelection
-          ?? (() => undefined),
-        ...(surfaceActions.onBrowseVerificationRoot === undefined ? {} : {
-          onBrowseRoot: surfaceActions.onBrowseVerificationRoot,
-        }),
-      },
+      groups,
+      selectedGroupKeys,
+      rootPath: model.verificationRoot || model.boundLibraryPath || "",
+      expectedRootPath: model.boundLibraryPath || "",
+    }, {
+      onSave: (input) => surfaceActions.onTaskSaveCategorySelection(
+        model.taskActionRevision,
+        input,
+      ),
+      onCancel: surfaceActions.onTaskCancelCategorySelection,
     }));
+  } else if (model.route.tab === "task") {
+    const taskWorkflow = readOnlyAcceptance ? acceptanceTaskWorkflow() : model.workflow;
+    renderTaskPage(panel, {
+      i18n,
+      workflow: taskWorkflow,
+      boundLibraryPath: model.boundLibraryPath,
+      visibleGroupScope: readOnlyAcceptance ? [] : visibleTaskGroupScope(model),
+      taskActionRevision: model.taskActionRevision,
+      hybrid: model.hybridCatalog,
+      actionPending: model.taskActionPending,
+      pauseRequested: model.taskPauseRequested,
+    }, {
+      onPrimary: surfaceActions.onTaskPrimary,
+      onChooseDifferentCategory: surfaceActions.onTaskChooseDifferentCategory,
+      onOpenDetails: surfaceActions.onTaskOpenDetails,
+    });
   } else if (model.route.page === "history") {
     renderHistory(panel, model.history ?? { entries: [] }, {
       onUndo: surfaceActions.onUndoHistory ?? (() => undefined),
@@ -550,6 +609,15 @@ export interface WorkbenchViewController {
   startSelectedVerification(): Promise<void>;
   resumeSelectedVerification(): Promise<void>;
   cancelSelectedVerification(): void;
+  performTaskPrimaryAction?(expectedRevision: number): Promise<void>;
+  performTaskTxtSelection?(
+    expectedRevision: number,
+    requestPath: () => Promise<string | null>,
+  ): Promise<void>;
+  saveTaskCategorySelection?(
+    expectedRevision: number,
+    input: Readonly<{ rootPath: string; groupKeys: readonly string[] }>,
+  ): void;
   selectCenter(center: Readonly<{ kind: "document" | "topic"; id: string }>): Promise<void>;
   previewSuggestion(suggestionId: string): Promise<void>;
   previewSuggestionIds(suggestionIds: readonly string[]): Promise<void>;
@@ -575,6 +643,7 @@ export function createWorkbenchViewClass(
 ) {
   return class WorkbenchView extends ItemViewBase {
     private unsubscribe: (() => void) | null = null;
+    private readonly localCatalogTxtPicker = createLocalCatalogTxtPicker();
 
     constructor(
       leaf: WorkspaceLeaf,
@@ -681,6 +750,41 @@ export function createWorkbenchViewClass(
         onStartSelectedVerification: () => this.controller.startSelectedVerification(),
         onResumeSelectedVerification: () => this.controller.resumeSelectedVerification(),
         onCancelSelectedVerification: () => this.controller.cancelSelectedVerification(),
+        onTaskPrimary: (revision) => this.runTaskAction(async () => {
+          if (
+            policy.mode === "normal"
+            && this.controller.snapshot().workflow.primaryAction === "choose-txt"
+          ) {
+            const select = this.controller.performTaskTxtSelection?.bind(this.controller);
+            if (select === undefined) throw new Error("catalog-unavailable");
+            await select(
+              revision,
+              () => this.localCatalogTxtPicker.request(this.contentEl),
+            );
+            return;
+          }
+          const perform = this.controller.performTaskPrimaryAction?.bind(this.controller);
+          if (perform === undefined) throw new Error("catalog-unavailable");
+          await perform(revision);
+        }),
+        onTaskChooseDifferentCategory: () => this.controller.selectRoute({
+          tab: "task",
+          page: "category-selection",
+        }),
+        onTaskSaveCategorySelection: (revision, input) => {
+          try {
+            const save = this.controller.saveTaskCategorySelection?.bind(this.controller);
+            if (save === undefined) throw new Error("catalog-unavailable");
+            save(revision, input);
+          } catch {
+            this.controller.reportError("host.action.taskFailed");
+          }
+        },
+        onTaskCancelCategorySelection: () => this.controller.selectRoute({
+          tab: "task",
+          page: "overview",
+        }),
+        onTaskOpenDetails: () => undefined,
         ...(openFolderSelection === undefined
           ? (chooseCatalogRoot === undefined ? {} : {
               onBrowseVerificationRoot: () => chooseCatalogRoot({
@@ -709,6 +813,14 @@ export function createWorkbenchViewClass(
         });
       } catch {
         this.controller.reportError(labelKey);
+      }
+    }
+
+    private async runTaskAction(operation: () => Promise<void>): Promise<void> {
+      try {
+        await operation();
+      } catch {
+        this.controller.reportError("host.action.taskFailed");
       }
     }
 

@@ -88,6 +88,8 @@ const modelFor = (route: WorkbenchRoute): WorkbenchViewModel => ({
   pendingCatalogTxt: null,
   taskActionPending: false,
   taskActionRevision: 1,
+  taskPauseRequested: false,
+  boundLibraryPath: null,
   workflow: TEST_NEEDS_TXT_WORKFLOW,
   verificationRoot: "",
   verificationRootLocked: false,
@@ -184,6 +186,11 @@ const workbenchActions = (
   onStartSelectedVerification: vi.fn(async () => undefined),
   onResumeSelectedVerification: vi.fn(async () => undefined),
   onCancelSelectedVerification: vi.fn(),
+  onTaskPrimary: vi.fn(),
+  onTaskChooseDifferentCategory: vi.fn(),
+  onTaskSaveCategorySelection: vi.fn(),
+  onTaskCancelCategorySelection: vi.fn(),
+  onTaskOpenDetails: vi.fn(),
   ...overrides,
 });
 
@@ -335,6 +342,10 @@ describe("read-only acceptance surfaces", () => {
         expect(selectRoute).not.toHaveBeenCalled();
         root.querySelector<HTMLButtonElement>('[data-action="open-library-task"]')?.click();
         expect(selectRoute).toHaveBeenCalledWith({ tab: "task", page: "overview" });
+      } else if (route.tab === "task") {
+        expect(root.querySelectorAll("[data-task-primary]")).toHaveLength(1);
+        expect(root.querySelector("[data-task-primary]")?.textContent).toBe("去文库搜索");
+        expect(root.textContent).not.toContain("选择目录 TXT");
       }
     }
 
