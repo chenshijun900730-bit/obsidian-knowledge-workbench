@@ -50,6 +50,12 @@ const deferred = () => {
   return { promise, resolve };
 };
 
+const rejectedDeferred = () => {
+  let reject!: (error: Error) => void;
+  const promise = new Promise<void>((_resolve, fail) => { reject = fail; });
+  return { promise, reject };
+};
+
 const makeTab = (options: Readonly<{ fail?: Error }> = {}) => {
   const saves: unknown[] = [];
   const sessions: boolean[] = [];
@@ -358,6 +364,54 @@ describe("native task handoff", () => {
       .toBe("任务页未能打开；设置仍可用，请重试。");
     },
   );
+
+  it("ignores an old rejected handoff after redisplay and disposes the new surface once on hide", async () => {
+    const handoff = rejectedDeferred();
+    const firstUnsubscribe = vi.fn();
+    const secondUnsubscribe = vi.fn();
+    const unsubscribes = [firstUnsubscribe, secondUnsubscribe];
+    const subscribe = vi.fn(() => unsubscribes.shift()!);
+    const SettingsTab = createSettingsTabClass(
+      SettingsSurface as unknown as PluginSettingTabConstructor,
+      SecretSurface,
+      NORMAL_RUNTIME_POLICY,
+    );
+    const controller = {
+      settings: () => ({
+        writeEnabled: false, writePreviewAcknowledged: false, locale: "zh-CN" as const,
+        openAtStartup: false, folderRules: [], excludedPrefixes: [], aiEnabled: false,
+        aiEndpoint: "", aiModel: "", secretId: "", recentCloudDirectories: EMPTY_RECENT_CLOUD_DIRECTORIES,
+        boundCloudLibrary: null, cloudVerificationGeneration: 0,
+        verificationBatchTombstones: { schemaVersion: 1, state: "valid", batchIds: [] } as const,
+        legacyVerificationAdoption: { schemaVersion: 1, state: "none" } as const,
+      }),
+      folderRuleProposals: () => [], previewSampleChange: () => undefined,
+      setOpenAtStartup: async () => undefined, setLocale: async () => undefined,
+      setWriteEnabled: async () => undefined, applyFolderRules: async () => undefined,
+      setExcludedPrefixes: async () => undefined,
+      catalogConnection: () => ({ status: "authorized" as const }),
+      subscribeCatalogConnection: subscribe,
+      connectCatalog: async () => undefined, submitCatalogAuthorizationCode: async () => undefined,
+      cancelCatalogAuthorization: () => undefined, revokeCatalog: async () => undefined,
+      validateCatalogScanRoot: (path: string) => path,
+      requestCatalogScan: async () => undefined,
+    };
+    const tab = new SettingsTab({} as App, {} as never, controller, () => handoff.promise);
+    (tab as unknown as { display(): void; hide(): void }).display();
+    tab.containerEl.querySelector<HTMLButtonElement>('[data-action="open-task-overview"]')?.click();
+    expect(firstUnsubscribe).toHaveBeenCalledOnce();
+
+    (tab as unknown as { display(): void }).display();
+    expect(subscribe).toHaveBeenCalledTimes(2);
+    handoff.reject(new Error("stale host failure"));
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(tab.containerEl.querySelector('[data-task-handoff-error="true"]')).toBeNull();
+    expect(tab.containerEl.querySelector('[data-catalog-app-key="true"]')).not.toBeNull();
+
+    (tab as unknown as { hide(): void }).hide();
+    expect(secondUnsubscribe).toHaveBeenCalledOnce();
+  });
 });
 
 describe("native catalog settings", () => {

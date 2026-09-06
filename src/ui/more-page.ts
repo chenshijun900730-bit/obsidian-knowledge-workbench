@@ -73,4 +73,7 @@ export function renderMorePage(root: HTMLElement, model: MorePageModel): void {
   appendRow(root, i18n.t("more.advanced.title"), i18n.t("more.advanced.summary"), {
     tab: "more", page: "advanced",
   }, model.onSelectRoute);
+  appendRow(root, i18n.t("settings.section.privacyAi"), i18n.t("settings.section.privacyAi.summary"), {
+    tab: "more", page: "privacy-ai",
+  }, model.onSelectRoute);
 }

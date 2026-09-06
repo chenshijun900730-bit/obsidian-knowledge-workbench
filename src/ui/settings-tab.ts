@@ -35,6 +35,8 @@ export function createSettingsTabClass(
 ) {
   return class KnowledgeWorkbenchSettingsTab extends PluginSettingTabBase {
     private readonly surface: SettingsSectionsSurface;
+    private displayGeneration = 0;
+    private renderedGeneration: number | null = null;
 
     constructor(
       app: App,
@@ -51,9 +53,10 @@ export function createSettingsTabClass(
           ? undefined
           : (hostApp, root) => new PrivateCredentialInputBase(hostApp, root),
         onOpenTaskOverview: () => {
-          this.surface.dispose();
+          const generation = this.displayGeneration;
+          this.disposeSurfaceFor(generation);
           if (this.openTaskOverview !== undefined) {
-            void this.openTaskOverview().catch(() => this.showHandoffFailure());
+            void this.openTaskOverview().catch(() => this.showHandoffFailure(generation));
           }
         },
       }, presentCatalogProgress);
@@ -66,14 +69,32 @@ export function createSettingsTabClass(
     }
 
     display(): void {
+      this.disposeRenderedSurface();
+      this.displayGeneration += 1;
       this.surface.render(this.containerEl, this.controller.settings().locale);
+      this.renderedGeneration = this.displayGeneration;
     }
 
     hide(): void {
-      this.surface.dispose();
+      this.displayGeneration += 1;
+      this.disposeRenderedSurface();
     }
 
-    private showHandoffFailure(): void {
+    private disposeRenderedSurface(): void {
+      if (this.renderedGeneration === null) return;
+      this.surface.dispose();
+      this.renderedGeneration = null;
+    }
+
+    private disposeSurfaceFor(generation: number): void {
+      if (this.renderedGeneration !== generation) return;
+      this.surface.dispose();
+      this.renderedGeneration = null;
+    }
+
+    private showHandoffFailure(generation: number): void {
+      if (generation !== this.displayGeneration) return;
+      this.disposeSurfaceFor(generation);
       const error = this.containerEl.ownerDocument.createElement("p");
       error.dataset.taskHandoffError = "true";
       error.setAttribute("role", "status");

@@ -15,7 +15,8 @@ export type WorkbenchRoute =
         | "language"
         | "history"
         | "knowledge-tools"
-        | "advanced";
+        | "advanced"
+        | "privacy-ai";
     }>;
 
 export const defaultWorkbenchRoute = (): WorkbenchRoute => ({ tab: "library" });

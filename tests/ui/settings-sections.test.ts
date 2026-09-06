@@ -706,10 +706,57 @@ describe("shared grouped settings surface", () => {
       app: {} as App,
       controller,
       policy: NORMAL_RUNTIME_POLICY,
-    }, presentCatalogProgress).render(root, locale);
+    }, presentCatalogProgress).render(root, locale, { section: "cloud-scan-advanced" });
 
     expect(root.querySelector('[data-catalog-scan-status="true"]')?.textContent).toBe(expectedStatus);
     expect(root.querySelector('[data-catalog-pdf-progress="true"]')?.textContent).toBe(expectedPdf);
     expect(root.querySelector('[data-catalog-time-progress="true"]')?.textContent).toBe(expectedTime);
+  });
+
+  it("keeps the shared scan lifecycle visible in More while scanning and exposes cancel", () => {
+    let connection: ReturnType<NonNullable<SettingsController["catalogConnection"]>> = {
+      status: "authorized",
+    };
+    let notifyConnection: (() => void) | undefined;
+    const cancelCatalogScan = vi.fn();
+    const controller = connectedControllerFixture({
+      catalogConnection: () => connection,
+      subscribeCatalogConnection: (listener) => {
+        notifyConnection = listener;
+        return () => undefined;
+      },
+      cancelCatalogScan,
+    });
+    const root = createTestDiv();
+    createSettingsSectionsSurface({
+      app: {} as App,
+      controller,
+      policy: NORMAL_RUNTIME_POLICY,
+    }, presentCatalogProgress).render(root, "zh-CN", { section: "cloud-scan-advanced" });
+
+    const input = root.querySelector<HTMLInputElement>('[data-catalog-scan-root="true"]')!;
+    const start = root.querySelector<HTMLButtonElement>('[data-action="catalog-start-scan"]')!;
+    const cancel = root.querySelector<HTMLButtonElement>('[data-action="catalog-cancel-scan"]')!;
+    input.value = "/session/library";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    expect(start.disabled).toBe(false);
+    expect(cancel.hidden).toBe(true);
+
+    connection = {
+      status: "scanning",
+      scanProgress: {
+        status: "scanning", directoryCount: 2, completedDirectoryCount: 1,
+        pdfCount: 3, ignoredFileCount: 0, pendingDirectoryCount: 1,
+        listRequestCount: 2, elapsedMs: 10, budget: SMALL_ACCEPTANCE_CATALOG_SCAN_BUDGET,
+        stopReason: undefined,
+      },
+    };
+    notifyConnection?.();
+    expect(root.querySelector('[data-catalog-scan-status="true"]')?.textContent).toContain("扫描");
+    expect(input.disabled).toBe(true);
+    expect(start.disabled).toBe(true);
+    expect(cancel.hidden).toBe(false);
+    cancel.click();
+    expect(cancelCatalogScan).toHaveBeenCalledOnce();
   });
 });

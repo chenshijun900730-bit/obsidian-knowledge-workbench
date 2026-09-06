@@ -28,11 +28,13 @@ describe("More summary", () => {
     expect(root.textContent).toContain("笔记改动");
     expect(root.textContent).toContain("高级功能");
     const actions = Array.from(root.querySelectorAll<HTMLButtonElement>("button"));
-    expect(actions).toHaveLength(6);
+    expect(actions).toHaveLength(7);
     actions[0]?.click();
     expect(onSelectRoute).toHaveBeenCalledWith({ tab: "more", page: "connection" });
-    actions.at(-1)?.click();
+    actions.at(-2)?.click();
     expect(onSelectRoute).toHaveBeenLastCalledWith({ tab: "more", page: "advanced" });
+    actions.at(-1)?.click();
+    expect(onSelectRoute).toHaveBeenLastCalledWith({ tab: "more", page: "privacy-ai" });
     expect(createWorkbenchI18n("zh-CN").t("history.title")).toBe("笔记改动");
   });
 });

@@ -311,6 +311,7 @@ const settingsSectionForRoute = (route: WorkbenchRoute) => {
     case "catalog-data": return "catalog-data" as const;
     case "language": return "language" as const;
     case "advanced": return "cloud-scan-advanced" as const;
+    case "privacy-ai": return "privacy-ai" as const;
     default: return undefined;
   }
 };
@@ -580,6 +581,13 @@ export function renderWorkbench(
         onOpenTaskOverview: () => surfaceActions.onOpenTaskOverview?.(),
       });
       if (model.route.tab === "more" && model.route.page === "advanced") {
+        const privacyAi = doc.createElement("button");
+        privacyAi.type = "button";
+        privacyAi.dataset.action = "open-privacy-ai";
+        privacyAi.textContent = i18n.t("settings.section.privacyAi");
+        privacyAi.addEventListener("click", () => surfaceActions.onSelectRoute({
+          tab: "more", page: "privacy-ai",
+        }));
         const knowledgeTools = doc.createElement("button");
         knowledgeTools.type = "button";
         knowledgeTools.dataset.action = "open-knowledge-tools";
@@ -587,7 +595,7 @@ export function renderWorkbench(
         knowledgeTools.addEventListener("click", () => surfaceActions.onSelectRoute({
           tab: "more", page: "knowledge-tools",
         }));
-        subpage.prepend(knowledgeTools);
+        subpage.prepend(knowledgeTools, privacyAi);
       }
     }
     settingsPageSurfaces.set(root, settingsSurface);

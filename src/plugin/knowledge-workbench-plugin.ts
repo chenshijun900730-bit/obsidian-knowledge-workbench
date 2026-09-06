@@ -15,7 +15,7 @@ import {
   initializeRecoveredLayout,
   LifecycleEpoch,
   ObsidianWorkspaceAdapter,
-  closeObsidianSettingsIfSupported,
+  handoffFromObsidianSettings,
   requireActivatedWorkbench,
   RetryableAsyncGate,
   runVisibleHostAction,
@@ -246,25 +246,19 @@ export function createKnowledgeWorkbenchPluginClass(runtime: RuntimeComposition)
         getLocale,
         async () => {
           controller.selectRoute({ tab: "task", page: "overview" });
-          let settingsClosed = false;
-          try {
-            settingsClosed = closeObsidianSettingsIfSupported(this.app);
-          } catch {
-            new Notice(createWorkbenchI18n(getLocale()).t("host.settings.handoffFailed"));
-          }
-          if (!settingsClosed) {
-            new Notice(createWorkbenchI18n(getLocale()).t("host.settings.closeGuidance"));
-          }
-          try {
-            await requireActivatedWorkbench(
-              this.app,
-              (view) => view instanceof ConcreteWorkbenchView,
-              () => controller.reportError("host.action.openWorkbenchFailed" satisfies HostActionMessageKey),
-            );
-          } catch (error) {
-            new Notice(createWorkbenchI18n(getLocale()).t("host.settings.handoffFailed"));
-            throw error;
-          }
+          const i18n = createWorkbenchI18n(getLocale());
+          await handoffFromObsidianSettings({
+            app: this.app,
+            isExpectedView: (view) => view instanceof ConcreteWorkbenchView,
+            reportUnavailable: () => controller.reportError(
+              "host.action.openWorkbenchFailed" satisfies HostActionMessageKey,
+            ),
+            notify: (message) => new Notice(i18n.t(
+              message === "handoff-failed"
+                ? "host.settings.handoffFailed"
+                : "host.settings.closeGuidance",
+            )),
+          });
         },
       ));
       this.app.workspace.onLayoutReady(() => {

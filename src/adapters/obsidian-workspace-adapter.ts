@@ -1,4 +1,4 @@
-import type { App, TFile, WorkspaceLeaf } from "obsidian";
+import type { App, TFile } from "obsidian";
 import { VIEW_TYPE } from "../constants";
 import type { WorkspacePort } from "../core/ports";
 
@@ -125,10 +125,7 @@ export async function activateWorkbench(app: App): Promise<void> {
     await leaf.setViewState({ type: VIEW_TYPE, active: true });
   }
   await app.workspace.revealLeaf(leaf);
-  const workspace = app.workspace as unknown as Readonly<{
-    setActiveLeaf?: (target: WorkspaceLeaf, focus?: boolean, reveal?: boolean) => void;
-  }>;
-  workspace.setActiveLeaf?.(leaf, true, true);
+  app.workspace.setActiveLeaf?.(leaf, { focus: true });
 }
 
 /** Narrow feature check for Obsidian's undocumented Settings close capability. */
@@ -140,6 +137,32 @@ export function closeObsidianSettingsIfSupported(app: App): boolean {
   if (typeof close !== "function") return false;
   close.call(host.setting);
   return true;
+}
+
+/** Host-only Settings handoff; callers supply localized, visible feedback. */
+export async function handoffFromObsidianSettings(input: Readonly<{
+  app: App;
+  isExpectedView: (view: unknown) => boolean;
+  reportUnavailable: (message: string) => void;
+  notify: (message: "handoff-failed" | "close-guidance") => void;
+}>): Promise<void> {
+  let settingsClosed = false;
+  try {
+    settingsClosed = closeObsidianSettingsIfSupported(input.app);
+  } catch {
+    input.notify("handoff-failed");
+  }
+  if (!settingsClosed) input.notify("close-guidance");
+  try {
+    await requireActivatedWorkbench(
+      input.app,
+      input.isExpectedView,
+      input.reportUnavailable,
+    );
+  } catch (error) {
+    input.notify("handoff-failed");
+    throw error;
+  }
 }
 
 export async function activateWorkbenchWithRetry(

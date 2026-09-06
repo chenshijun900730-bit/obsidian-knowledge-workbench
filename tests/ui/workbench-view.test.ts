@@ -362,6 +362,7 @@ describe("workbench", () => {
       "catalog-data",
       "language",
       "advanced",
+      "privacy-ai",
     ] as const) {
       renderWorkbench(root, {
         ...base,
@@ -400,10 +401,12 @@ describe("workbench", () => {
     root.querySelector<HTMLButtonElement>('[data-action="open-task-overview"]')?.click();
     root.querySelector<HTMLButtonElement>('[data-action="more-back"]')?.click();
     root.querySelector<HTMLButtonElement>('[data-action="open-knowledge-tools"]')?.click();
+    root.querySelector<HTMLButtonElement>('[data-action="open-privacy-ai"]')?.click();
     expect(openTaskOverview).toHaveBeenCalledOnce();
     expect(routes).toEqual([
       { tab: "more", page: "overview" },
       { tab: "more", page: "knowledge-tools" },
+      { tab: "more", page: "privacy-ai" },
     ]);
   });
 
@@ -3001,7 +3004,7 @@ describe("workbench", () => {
     await activateWorkbench({ workspace } as unknown as App);
     expect(leaf.setViewStateCalls).toBe(1);
     expect(workspace.revealCalls).toEqual([leaf]);
-    expect(workspace.setActiveLeaf).toHaveBeenCalledWith(leaf, true, true);
+    expect(workspace.setActiveLeaf).toHaveBeenCalledWith(leaf, { focus: true });
     expect(workspace.getLeavesOfType()[0]?.view).toBe(view);
 
     await activateWorkbench({ workspace } as unknown as App);

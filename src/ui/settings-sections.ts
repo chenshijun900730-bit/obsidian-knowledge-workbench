@@ -560,71 +560,161 @@ export function createSettingsSectionsSurface(
       privacyAiSection.content.append(exclusions);
       }
 
-      const renderScanOnlySection = (): void => {
+      const renderSharedScanControls = (
+        target: HTMLElement,
+        onConnectionRender?: (connection: CloudCatalogConnectionViewModel | undefined) => void,
+      ): void => {
         if (
-          policy.configuration === "read-only"
-          || controller.validateCatalogScanRoot === undefined
+          controller.validateCatalogScanRoot === undefined
           || controller.requestCatalogScan === undefined
         ) return;
+        const validateCatalogScanRoot = controller.validateCatalogScanRoot.bind(controller);
+        const requestCatalogScan = controller.requestCatalogScan.bind(controller);
+        const catalogProgress = doc.createElement("div");
+        catalogProgress.className = "knowledge-workbench__catalog-progress";
+        const scanStatus = doc.createElement("p");
+        scanStatus.dataset.catalogScanStatus = "true";
+        const pdfProgress = doc.createElement("p");
+        pdfProgress.dataset.catalogPdfProgress = "true";
+        const directoryProgress = doc.createElement("p");
+        directoryProgress.dataset.catalogDirectoryProgress = "true";
+        const requestProgress = doc.createElement("p");
+        requestProgress.dataset.catalogRequestProgress = "true";
+        const timeProgress = doc.createElement("p");
+        timeProgress.dataset.catalogTimeProgress = "true";
+        const stopReason = doc.createElement("p");
+        stopReason.dataset.catalogStopReason = "true";
+        catalogProgress.append(
+          scanStatus,
+          pdfProgress,
+          directoryProgress,
+          requestProgress,
+          timeProgress,
+          stopReason,
+        );
+        const interactionLocked = policy.configuration === "read-only";
+        const initialConnection = controller.catalogConnection?.();
+        let scanBusy = initialConnection?.status === "scanning";
+        let scanActionPending = false;
+        let recomputeScanActions = (): void => undefined;
         const field = createCloudDirectoryField(doc, i18n, {
           path: this.catalogScanRootDraft,
           selection: this.catalogScanDirectorySelection,
-          disabled: false,
+          disabled: interactionLocked || scanBusy,
           locked: false,
         }, {
-          onChoose: async () => (
-            await controller.chooseCatalogRoot?.({
+          onChoose: async () => {
+            const selection = await (controller.chooseCatalogRoot?.({
               initialRoot: this.catalogScanRootDraft,
               purpose: { kind: "scan" },
-            }) ?? null
-          ),
+            }) ?? Promise.resolve(null));
+            return selection?.kind === "directory" ? selection : null;
+          },
           onSelection: (selection) => {
             if (selection.kind !== "directory") return;
             this.catalogScanDirectorySelection = structuredClone(selection);
             this.catalogScanRootDraft = selection.effectiveRoot;
-            updateStart();
+            queueMicrotask(() => {
+              if (isCurrent()) recomputeScanActions();
+            });
           },
           onManualChange: (value) => {
             this.catalogScanDirectorySelection = undefined;
             this.catalogScanRootDraft = value;
-            updateStart();
+            recomputeScanActions();
           },
-          onValidate: controller.validateCatalogScanRoot.bind(controller),
+          onValidate: validateCatalogScanRoot,
         });
         this.cloudDirectoryFields.add(field);
         field.manualInput.dataset.catalogScanRoot = "true";
+        field.manualInput.dataset.focusKey = "settings-catalog-scan-root";
+        trackSessionInput(field.manualInput);
+        field.chooseButton.dataset.action = "browse-catalog-scan-root";
+        field.chooseButton.dataset.focusKey = "settings-catalog-scan-root-choose";
+        field.root.querySelector<HTMLButtonElement>(
+          '[data-action="validate-cloud-directory"]',
+        )?.setAttribute("data-action", "catalog-validate-root");
+        if (controller.chooseCatalogRoot === undefined) {
+          field.chooseButton.hidden = true;
+          field.chooseButton.disabled = true;
+        }
         const actions = doc.createElement("div");
         actions.className = "knowledge-workbench__settings-row";
-        let scanActionPending = false;
         const start = button(i18n.t("settings.surface.startScan"), () => {
           if (start.disabled || scanActionPending) return;
           scanActionPending = true;
-          updateStart();
-          void run("settings.save.cloudScan", () => controller.requestCatalogScan!(
+          recomputeScanActions();
+          void run("settings.save.cloudScan", () => requestCatalogScan(
             this.catalogScanRootDraft,
             () => {
               this.catalogScanRootDraft = "";
               this.catalogScanDirectorySelection = undefined;
               field.setPath("");
-              updateStart();
+              recomputeScanActions();
             },
           ), actions, undefined, "settings.error.cloudUnavailable").finally(() => {
             if (!isCurrent()) return;
             scanActionPending = false;
-            updateStart();
+            recomputeScanActions();
           });
         });
         start.dataset.action = "catalog-start-scan";
-        const updateStart = (): void => {
-          const connection = controller.catalogConnection?.();
-          start.disabled = !field.valid()
-            || scanActionPending
-            || !connectionCanVerify(connection)
-            || connection?.messageCode !== undefined;
-        };
-        updateStart();
         actions.append(start);
-        verificationSection.content.append(field.root, actions);
+        let cancel: HTMLButtonElement | undefined;
+        if (controller.cancelCatalogScan !== undefined) {
+          cancel = button(i18n.t("settings.surface.cancelScan"), () => controller.cancelCatalogScan?.());
+          cancel.dataset.action = "catalog-cancel-scan";
+          actions.append(cancel);
+        }
+        const renderScanConnection = (): void => {
+          if (!isCurrent()) return;
+          const current = controller.catalogConnection?.();
+          const empty = i18n.t("progress.empty");
+          const progress = presentCatalogProgress?.(current, i18n) ?? {
+            scanStatus: i18n.t("progress.scan.status", { status: empty }),
+            pdfProgress: i18n.t("progress.scan.pdf", { current: empty, maximum: empty }),
+            directoryProgress: i18n.t("progress.scan.directory", { current: empty, maximum: empty }),
+            requestProgress: i18n.t("progress.scan.request", { current: empty, maximum: empty }),
+            timeProgress: i18n.t("progress.scan.elapsed", { current: empty, maximum: empty }),
+            stopReason: i18n.t("progress.scan.stopReason", { reason: empty }),
+          };
+          scanStatus.textContent = progress.scanStatus;
+          pdfProgress.textContent = progress.pdfProgress;
+          directoryProgress.textContent = progress.directoryProgress;
+          requestProgress.textContent = progress.requestProgress;
+          timeProgress.textContent = progress.timeProgress;
+          stopReason.textContent = progress.stopReason;
+          scanBusy = current?.status === "scanning";
+          field.updateState({ disabled: interactionLocked || scanBusy, locked: false });
+          if (controller.chooseCatalogRoot === undefined) {
+            field.chooseButton.hidden = true;
+            field.chooseButton.disabled = true;
+          }
+          recomputeScanActions = () => {
+            const latest = controller.catalogConnection?.();
+            start.disabled = interactionLocked
+              || scanActionPending
+              || scanBusy
+              || !connectionCanVerify(latest)
+              || latest?.messageCode !== undefined
+              || !field.valid();
+          };
+          recomputeScanActions();
+          if (cancel !== undefined) {
+            cancel.hidden = !scanBusy;
+            cancel.disabled = !scanBusy;
+          }
+          onConnectionRender?.(current);
+        };
+        renderScanConnection();
+        this.unsubscribeCatalogConnection = controller.subscribeCatalogConnection?.(
+          renderScanConnection,
+        ) ?? null;
+        target.append(catalogProgress, field.root, actions);
+      };
+
+      const renderScanOnlySection = (): void => {
+        renderSharedScanControls(verificationSection.content);
       };
 
       const catalog = doc.createElement("section");
@@ -662,35 +752,11 @@ export function createSettingsSectionsSurface(
         const cancelCatalogAuthorization = controller.cancelCatalogAuthorization
           .bind(controller);
         const revokeCatalog = controller.revokeCatalog.bind(controller);
-        const validateCatalogScanRoot = controller.validateCatalogScanRoot.bind(controller);
-        const requestCatalogScan = controller.requestCatalogScan.bind(controller);
         const connectionStatus = doc.createElement("p");
         connectionStatus.dataset.catalogConnectionStatus = "true";
         const connectionMessage = doc.createElement("p");
         connectionMessage.dataset.catalogConnectionMessage = "true";
         connectionMessage.setAttribute("aria-live", "polite");
-        const catalogProgress = doc.createElement("div");
-        catalogProgress.className = "knowledge-workbench__catalog-progress";
-        const scanStatus = doc.createElement("p");
-        scanStatus.dataset.catalogScanStatus = "true";
-        const pdfProgress = doc.createElement("p");
-        pdfProgress.dataset.catalogPdfProgress = "true";
-        const directoryProgress = doc.createElement("p");
-        directoryProgress.dataset.catalogDirectoryProgress = "true";
-        const requestProgress = doc.createElement("p");
-        requestProgress.dataset.catalogRequestProgress = "true";
-        const timeProgress = doc.createElement("p");
-        timeProgress.dataset.catalogTimeProgress = "true";
-        const stopReason = doc.createElement("p");
-        stopReason.dataset.catalogStopReason = "true";
-        catalogProgress.append(
-          scanStatus,
-          pdfProgress,
-          directoryProgress,
-          requestProgress,
-          timeProgress,
-          stopReason,
-        );
         const credentialStorageNotice = doc.createElement("p");
         credentialStorageNotice.textContent = i18n.t("settings.surface.credentialStorage", {
           credentialStoreName: SECRET_STORAGE_BRAND,
@@ -858,95 +924,7 @@ export function createSettingsSectionsSurface(
         cancelAuthorization.dataset.action = "catalog-cancel-authorization";
         authorizationActions.append(submitAuthorization, cancelAuthorization);
 
-        let scanBusy = connection.status === "scanning";
-        let scanActionPending = false;
-        let recomputeScanActions = (): void => undefined;
-        const scanDirectoryField = createCloudDirectoryField(doc, i18n, {
-          path: this.catalogScanRootDraft,
-          selection: this.catalogScanDirectorySelection,
-          disabled: scanBusy,
-          locked: false,
-        }, {
-          onChoose: async () => {
-            const selection = await (controller.chooseCatalogRoot?.({
-              initialRoot: this.catalogScanRootDraft,
-              purpose: { kind: "scan" },
-            }) ?? Promise.resolve(null));
-            return selection?.kind === "directory" ? selection : null;
-          },
-          onSelection: (selection) => {
-            if (selection.kind !== "directory") return;
-            this.catalogScanDirectorySelection = structuredClone(selection);
-            this.catalogScanRootDraft = selection.effectiveRoot;
-            queueMicrotask(() => {
-              if (isCurrent()) recomputeScanActions();
-            });
-          },
-          onManualChange: (value) => {
-            this.catalogScanDirectorySelection = undefined;
-            this.catalogScanRootDraft = value;
-            recomputeScanActions();
-          },
-          onValidate: validateCatalogScanRoot,
-        });
-        this.cloudDirectoryFields.add(scanDirectoryField);
-        const root = scanDirectoryField.manualInput;
-        root.dataset.catalogScanRoot = "true";
-        root.dataset.focusKey = "settings-catalog-scan-root";
-        trackSessionInput(root);
-        scanDirectoryField.chooseButton.dataset.action = "browse-catalog-scan-root";
-        scanDirectoryField.chooseButton.dataset.focusKey = "settings-catalog-scan-root-choose";
-        scanDirectoryField.root.querySelector<HTMLButtonElement>(
-          '[data-action="validate-cloud-directory"]',
-        )?.setAttribute("data-action", "catalog-validate-root");
-        if (controller.chooseCatalogRoot === undefined) {
-          scanDirectoryField.chooseButton.hidden = true;
-          scanDirectoryField.chooseButton.disabled = true;
-        }
-        const scanActions = doc.createElement("div");
-        scanActions.className = "knowledge-workbench__settings-row";
-        const start = button(i18n.t("settings.surface.startScan"), () => {
-          if (start.disabled || scanActionPending) return;
-          scanActionPending = true;
-          recomputeScanActions();
-          void run(
-            "settings.save.cloudScan",
-            () => requestCatalogScan(this.catalogScanRootDraft, () => {
-              if (!isCurrent()) return;
-              this.catalogScanRootDraft = "";
-              this.catalogScanDirectorySelection = undefined;
-              scanDirectoryField.setPath("");
-              recomputeScanActions();
-            }),
-            scanActions,
-            undefined,
-            "settings.error.cloudUnavailable",
-          ).finally(() => {
-            if (!isCurrent()) return;
-            scanActionPending = false;
-            recomputeScanActions();
-          });
-        });
-        start.dataset.action = "catalog-start-scan";
-        scanActions.append(start);
-        let cancel: HTMLButtonElement | undefined;
-        if (controller.cancelCatalogScan !== undefined) {
-          cancel = button(i18n.t("settings.surface.cancelScan"), () => controller.cancelCatalogScan?.());
-          cancel.dataset.action = "catalog-cancel-scan";
-          scanActions.append(cancel);
-        }
-        const renderCatalogConnection = (): void => {
-          if (!isCurrent()) return;
-          const current = controller.catalogConnection?.();
-          const empty = i18n.t("progress.empty");
-          const progress = presentCatalogProgress?.(current, i18n) ?? {
-            scanStatus: i18n.t("progress.scan.status", { status: empty }),
-            pdfProgress: i18n.t("progress.scan.pdf", { current: empty, maximum: empty }),
-            directoryProgress: i18n.t("progress.scan.directory", { current: empty, maximum: empty }),
-            requestProgress: i18n.t("progress.scan.request", { current: empty, maximum: empty }),
-            timeProgress: i18n.t("progress.scan.elapsed", { current: empty, maximum: empty }),
-            stopReason: i18n.t("progress.scan.stopReason", { reason: empty }),
-          };
+        renderSharedScanControls(verificationSection.content, (current) => {
           connectionStatus.textContent = i18n.t("settings.connection.status", {
             status: localizedStatus(current?.status),
           });
@@ -954,37 +932,7 @@ export function createSettingsSectionsSurface(
           connectionMessage.textContent = current?.messageCode === undefined
             ? ""
             : presentCatalogMessage(current.messageCode, i18n).title;
-          scanStatus.textContent = progress.scanStatus;
-          pdfProgress.textContent = progress.pdfProgress;
-          directoryProgress.textContent = progress.directoryProgress;
-          requestProgress.textContent = progress.requestProgress;
-          timeProgress.textContent = progress.timeProgress;
-          stopReason.textContent = progress.stopReason;
-          scanBusy = current?.status === "scanning";
-          scanDirectoryField.updateState({ disabled: scanBusy, locked: false });
-          if (controller.chooseCatalogRoot === undefined) {
-            scanDirectoryField.chooseButton.hidden = true;
-            scanDirectoryField.chooseButton.disabled = true;
-          }
-          recomputeScanActions = () => {
-            const latest = controller.catalogConnection?.();
-            start.disabled = scanActionPending
-              || scanBusy
-              || !connectionCanVerify(latest)
-              || latest?.messageCode !== undefined
-              || !scanDirectoryField.valid();
-          };
-          recomputeScanActions();
-          if (cancel !== undefined) {
-            const scanning = current?.status === "scanning";
-            cancel.hidden = !scanning;
-            cancel.disabled = !scanning;
-          }
-        };
-        renderCatalogConnection();
-        this.unsubscribeCatalogConnection = controller.subscribeCatalogConnection?.(
-          renderCatalogConnection,
-        ) ?? null;
+        });
         if (connection.status === "authorizing") {
           scheduleAuthorizationExpiry(connection.authorizationExpiresAt);
         }
@@ -998,11 +946,6 @@ export function createSettingsSectionsSurface(
           replaceIdentitySection,
           authorizationCodeLabel,
           authorizationActions,
-        );
-        verificationSection.content.append(
-          catalogProgress,
-          scanDirectoryField.root,
-          scanActions,
         );
       }
 
