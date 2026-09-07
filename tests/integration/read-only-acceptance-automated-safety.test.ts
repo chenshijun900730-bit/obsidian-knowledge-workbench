@@ -44,6 +44,7 @@ import { controllerFixture, noOpWorkbenchActions } from "../helpers/ui-fixtures"
 import { renderWorkbench } from "../../src/ui/workbench-view";
 import { NORMAL_RUNTIME_POLICY } from "../../src/runtime/safety-policy";
 import type { HybridCatalogActiveSummary } from "../../src/catalog/hybrid-catalog-runtime";
+import { UnifiedCatalogSearchService } from "../../src/catalog/unified-catalog-search-service";
 
 const capturedComposition = vi.hoisted<{ value: unknown }>(() => ({ value: null }));
 const JSDOMRuntime = (jsdomRuntime as unknown as {
@@ -399,17 +400,65 @@ const syntheticActive = (): HybridCatalogActiveSummary => ({
   })),
 });
 
+// Keep network/storage synthetic, but exercise the production local search engine.
+class SyntheticSearchCatalogRuntime extends FakeCloudCatalogRuntime {
+  private readonly search: UnifiedCatalogSearchService;
+
+  constructor(...args: ConstructorParameters<typeof FakeCloudCatalogRuntime>) {
+    super(...args);
+    this.search = new UnifiedCatalogSearchService(this.snapshot().items.map((item) => ({
+      schemaVersion: 1,
+      catalogId: item.catalogId,
+      candidateId: item.catalogId,
+      fsId: null,
+      relativePath: item.pathLabel,
+      cloudPath: item.cloudPathAvailable ? `/Synthetic Library/${item.pathLabel}` : null,
+      filename: item.filename,
+      title: item.filename,
+      isbnCandidates: [],
+      sizeBytes: null,
+      serverModifiedAt: null,
+      topLevelGroupId: `group:${"1".repeat(64)}`,
+      hierarchyTags: item.hierarchyTags,
+      verificationStatus: item.verificationStatus,
+      differenceKinds: item.differenceKinds,
+      visibleByDefault: true,
+    })));
+  }
+
+  override setQuery(query: string): void {
+    super.setQuery(query);
+    const page = this.search.query({ text: query, offset: 0, limit: 50 });
+    this.setSnapshot({
+      ...this.snapshot(), query, page: 0, total: page.total,
+      items: page.items.map((record) => ({
+        catalogId: record.catalogId,
+        filename: record.filename,
+        pathLabel: record.relativePath,
+        cloudPathAvailable: record.cloudPath !== null,
+        verificationStatus: record.verificationStatus,
+        differenceKinds: record.differenceKinds,
+        hierarchyTags: record.hierarchyTags,
+      })),
+    });
+  }
+}
+
 const syntheticTaskFixture = () => {
   const active = syntheticActive();
   const hybrid = new FakeHybridCatalogRuntime({ status: "ready", active });
   const connection = new FakeCloudCatalogConnectionRuntime({ status: "authorized" });
-  const catalog = new FakeCloudCatalogRuntime({
-    status: "ready", source: "unified", pdfCount: 21, total: 1,
+  const catalog = new SyntheticSearchCatalogRuntime({
+    status: "ready", source: "unified", pdfCount: 21, total: 2,
     verificationCounts: { unverified: 20, verified: 1, difference: 0, cloudMissing: 0 },
     items: [{
       catalogId: "synthetic-verified", filename: "Synthetic.pdf",
       pathLabel: "Category-0/Synthetic.pdf", cloudPathAvailable: true,
       verificationStatus: "verified", differenceKinds: [], hierarchyTags: ["folder/Category-0"],
+    }, {
+      catalogId: "synthetic-unrelated", filename: "Unrelated.pdf",
+      pathLabel: "Category-1/Unrelated.pdf", cloudPathAvailable: false,
+      verificationStatus: "unverified", differenceKinds: [], hierarchyTags: ["folder/Category-1"],
     }],
   }, connection, hybrid);
   const fixture = controllerFixture({ catalog, activeIndex: true });
@@ -463,6 +512,8 @@ describe("simplified workbench cross-cutting release gate (synthetic dependencie
         enforcePolicy: async () => undefined,
       });
       await fixture.controller.initializeCatalog();
+      expect(fixture.controller.snapshot().catalog.items.map((item) => item.catalogId))
+        .toEqual(["synthetic-verified", "synthetic-unrelated"]);
       for (const route of [
         { tab: "library" }, { tab: "task", page: "overview" },
         { tab: "more", page: "overview" }, { tab: "library" },
@@ -471,7 +522,13 @@ describe("simplified workbench cross-cutting release gate (synthetic dependencie
         fixture.controller.searchCatalog("Synthetic");
         renderWorkbench(root, fixture.controller.snapshot(), noOpWorkbenchActions(), NORMAL_RUNTIME_POLICY);
       }
-      expect(fixture.catalog.snapshot()).toEqual(catalogBefore);
+      const searched = fixture.controller.snapshot().catalog;
+      expect(searched.items).not.toEqual(catalogBefore.items);
+      expect(searched.items).toEqual([catalogBefore.items[0]]);
+      expect(searched.total).toBe(1);
+      expect(searched.query).toBe("Synthetic");
+      expect(searched.verificationCounts).toEqual(catalogBefore.verificationCounts);
+      expect(searched.pdfCount).toBe(catalogBefore.pdfCount);
       expect(fixture.hybrid.snapshot()).toEqual(hybridBefore);
       expect(fixture.store.settings()).toEqual(settingsBefore);
       expect(fixture.catalog.verificationAuthorities).toEqual([fixture.hybrid.legacyLocalAuthority]);
@@ -483,6 +540,12 @@ describe("simplified workbench cross-cutting release gate (synthetic dependencie
       expect(fixture.connection.beginAuthorizationCalls).toBe(0);
       expect(fixture.connection.startScanCalls).toEqual([]);
       expect(fixture.catalog.openBaiduCalls).toBe(0);
+      expect(fixture.vault.writeCalls).toEqual([]);
+      expect(request).not.toHaveBeenCalled();
+      fixture.controller.searchCatalog("");
+      expect(fixture.controller.snapshot().catalog.items).toEqual(catalogBefore.items);
+      expect(fixture.hybrid.snapshot()).toEqual(hybridBefore);
+      expect(fixture.store.settings()).toEqual(settingsBefore);
       expect(fixture.vault.writeCalls).toEqual([]);
       expect(request).not.toHaveBeenCalled();
     } finally { fixture.controller.dispose(); }
@@ -497,13 +560,25 @@ describe("simplified workbench cross-cutting release gate (synthetic dependencie
       });
       const displayed = fixture.controller.snapshot();
       const root = acceptanceDom.window.document.createElement("div");
-      renderWorkbench(root, { ...displayed, route: { tab: "task", page: "overview" } }, noOpWorkbenchActions(), NORMAL_RUNTIME_POLICY);
+      const actions = noOpWorkbenchActions({
+        onTaskPrimary: (revision) => fixture.controller.performTaskPrimaryAction(revision),
+      });
+      renderWorkbench(root, { ...displayed, route: { tab: "task", page: "overview" } }, actions, NORMAL_RUNTIME_POLICY);
       expect(displayed.boundLibraryPath).toBe("/Synthetic Library");
       expect(root.querySelector('[data-task-scope="true"]')?.textContent).toContain("Synthetic Library");
       for (const key of displayed.selectedVerificationGroupKeys) {
         expect(root.textContent).toContain(fixture.active.groups.find((group) => group.groupKey === key)!.label);
       }
-      await fixture.controller.performTaskPrimaryAction(displayed.taskActionRevision);
+      const scopeValues = root.querySelectorAll('[data-task-scope="true"] dd');
+      expect(scopeValues[0]?.textContent).toBe("Synthetic Library");
+      expect(scopeValues[1]?.textContent).toBe(displayed.selectedVerificationGroupKeys
+        .map((key) => fixture.active.groups.find((group) => group.groupKey === key)!.label).join("、"));
+      const primary = root.querySelector<HTMLButtonElement>("[data-task-primary]");
+      expect(primary).not.toBeNull();
+      expect(primary!.dataset.taskPrimary).toBe("start");
+      primary!.click();
+      primary!.click();
+      await vi.waitFor(() => expect(fixture.hybrid.startInputs).toHaveLength(1));
       expect(fixture.hybrid.startInputs).toEqual([{
         cloudRoot: displayed.boundLibraryPath,
         groupKeys: displayed.selectedVerificationGroupKeys,

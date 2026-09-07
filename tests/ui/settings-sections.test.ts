@@ -247,7 +247,8 @@ describe("shared grouped settings surface", () => {
     input = root.querySelector<HTMLInputElement>('[data-catalog-scan-root="true"]')!;
     input.value = "/new-session-library";
     input.dispatchEvent(new Event("input", { bubbles: true }));
-    confirmOldScan?.();
+    expect(confirmOldScan).toBeTypeOf("function");
+    confirmOldScan!();
 
     surface.render(root, "zh-CN", { section: "cloud-scan-advanced" });
     expect(root.querySelector<HTMLInputElement>('[data-catalog-scan-root="true"]')?.value)
