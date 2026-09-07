@@ -24,6 +24,9 @@ import {
   type WorkbenchViewModel,
 } from "../../src/ui/workbench-view";
 import { TEST_NEEDS_TXT_WORKFLOW } from "../helpers/ui-fixtures";
+import { UnifiedCatalogSearchService } from "../../src/catalog/unified-catalog-search-service";
+import type { UnifiedCatalogRecordV1 } from "../../src/catalog/hybrid-catalog-types";
+import { NORMAL_RUNTIME_POLICY } from "../../src/runtime/safety-policy";
 
 const ACCEPTANCE_BANNER = "Read-only acceptance build. Quick Capture, organization writes, Undo, and AI are unavailable. Derived index data is stored in the plugin's data file.";
 const ZH_ACCEPTANCE_BANNER = "只读验收版本。快速记录、整理写入、撤销和 AI 均不可用。派生索引数据保存在插件数据文件中。";
@@ -273,6 +276,66 @@ afterEach(() => {
 });
 
 describe("read-only acceptance surfaces", () => {
+  it("bounds a 100,000-candidate synthetic index to 50 DOM rows without a timing benchmark", () => {
+    const candidates: UnifiedCatalogRecordV1[] = Array.from({ length: 100_000 }, (_, index) => ({
+      schemaVersion: 1,
+      catalogId: `txt:${index}`,
+      candidateId: `txt:${index}`,
+      fsId: null,
+      relativePath: `Synthetic/Book-${String(index).padStart(6, "0")}.pdf`,
+      cloudPath: null,
+      filename: `Book-${String(index).padStart(6, "0")}.pdf`,
+      title: `Book-${index}`,
+      isbnCandidates: [],
+      sizeBytes: null,
+      serverModifiedAt: null,
+      topLevelGroupId: `group:${"1".repeat(64)}`,
+      hierarchyTags: ["folder/Synthetic"],
+      verificationStatus: "unverified",
+      differenceKinds: [],
+      visibleByDefault: true,
+    }));
+    const search = new UnifiedCatalogSearchService(candidates);
+    const root = testDiv();
+    const actions = workbenchActions();
+    for (const policy of [NORMAL_RUNTIME_POLICY, READ_ONLY_ACCEPTANCE_POLICY]) {
+      for (const offset of [0, 50_000, 99_950]) {
+        const page = search.query({ text: "Synthetic", offset, limit: 50 });
+        expect(page.total).toBe(100_000);
+        expect(page.items).toHaveLength(50);
+        const model = modelFor({ tab: "library" });
+        renderWorkbench(root, {
+          ...model,
+          catalog: {
+            ...model.catalog,
+            status: "ready",
+            source: "unified",
+            pdfCount: page.total,
+            total: page.total,
+            page: offset / 50,
+            items: page.items.map((record) => ({
+              catalogId: record.catalogId,
+              filename: record.filename,
+              pathLabel: record.relativePath,
+              cloudPathAvailable: false,
+              verificationStatus: record.verificationStatus,
+              differenceKinds: record.differenceKinds,
+              hierarchyTags: record.hierarchyTags,
+            })),
+          },
+        }, actions, policy);
+        const rows = root.querySelectorAll<HTMLElement>("[data-catalog-result]");
+        expect(rows).toHaveLength(50);
+        expect(Array.from(rows, (row) => row.dataset.catalogResult))
+          .toEqual(page.items.map((record) => record.catalogId));
+        expect(root.querySelector('[data-catalog-search="true"]')).not.toBeNull();
+      }
+    }
+    expect(actions.onOpenBaidu).not.toHaveBeenCalled();
+    expect(actions.onStartSelectedVerification).not.toHaveBeenCalled();
+    expect(actions.onQuickCapture).not.toHaveBeenCalled();
+  });
+
   it.each([
     [
       "zh-CN",
@@ -294,7 +357,7 @@ describe("read-only acceptance surfaces", () => {
   ) => {
     const root = testDiv();
     renderWorkbench(root, {
-      ...modelFor({ tab: "more", page: "overview" }),
+      ...modelFor({ tab: "more", page: "privacy-ai" }),
       locale,
     }, workbenchActions(), READ_ONLY_ACCEPTANCE_POLICY);
     const banner = root.querySelector<HTMLElement>('[data-acceptance-banner="true"]')!;

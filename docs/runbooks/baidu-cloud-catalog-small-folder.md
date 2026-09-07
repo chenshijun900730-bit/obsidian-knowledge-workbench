@@ -44,12 +44,22 @@
 
 ## 3. 自动化预检
 
-真实授权前运行：
+### Task 12 自动化门禁
+
+本轮合成测试覆盖“文库 / 任务 / 更多”的离线启动、搜索、可见范围启动、暂停、单提交与打包隔离。100,000 条合成候选只检查最多 50 行 DOM，不测时延，不执行性能或压力命令。自动化 PASS 只能证明这些自动化断言；最终运行结果见[设计规格](../superpowers/specs/2026-09-01-knowledge-workbench-simplified-automatic-ui-design.md#task-12-自动化门禁)。
+
+- 专用合成 Vault 视觉验收：未执行。新授权安装后才验证常规、窄栏、双侧栏、主按钮/搜索可见性、内联目录选择、键盘焦点、中英文及 reduced motion。
+- 真实 Vault / 百度验收：未执行。真实安装与真实小分类请求分别重新授权；jsdom / 构建通过不替代主机或百度通过。
+
+本轮自动化按顺序运行（默认测试排除 `tests/performance/**`）：
 
 ```bash
-npx vitest run tests/unit/catalog tests/integration/catalog-scan.test.ts tests/integration/catalog-small-folder-preflight.test.ts tests/ui/cloud-catalog-tab.test.ts tests/ui/settings-tab.test.ts tests/packaging/composition-roots.test.ts
-npm run verify
-npm run test:coverage
+npx vitest run tests/integration/read-only-acceptance-automated-safety.test.ts tests/ui/read-only-acceptance-surfaces.test.ts tests/packaging/composition-roots.test.ts tests/packaging/install-dev.test.ts tests/packaging/read-only-acceptance-build.test.ts
+npm test
+npm run lint
+npm run build
+npm run build:acceptance
+git diff --check
 ```
 
 预检必须证明：
@@ -125,10 +135,16 @@ client_count_match=<yes|no|not-available>
 
 ## 7. 本地断开、刷新与恢复
 
+- 文库只搜索文件名与目录元数据，不读取 PDF 正文。启动、重启、打开文库、搜索、任务状态推导和路由变化都不自动联网。
+- TXT 选择和预览只产生会话草稿；明确导入时重新打开并核对哈希，成功前保留旧活动目录。相同内容消耗草稿但不改变有效绑定，不同内容成功激活后需要重新选择书库。
+- `pending` 升级目录先保留原搜索、覆盖率与暂停进度；generation 0 的首次明确书库选择才原子保存绑定与精确不可变允许清单。只有来源、根和历史指纹全部匹配才可继承；启动和最近目录不会继承。历史文件不带可加密验证的百度账户身份，因此这次选择是用户的归属声明。
+- 继承失败先保持设置和网络零变化；仅仍匹配本次根、来源和历史集合时，“使用此文件夹并重新检查”可明确放弃旧继承并建立干净绑定。改选根、换 TXT 或历史集合变化后旧动作失效，内部失败 token 不保存、不渲染、不记录。
+- “重新连接”必须使用原账户，只修复授权并保留 generation / 绑定 / 允许清单。换账户或应用凭据需明确选择身份替换：先持久化递增 generation、清除绑定、封存当前未完成批次并使待继承状态失效，再触碰 OAuth / SecretStorage。运行中两种操作均立即拒绝，不排队执行。
+- 任务卡显示书库与 1–5 个分类，明确点击“开始检查”即只读检查该范围，无第二层核验 Modal；选择目录本身不执行检查，歧义不会猜测父书库。自动分段始终限于原分类与原配额；暂停/重启只准备卡片，必须明确“继续检查”。单分类完成而其他分类未核验时回到就绪，不冒充全库完成。
 - `Remove local credentials` 只删除本机 SecretStorage 中的应用凭据和 Token，并取消本地授权/扫描状态；它不宣称已经撤销百度服务器端授权。
 - 如需撤销宽范围授权，用户还要在百度官方“授权管理”页面人工撤销；不要把该页面截图或账号信息写入证据。
 - Token 过期时，产品最多执行一次官方刷新并重放同一个 list 请求；不会循环重试。
-- 取消或限流会保留仅供审计的部分 checkpoint/receipt；当前界面不提供恢复扫描。只有完整扫描才提升为当前目录快照。
+- 普通云端扫描取消或限流后，部分 checkpoint/receipt 仅供审计，不提供该旧扫描的恢复。分类检查另有作用域 V4 检查点（精确允许清单中的 V3 先本地提升），可在明确点击后恢复原分类；过期授权、限流和路径问题各有恢复动作，畸形响应或完整性错误不提供恢复。仅完整扫描 / 已完成分类才提升对应结果。
 - 新扫描完成前，旧的完整快照仍保留。不得通过删除真实 Vault 内容处理目录故障。
 
 ## 8. 验收结束点

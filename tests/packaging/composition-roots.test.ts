@@ -76,6 +76,21 @@ const FORBIDDEN_ACCEPTANCE_DIRECTORY_TEXT = [
 ] as const;
 
 describe("composition-root dependency graphs", () => {
+  it("documents distinct automated, synthetic-host and real-service acceptance gates", async () => {
+    for (const path of [
+      "README.md",
+      "docs/runbooks/baidu-cloud-catalog-small-folder.md",
+      "docs/superpowers/specs/2026-09-01-knowledge-workbench-simplified-automatic-ui-design.md",
+    ]) {
+      const source = await readFile(join(root, path), "utf8");
+      expect(source, path).toContain("Task 12 自动化门禁");
+      expect(source, path).toContain("专用合成 Vault 视觉验收：未执行");
+      expect(source, path).toContain("真实 Vault / 百度验收：未执行");
+      expect(source, path).toContain("100,000");
+      expect(source, path).toContain("不测时延");
+    }
+  });
+
   it("wires one loaded-store locale provider through every user-facing factory", async () => {
     const [contractSource, pluginSource, normalSource, acceptanceSource] = await Promise.all([
       readFile(join(root, "src/runtime/runtime-composition.ts"), "utf8"),
@@ -135,6 +150,10 @@ describe("composition-root dependency graphs", () => {
       "src/ui/cloud-directory-picker-session.ts",
       "src/ui/folder-selection-page.ts",
       "src/runtime/normal-folder-selection-composition.ts",
+      "src/runtime/normal-cloud-catalog-composition.ts",
+      "src/adapters/local-hybrid-catalog-adapter.ts",
+      "src/catalog/hybrid-catalog-runtime.ts",
+      "src/catalog/large-catalog-verification-service.ts",
       "src/i18n/workbench-directory-picker-i18n.ts",
     ];
 
@@ -193,6 +212,11 @@ describe("composition-root dependency graphs", () => {
       "src/ui/cloud-directory-picker-session.ts",
       "src/ui/folder-selection-page.ts",
       "src/runtime/normal-folder-selection-composition.ts",
+      "src/runtime/normal-cloud-catalog-composition.ts",
+      "src/ui/local-catalog-txt-picker.ts",
+      "src/adapters/local-hybrid-catalog-adapter.ts",
+      "src/catalog/hybrid-catalog-runtime.ts",
+      "src/catalog/large-catalog-verification-service.ts",
       "src/i18n/workbench-directory-picker-i18n.ts",
     ]));
     expect(output).toMatch(/requestUrl/u);

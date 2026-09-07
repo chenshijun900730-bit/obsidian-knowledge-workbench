@@ -325,6 +325,21 @@ type LibraryWorkflowState =
 - 原有多分类选择和手动路径能力保留在高级路径，默认界面不展示；
 - 只读 acceptance 构建继续遵循其能力策略，新 UI 不得制造看似可执行但实际被策略阻止的主动作。
 
+## Task 12 自动化门禁
+
+- 实现记录：Task 12 implemented（自动化通过）。Node 24 下完整门禁已通过：122 个测试文件 / 2358 项测试 PASS，lint 零错误（43 条既有警告），常规构建、只读验收构建及差异检查均成功；此状态不包含下述人工视觉或真实环境验收。
+- 本轮为合成依赖自动化验收：指定五文件 focused gate → `npm test` → `npm run lint` → `npm run build` → `npm run build:acceptance` → `git diff --check`。
+- 100,000 候选只证明搜索结果 / DOM 的 50 行上限，不测时延；不运行 benchmark、stress、`test:performance`、`test:catalog-performance`，默认 Vitest 排除 `tests/performance/**`。后文历史性能方案不属于本次执行授权。
+- 专用合成 Vault 视觉验收：未执行。新授权安装后检查常规、窄栏、双侧栏、搜索和主按钮可见、内联目录、键盘顺序/焦点恢复、中英文与 reduced motion。
+- 真实 Vault / 百度验收：未执行。分别重新授权安装、备份恢复和一个非敏感非根小分类请求。jsdom / 构建 PASS 不等于真实 Obsidian / 百度 PASS。
+- 当前交付仅为自动化候选版本；视觉验收及真实验收未完成，不授权发布、push、PR、合并、tag 或版本号变更。
+
+升级兼容性以精确来源、根和历史文件指纹为边界：`pending` 启动仅保留旧搜索、覆盖与暂停进度；首次 generation 0 明确绑定才原子保存不可变允许清单。历史文件无可加密验证的百度账户身份，明确选根是一次性归属声明。根不符或历史指纹失效时保持零变化；仅仍匹配本次根、来源与历史集合的明确“使用此文件夹并重新检查”可放弃继承并建立干净绑定，过期动作不能复用，内部 token 不持久化/显示/记录。
+
+同账户重新连接必须使用原账户，保留 generation、绑定与允许清单；显式换账户/应用凭据则先原子递增 generation、清绑定、封存当前未完成批次、使待继承失效，再改变 OAuth / SecretStorage。运行中两种意图都拒绝。TXT 仍先预览再明确导入、运行时重开核对哈希：相同内容消耗草稿但保持绑定，不同内容成功激活后才切换来源并重新绑定。
+
+专项证据由完整套件共同提供，不能只凭五文件 focused PASS 宣称所有存储恢复通过：`large-catalog-batch-contracts`、`local-hybrid-catalog-adapter` 与 `large-catalog-verification-service` 覆盖 V4 exact-key 范围、独占发布、A/B 槽、指针、收据日志与崩溃恢复；`hybrid-catalog-runtime` 覆盖精确 V3 提升、五分类顺序、原范围分段与恢复；`workbench-controller` 和 `library-workflow-state` 覆盖共享权限锁、重验证、收养失败的显式重新检查、TXT/身份变更及单一恢复动作。
+
 ## 12. 测试与验收
 
 ### 12.1 单元与状态测试
@@ -364,9 +379,9 @@ type LibraryWorkflowState =
 
 - 在窄窗口、常规窗口、左右侧栏同时打开三种宿主布局中逐页检查；
 - 主动作、搜索框和错误恢复动作不得被分类列表或详情栏推到不可见位置；
-- 保留 100,000 条目录性能测试；
+- 保留历史 100,000 条目录性能测试，但本轮不执行；本轮仅运行确定性行数上限断言；
 - 界面简化不得在每次渲染复制完整目录、分类或结果数组；
-- 继续运行 windowed list、投影、核验进度和目录浏览性能测试。
+- 本轮运行 windowed list、投影、核验进度和目录浏览的非性能测试；性能/压力测量需后续另行授权。
 
 ### 12.5 验证顺序
 
@@ -377,7 +392,7 @@ type LibraryWorkflowState =
 5. TypeScript 检查；
 6. normal build；
 7. read-only acceptance build；
-8. 目录与工作台性能测试；
+8. 100,000 合成候选有界 DOM 断言（已含在自动化测试中，不测时延）；
 9. 专用合成 Vault 的真实 Obsidian 视觉验收；
 10. 获得新的独立授权后，才安装真实 Vault 或执行真实百度小分类只读复验。
 
