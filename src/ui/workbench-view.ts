@@ -426,9 +426,14 @@ export function renderWorkbench(
   const i18n = createWorkbenchI18n(model.locale);
   const previousFocusState = renderFocusStates.get(root);
   const active = doc.activeElement;
-  const activeFocusKey = active !== null && root.contains(active)
+  const activeIsInWorkbench = active !== null && root.contains(active);
+  const activeFocusKey = activeIsInWorkbench
     ? (active as HTMLElement).dataset.focusKey
     : undefined;
+  const activeIsDocumentFallback = active === null
+    || active === doc.body
+    || active === doc.documentElement;
+  const hasUnmanagedFocus = !activeIsDocumentFallback && activeFocusKey === undefined;
   const selection = active !== null && active.matches("input, textarea")
     ? {
         start: (active as HTMLInputElement).selectionStart,
@@ -439,21 +444,28 @@ export function renderWorkbench(
   const capturedFocus = activeFocusKey === undefined
     ? null
     : { key: activeFocusKey, selection } satisfies FocusIntent;
-  const carriedFocus = capturedFocus ?? previousFocusState?.pending ?? null;
-  const enteringFolderSelection = (
+  const carriedFocus = hasUnmanagedFocus
+    ? null
+    : capturedFocus ?? previousFocusState?.pending ?? null;
+  const isInlineFolderSelection = (
     isTaskSubpage(model.route, "folder-selection")
     && policy.mode !== "read-only-acceptance"
     && model.folderSelection !== undefined
     && folderSelectionHost?.available === true
     && actions.folderSelectionActions !== undefined
   );
+  const enteringFolderSelection = isInlineFolderSelection
+    && (previousFocusState === undefined
+      || !isTaskSubpage(previousFocusState.route, "folder-selection"));
   const categoryReturn = previousFocusState !== undefined
     && isTaskSubpage(previousFocusState.route, "category-selection")
     && isTaskOverview(model.route);
   const folderReturn = previousFocusState !== undefined
     && isTaskSubpage(previousFocusState.route, "folder-selection")
     && isTaskOverview(model.route);
-  const requestedFocusKeys = enteringFolderSelection
+  const requestedFocusKeys = hasUnmanagedFocus
+    ? []
+    : enteringFolderSelection
     ? []
     : categoryReturn
       ? ["task-choose-category", "task-primary"]
@@ -692,7 +704,7 @@ export function renderWorkbench(
     }
   }
   const restored = target !== null && doc.activeElement === target;
-  const pending = enteringFolderSelection || restored
+  const pending = hasUnmanagedFocus || enteringFolderSelection || restored
     ? null
     : requestedFocusKeys.length === 0
       ? carriedFocus

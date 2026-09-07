@@ -1710,6 +1710,92 @@ describe("workbench", () => {
     root.remove();
   });
 
+  it("preserves the folder search's middle selection across an in-page rerender", () => {
+    const root = createTestDiv();
+    document.body.append(root);
+    const folder = {
+      ...populatedWorkbenchModel(),
+      route: { tab: "task", page: "folder-selection" } as const,
+      folderSelection: {
+        ...inlineFolderSelectionState(),
+        state: {
+          ...inlineFolderSelectionState().state,
+          query: "科学文库",
+        },
+      },
+    };
+    const actions = noOpWorkbenchActions({
+      folderSelectionActions: () => noOpFolderSelectionActions(),
+    });
+    const host = createFolderSelectionHostCapability();
+    renderWorkbench(root, folder, actions, NORMAL_RUNTIME_POLICY, undefined, host);
+    const first = root.querySelector<HTMLInputElement>("[data-folder-selection-query]")!;
+    first.focus();
+    first.setSelectionRange(1, 2, "forward");
+
+    renderWorkbench(root, folder, actions, NORMAL_RUNTIME_POLICY, undefined, host);
+
+    const replacement = root.querySelector<HTMLInputElement>("[data-folder-selection-query]")!;
+    expect(document.activeElement).toBe(replacement);
+    expect(replacement.selectionStart).toBe(1);
+    expect(replacement.selectionEnd).toBe(2);
+    root.remove();
+  });
+
+  it("does not reclaim external focus after pending task updates or a task subpage return", () => {
+    const root = createTestDiv();
+    const outside = document.createElementNS("http://www.w3.org/1999/xhtml", "textarea") as HTMLTextAreaElement;
+    document.body.append(root, outside);
+    const ready = {
+      ...populatedWorkbenchModel(),
+      route: { tab: "task", page: "overview" } as const,
+      boundLibraryPath: "/Science",
+      workflow: {
+        kind: "ready" as const,
+        primaryAction: "start" as const,
+        titleKey: "workflow.ready.title" as const,
+        descriptionKey: "workflow.ready.description" as const,
+        recommendedGroup: null,
+        canShowTechnicalDetails: false,
+      },
+    };
+    const running = {
+      ...ready,
+      workflow: {
+        kind: "running" as const,
+        primaryAction: "pause" as const,
+        titleKey: "workflow.running.title" as const,
+        descriptionKey: "workflow.running.description" as const,
+        recommendedGroup: null,
+        canShowTechnicalDetails: true,
+      },
+    };
+    const paused = {
+      ...ready,
+      workflow: {
+        kind: "paused" as const,
+        primaryAction: "resume" as const,
+        titleKey: "workflow.paused.title" as const,
+        descriptionKey: "workflow.paused.description" as const,
+        recommendedGroup: null,
+        canShowTechnicalDetails: true,
+      },
+    };
+    renderWorkbench(root, ready, noOpWorkbenchActions());
+    root.querySelector<HTMLButtonElement>("[data-task-primary]")!.focus();
+    renderWorkbench(root, { ...running, taskPauseRequested: true }, noOpWorkbenchActions());
+    outside.focus();
+    renderWorkbench(root, paused, noOpWorkbenchActions());
+    expect(document.activeElement).toBe(outside);
+
+    renderWorkbench(root, { ...ready, route: { tab: "task", page: "category-selection" } }, noOpWorkbenchActions());
+    outside.focus();
+    renderWorkbench(root, ready, noOpWorkbenchActions());
+    expect(document.activeElement).toBe(outside);
+    outside.remove();
+    root.remove();
+  });
+
   it("preserves map-search focus and selection across synchronous controller rerenders", async () => {
     class ItemViewSurface {
       readonly contentEl = createTestDiv();
