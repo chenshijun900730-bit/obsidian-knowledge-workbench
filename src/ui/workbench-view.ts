@@ -57,6 +57,7 @@ import {
   type RecentLibraryItem,
 } from "./library-page";
 import { renderTaskPage } from "./task-page";
+import { TASK_FOCUS_KEYS, type TextSelectionDirection } from "./task-focus";
 import { createLocalCatalogTxtPicker } from "./local-catalog-txt-picker";
 import type {
   DisposableSurface,
@@ -226,7 +227,7 @@ interface FocusIntent {
   readonly selection: Readonly<{
     start: number | null;
     end: number | null;
-    direction: HTMLInputElement["selectionDirection"];
+    direction: TextSelectionDirection;
   }> | null;
 }
 
@@ -468,9 +469,9 @@ export function renderWorkbench(
     : enteringFolderSelection
     ? []
     : categoryReturn
-      ? ["task-choose-category", "task-primary"]
+      ? [TASK_FOCUS_KEYS.chooseCategory, TASK_FOCUS_KEYS.primary]
       : folderReturn
-        ? ["task-primary"]
+        ? [TASK_FOCUS_KEYS.primary]
         : carriedFocus === null ? [] : [carriedFocus.key];
   const verificationRunDetailsOpen = root.querySelector<HTMLDetailsElement>(
     "details[data-verification-run-details]",

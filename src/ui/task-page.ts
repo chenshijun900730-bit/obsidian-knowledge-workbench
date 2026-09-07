@@ -3,6 +3,7 @@ import type {
   HybridCatalogViewModel,
 } from "../catalog/hybrid-catalog-runtime";
 import type { WorkbenchI18n, WorkbenchMessageKey } from "../i18n/workbench-i18n";
+import { TASK_FOCUS_KEYS } from "./task-focus";
 import type {
   LibraryPrimaryAction,
   LibraryWorkflowKind,
@@ -116,7 +117,7 @@ const appendScope = (
     change.type = "button";
     change.className = "knowledge-workbench__task-secondary";
     change.dataset.taskChooseCategory = "true";
-    change.dataset.focusKey = "task-choose-category";
+    change.dataset.focusKey = TASK_FOCUS_KEYS.chooseCategory;
     change.textContent = model.i18n.t("task.action.chooseCategory");
     change.addEventListener("click", actions.onChooseDifferentCategory);
     scope.append(change);
@@ -169,7 +170,7 @@ export const renderTaskPage = (
   primary.type = "button";
   primary.className = "mod-cta knowledge-workbench__task-primary";
   primary.dataset.taskPrimary = action;
-  primary.dataset.focusKey = "task-primary";
+  primary.dataset.focusKey = TASK_FOCUS_KEYS.primary;
   const externallyPending = action === "pause"
     ? model.pauseRequested
     : model.actionPending;
