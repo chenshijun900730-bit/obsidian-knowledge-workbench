@@ -221,6 +221,39 @@ const settingsPageSurfaces = new WeakMap<HTMLElement, SettingsSectionsSurface>()
 const settingsPageSections = new WeakMap<HTMLElement, string>();
 const recentLibraryItems = new WeakMap<HTMLElement, readonly RecentLibraryItem[]>();
 
+interface FocusIntent {
+  readonly key: string;
+  readonly selection: Readonly<{
+    start: number | null;
+    end: number | null;
+    direction: HTMLInputElement["selectionDirection"];
+  }> | null;
+}
+
+interface RenderFocusState {
+  readonly route: WorkbenchRoute;
+  readonly pending: FocusIntent | null;
+}
+
+const renderFocusStates = new WeakMap<HTMLElement, RenderFocusState>();
+
+const isTaskOverview = (route: WorkbenchRoute): boolean => (
+  route.tab === "task" && route.page === "overview"
+);
+
+const isTaskSubpage = (route: WorkbenchRoute, page: "category-selection" | "folder-selection"): boolean => (
+  route.tab === "task" && route.page === page
+);
+
+const focusTarget = (root: HTMLElement, keys: readonly string[]): HTMLElement | null => {
+  for (const key of keys) {
+    const target = Array.from(root.querySelectorAll<HTMLElement>("[data-focus-key]"))
+      .find((candidate) => candidate.dataset.focusKey === key);
+    if (target !== undefined && !target.matches(":disabled")) return target;
+  }
+  return null;
+};
+
 const recordRecentLibraryItem = (
   root: HTMLElement,
   model: WorkbenchViewModel,
@@ -391,8 +424,9 @@ export function renderWorkbench(
 ): void {
   const doc = root.ownerDocument;
   const i18n = createWorkbenchI18n(model.locale);
+  const previousFocusState = renderFocusStates.get(root);
   const active = doc.activeElement;
-  const focusKey = active !== null && root.contains(active)
+  const activeFocusKey = active !== null && root.contains(active)
     ? (active as HTMLElement).dataset.focusKey
     : undefined;
   const selection = active !== null && active.matches("input, textarea")
@@ -402,6 +436,30 @@ export function renderWorkbench(
         direction: (active as HTMLInputElement).selectionDirection,
       }
     : null;
+  const capturedFocus = activeFocusKey === undefined
+    ? null
+    : { key: activeFocusKey, selection } satisfies FocusIntent;
+  const carriedFocus = capturedFocus ?? previousFocusState?.pending ?? null;
+  const enteringFolderSelection = (
+    isTaskSubpage(model.route, "folder-selection")
+    && policy.mode !== "read-only-acceptance"
+    && model.folderSelection !== undefined
+    && folderSelectionHost?.available === true
+    && actions.folderSelectionActions !== undefined
+  );
+  const categoryReturn = previousFocusState !== undefined
+    && isTaskSubpage(previousFocusState.route, "category-selection")
+    && isTaskOverview(model.route);
+  const folderReturn = previousFocusState !== undefined
+    && isTaskSubpage(previousFocusState.route, "folder-selection")
+    && isTaskOverview(model.route);
+  const requestedFocusKeys = enteringFolderSelection
+    ? []
+    : categoryReturn
+      ? ["task-choose-category", "task-primary"]
+      : folderReturn
+        ? ["task-primary"]
+        : carriedFocus === null ? [] : [carriedFocus.key];
   const verificationRunDetailsOpen = root.querySelector<HTMLDetailsElement>(
     "details[data-verification-run-details]",
   )?.open ?? false;
@@ -622,17 +680,24 @@ export function renderWorkbench(
     );
     if (advanced !== null) advanced.open = true;
   }
-  if (focusKey !== undefined) {
-    const target = Array.from(root.querySelectorAll<HTMLElement>("[data-focus-key]"))
-      .find((candidate) => candidate.dataset.focusKey === focusKey);
-    target?.focus({ preventScroll: true });
-    if (selection !== null && target?.matches("input, textarea")) {
+  const target = focusTarget(root, requestedFocusKeys);
+  if (target !== null) {
+    target.focus({ preventScroll: true });
+    const selectionToRestore = carriedFocus?.selection ?? null;
+    if (selectionToRestore !== null && target.matches("input, textarea")) {
       const input = target as HTMLInputElement;
-      const start = Math.min(selection.start ?? input.value.length, input.value.length);
-      const end = Math.min(selection.end ?? start, input.value.length);
-      input.setSelectionRange(start, end, selection.direction ?? "none");
+      const start = Math.min(selectionToRestore.start ?? input.value.length, input.value.length);
+      const end = Math.min(selectionToRestore.end ?? start, input.value.length);
+      input.setSelectionRange(start, end, selectionToRestore.direction ?? "none");
     }
   }
+  const restored = target !== null && doc.activeElement === target;
+  const pending = enteringFolderSelection || restored
+    ? null
+    : requestedFocusKeys.length === 0
+      ? carriedFocus
+      : { key: requestedFocusKeys.at(-1)!, selection: null } satisfies FocusIntent;
+  renderFocusStates.set(root, { route: model.route, pending });
 }
 
 export interface WorkbenchViewController {

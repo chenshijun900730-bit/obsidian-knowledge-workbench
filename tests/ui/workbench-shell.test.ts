@@ -9,6 +9,35 @@ const createTestDiv = (): HTMLDivElement => document.createElementNS(
 ) as HTMLDivElement;
 
 describe("workbench shell", () => {
+  it.each([
+    ["zh-CN", "unconfigured", "未配置"],
+    ["zh-CN", "configured", "已配置"],
+    ["zh-CN", "authorizing", "授权中"],
+    ["zh-CN", "authorized", "已授权"],
+    ["zh-CN", "scanning", "扫描中"],
+    ["zh-CN", "paused", "已暂停"],
+    ["zh-CN", "partial", "部分完成"],
+    ["zh-CN", "unavailable", "不可用"],
+    ["en", "unconfigured", "unconfigured"],
+    ["en", "configured", "configured"],
+    ["en", "authorizing", "authorizing"],
+    ["en", "authorized", "authorized"],
+    ["en", "scanning", "scanning"],
+    ["en", "paused", "paused"],
+    ["en", "partial", "partial"],
+    ["en", "unavailable", "unavailable"],
+  ] as const)("localizes the %s connection status %s", (locale, status, expected) => {
+    const root = createTestDiv();
+    renderWorkbenchShell(root, {
+      activePage: "library",
+      i18n: createWorkbenchI18n(locale),
+      connectionStatus: status,
+      onSelectPage: () => undefined,
+      onSetLocale: () => undefined,
+    });
+    expect(root.querySelector(".knowledge-workbench__connection")?.textContent).toBe(expected);
+  });
+
   it("renders exactly three fixed-left destinations in Chinese", () => {
     const root = createTestDiv();
     const selected: string[] = [];

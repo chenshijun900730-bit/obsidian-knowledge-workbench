@@ -63,6 +63,7 @@ import type {
   FolderSelectionHostCapability,
   FolderSelectionRenderState,
 } from "../../src/ui/folder-selection-host";
+import { createFolderSelectionHostCapability } from "../../src/ui/folder-selection-page";
 
 const createTestDiv = (): HTMLDivElement => document.createElementNS(
   "http://www.w3.org/1999/xhtml",
@@ -1612,6 +1613,100 @@ describe("workbench", () => {
     document.activeElement?.dispatchEvent(new KeyboardEvent("keydown", { key: "Home", bubbles: true }));
     expect(selected).toEqual([]);
     expect(document.activeElement?.getAttribute("data-workbench-page")).toBe("library");
+    root.remove();
+  });
+
+  it("restores task focus across action replacement, temporary disablement, and category returns", () => {
+    const root = createTestDiv();
+    document.body.append(root);
+    const ready = {
+      ...populatedWorkbenchModel(),
+      route: { tab: "task", page: "overview" } as const,
+      boundLibraryPath: "/Science",
+      workflow: {
+        kind: "ready" as const,
+        primaryAction: "start" as const,
+        titleKey: "workflow.ready.title" as const,
+        descriptionKey: "workflow.ready.description" as const,
+        recommendedGroup: null,
+        canShowTechnicalDetails: false,
+      },
+    };
+    const running = {
+      ...ready,
+      workflow: {
+        kind: "running" as const,
+        primaryAction: "pause" as const,
+        titleKey: "workflow.running.title" as const,
+        descriptionKey: "workflow.running.description" as const,
+        recommendedGroup: null,
+        canShowTechnicalDetails: true,
+      },
+    };
+    const paused = {
+      ...ready,
+      workflow: {
+        kind: "paused" as const,
+        primaryAction: "resume" as const,
+        titleKey: "workflow.paused.title" as const,
+        descriptionKey: "workflow.paused.description" as const,
+        recommendedGroup: null,
+        canShowTechnicalDetails: true,
+      },
+    };
+    renderWorkbench(root, ready, noOpWorkbenchActions());
+    root.querySelector<HTMLButtonElement>("[data-task-primary]")!.focus();
+    renderWorkbench(root, ready, noOpWorkbenchActions());
+    expect(document.activeElement).toBe(root.querySelector("[data-task-primary]"));
+
+    renderWorkbench(root, running, noOpWorkbenchActions());
+    expect(document.activeElement).toBe(root.querySelector("[data-task-primary='pause']"));
+    renderWorkbench(root, { ...running, taskPauseRequested: true }, noOpWorkbenchActions());
+    expect(root.querySelector<HTMLButtonElement>("[data-task-primary]")?.disabled).toBe(true);
+    renderWorkbench(root, paused, noOpWorkbenchActions());
+    expect(document.activeElement).toBe(root.querySelector("[data-task-primary='resume']"));
+
+    renderWorkbench(root, { ...ready, route: { tab: "task", page: "category-selection" } }, noOpWorkbenchActions());
+    renderWorkbench(root, ready, noOpWorkbenchActions());
+    expect(document.activeElement).toBe(root.querySelector("[data-task-choose-category]"));
+
+    renderWorkbench(root, { ...paused, route: { tab: "task", page: "category-selection" } }, noOpWorkbenchActions());
+    renderWorkbench(root, paused, noOpWorkbenchActions());
+    expect(document.activeElement).toBe(root.querySelector("[data-task-primary='resume']"));
+    root.remove();
+  });
+
+  it("keeps folder search autofocus on entry and restores task primary after return", () => {
+    const root = createTestDiv();
+    document.body.append(root);
+    const overview = {
+      ...populatedWorkbenchModel(),
+      route: { tab: "task", page: "overview" } as const,
+      workflow: {
+        kind: "ready" as const,
+        primaryAction: "start" as const,
+        titleKey: "workflow.ready.title" as const,
+        descriptionKey: "workflow.ready.description" as const,
+        recommendedGroup: null,
+        canShowTechnicalDetails: false,
+      },
+    };
+    const folder = {
+      ...overview,
+      route: { tab: "task", page: "folder-selection" } as const,
+      folderSelection: inlineFolderSelectionState(),
+    };
+    renderWorkbench(
+      root,
+      folder,
+      noOpWorkbenchActions({ folderSelectionActions: () => noOpFolderSelectionActions() }),
+      NORMAL_RUNTIME_POLICY,
+      undefined,
+      createFolderSelectionHostCapability(),
+    );
+    expect(document.activeElement).toBe(root.querySelector("[data-folder-selection-query]"));
+    renderWorkbench(root, overview, noOpWorkbenchActions());
+    expect(document.activeElement).toBe(root.querySelector("[data-task-primary]"));
     root.remove();
   });
 

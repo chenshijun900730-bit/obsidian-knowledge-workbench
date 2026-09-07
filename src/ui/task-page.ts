@@ -116,6 +116,7 @@ const appendScope = (
     change.type = "button";
     change.className = "knowledge-workbench__task-secondary";
     change.dataset.taskChooseCategory = "true";
+    change.dataset.focusKey = "task-choose-category";
     change.textContent = model.i18n.t("task.action.chooseCategory");
     change.addEventListener("click", actions.onChooseDifferentCategory);
     scope.append(change);
@@ -168,6 +169,7 @@ export const renderTaskPage = (
   primary.type = "button";
   primary.className = "mod-cta knowledge-workbench__task-primary";
   primary.dataset.taskPrimary = action;
+  primary.dataset.focusKey = "task-primary";
   const externallyPending = action === "pause"
     ? model.pauseRequested
     : model.actionPending;

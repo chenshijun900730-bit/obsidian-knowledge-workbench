@@ -268,8 +268,15 @@ describe("task page", () => {
     const root = render(model("paused", { hybrid: hybrid() }));
     const primary = root.querySelector<HTMLButtonElement>("[data-task-primary]")!;
     expect(primary.textContent?.trim()).toBeTruthy();
+    expect(primary.dataset.focusKey).toBe("task-primary");
     expect(primary.getAttribute("aria-busy")).toBe("false");
     expect(root.querySelector<HTMLDetailsElement>("[data-verification-run-details]")?.open).toBe(false);
+  });
+
+  it("marks the optional category action with a stable focus key", () => {
+    const root = render(model("ready"));
+    expect(root.querySelector<HTMLElement>("[data-task-choose-category]")?.dataset.focusKey)
+      .toBe("task-choose-category");
   });
 
   it.each(["zh-CN", "en"] as const)("isolates technical copy in closed details for %s", (locale) => {
