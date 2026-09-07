@@ -86,6 +86,12 @@ describe("verification category editor", () => {
     expect(root.querySelectorAll<HTMLInputElement>(
       "[data-task-category-radio]:checked",
     )).toHaveLength(1);
+    expect(root.querySelector<HTMLButtonElement>(
+      '[data-focus-key="task-category-cancel"]',
+    )).not.toBeNull();
+    expect(root.querySelector<HTMLButtonElement>(
+      '[data-focus-key="task-category-save"]',
+    )).not.toBeNull();
     const checks = Array.from(root.querySelectorAll<HTMLInputElement>(
       "[data-task-category-check]",
     ));

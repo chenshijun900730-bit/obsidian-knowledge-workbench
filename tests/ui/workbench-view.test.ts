@@ -1,6 +1,12 @@
 // @vitest-environment jsdom
 import { describe, expect, it, vi } from "vitest";
-import { createWorkbenchViewClass, renderWorkbench, type ItemViewConstructor } from "../../src/ui/workbench-view";
+import {
+  createWorkbenchViewClass,
+  renderWorkbench,
+  type ItemViewConstructor,
+  type WorkbenchActions,
+  type WorkbenchViewModel,
+} from "../../src/ui/workbench-view";
 import { createQuickCaptureModalClass, type ModalConstructor } from "../../src/ui/quick-capture-modal";
 import { createSettingsTabClass, type PluginSettingTabConstructor } from "../../src/ui/settings-tab";
 import { createSettingsSectionsSurface } from "../../src/ui/settings-sections";
@@ -1793,6 +1799,132 @@ describe("workbench", () => {
     renderWorkbench(root, ready, noOpWorkbenchActions());
     expect(document.activeElement).toBe(outside);
     outside.remove();
+    root.remove();
+  });
+
+  it("restores task targets after real category and folder return actions", () => {
+    const root = createTestDiv();
+    document.body.append(root);
+    const groupKey = `group:${"f".repeat(64)}`;
+    const overview: WorkbenchViewModel = {
+      ...populatedWorkbenchModel(),
+      route: { tab: "task", page: "overview" } as const,
+      boundLibraryPath: "/Science",
+      verificationRoot: "/Science",
+      workflow: {
+        kind: "ready" as const,
+        primaryAction: "start" as const,
+        titleKey: "workflow.ready.title" as const,
+        descriptionKey: "workflow.ready.description" as const,
+        recommendedGroup: null,
+        canShowTechnicalDetails: false,
+      },
+      hybridCatalog: {
+        ...TEST_INACTIVE_HYBRID_EXECUTION,
+        status: "ready" as const,
+        active: {
+          ...TEST_HYBRID_ACTIVE_AUTHORITY,
+          importedAt: 1,
+          pdfCount: 1,
+          unverifiedCount: 1,
+          verifiedCount: 0,
+          differenceCount: 0,
+          cloudMissingCount: 0,
+          groupCount: 1,
+          verifiedGroupCount: 0,
+          coveredCandidatePdfCount: 0,
+          groups: [{
+            groupKey,
+            rootRelativePath: "Science",
+            label: "Science",
+            pdfCount: 1,
+            mode: "recursive" as const,
+            verificationStatus: "unverified" as const,
+          }],
+        },
+      },
+    };
+    const category: WorkbenchViewModel = {
+      ...overview,
+      route: { tab: "task", page: "category-selection" },
+    };
+    const folder: WorkbenchViewModel = {
+      ...overview,
+      route: { tab: "task", page: "folder-selection" },
+      folderSelection: {
+        ...inlineFolderSelectionState(),
+        state: {
+          ...inlineFolderSelectionState().state,
+          selectedPath: "/Science",
+          draftSelection: {
+            kind: "directory",
+            selectedPath: "/Science",
+            effectiveRoot: "/Science",
+          },
+        },
+      },
+    };
+    const fallbackOverview: WorkbenchViewModel = { ...overview, boundLibraryPath: null };
+    let returnModel: WorkbenchViewModel = overview;
+    let actions: WorkbenchActions;
+    const returnToOverview = () => renderWorkbench(
+      root,
+      returnModel,
+      actions,
+      NORMAL_RUNTIME_POLICY,
+      undefined,
+      createFolderSelectionHostCapability(),
+    );
+    actions = noOpWorkbenchActions({
+      onTaskCancelCategorySelection: returnToOverview,
+      onTaskSaveCategorySelection: returnToOverview,
+      folderSelectionActions: () => ({
+        ...noOpFolderSelectionActions(),
+        onBack: returnToOverview,
+        onUse: returnToOverview,
+      }),
+    });
+    const renderSubpage = (model: WorkbenchViewModel) => renderWorkbench(
+      root,
+      model,
+      actions,
+      NORMAL_RUNTIME_POLICY,
+      undefined,
+      createFolderSelectionHostCapability(),
+    );
+
+    renderSubpage(category);
+    const cancel = root.querySelector<HTMLButtonElement>('[data-focus-key="task-category-cancel"]')!;
+    cancel.focus();
+    cancel.click();
+    expect(document.activeElement).toBe(root.querySelector("[data-task-choose-category]"));
+
+    renderSubpage(category);
+    const save = root.querySelector<HTMLButtonElement>('[data-focus-key="task-category-save"]')!;
+    save.focus();
+    save.click();
+    expect(document.activeElement).toBe(root.querySelector("[data-task-choose-category]"));
+
+    returnModel = fallbackOverview;
+    renderSubpage(category);
+    const fallbackCancel = root.querySelector<HTMLButtonElement>('[data-focus-key="task-category-cancel"]')!;
+    fallbackCancel.focus();
+    fallbackCancel.click();
+    expect(document.activeElement).toBe(root.querySelector("[data-task-primary]"));
+
+    returnModel = overview;
+    renderSubpage(folder);
+    expect(document.activeElement).toBe(root.querySelector("[data-folder-selection-query]"));
+    const back = root.querySelector<HTMLButtonElement>('[data-focus-key="folder-selection-back"]')!;
+    back.focus();
+    back.click();
+    expect(document.activeElement).toBe(root.querySelector("[data-task-primary]"));
+
+    renderSubpage(folder);
+    const use = root.querySelector<HTMLButtonElement>('[data-focus-key="folder-selection-use"]')!;
+    use.focus();
+    use.click();
+    expect(document.activeElement).toBe(root.querySelector("[data-task-primary]"));
     root.remove();
   });
 

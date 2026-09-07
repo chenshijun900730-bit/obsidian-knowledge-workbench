@@ -159,6 +159,9 @@ describe("folder selection page", () => {
 
     expect(host.querySelector('[data-action="folder-selection-back"]')?.textContent)
       .toBe("返回云端核验");
+    expect(host.querySelector<HTMLButtonElement>(
+      '[data-focus-key="folder-selection-back"]',
+    )).not.toBeNull();
     expect(host.querySelector('[data-folder-selection-query="true"]')).not.toBeNull();
     expect(host.querySelector<HTMLInputElement>('[data-folder-selection-query="true"]')
       ?.dataset.focusKey).toBe("folder-selection-query");
@@ -167,6 +170,9 @@ describe("folder selection page", () => {
     expect(host.textContent).not.toContain("TXT 提示目录");
     expect(host.textContent).toContain("已选文件夹：/我的网盘/全部文件/科学文库");
     expect(host.querySelectorAll('[data-action="use-folder-selection"]')).toHaveLength(1);
+    expect(host.querySelector<HTMLButtonElement>(
+      '[data-focus-key="folder-selection-use"]',
+    )).not.toBeNull();
     expect(host.querySelector('[data-folder-selection-advanced="true"]')).toBeNull();
     expect(host.querySelector('[data-directory-source]')).toBeNull();
     expect(host.querySelector('[data-action="reveal-root-browser"]')).toBeNull();

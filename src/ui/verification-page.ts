@@ -247,12 +247,14 @@ export const renderVerificationCategoryEditor = (
   actionsRow.className = "knowledge-workbench__category-actions";
   const back = doc.createElement("button");
   back.type = "button";
+  back.dataset.focusKey = "task-category-cancel";
   back.textContent = model.i18n.t("task.category.cancel");
   back.addEventListener("click", actions.onCancel);
   const save = doc.createElement("button");
   save.type = "button";
   save.className = "mod-cta";
   save.dataset.taskCategorySave = "true";
+  save.dataset.focusKey = "task-category-save";
   save.textContent = model.i18n.t("task.category.save");
   save.addEventListener("click", () => {
     if (disposed) return;

@@ -185,6 +185,7 @@ export function renderFolderSelectionPage(
   const back = doc.createElement("button");
   back.type = "button";
   back.dataset.action = "folder-selection-back";
+  back.dataset.focusKey = "folder-selection-back";
   back.textContent = snapshot.returnLabel;
   back.addEventListener("click", actions.onBack, { signal: events.signal });
   const title = doc.createElement("h2");
@@ -285,6 +286,7 @@ export function renderFolderSelectionPage(
   const use = doc.createElement("button");
   use.type = "button";
   use.dataset.action = "use-folder-selection";
+  use.dataset.focusKey = "folder-selection-use";
   use.textContent = snapshot.legacyProgressMode === "requires-fresh"
     ? i18n.t("folderSelection.useFresh")
     : i18n.t("directoryPicker.use");
