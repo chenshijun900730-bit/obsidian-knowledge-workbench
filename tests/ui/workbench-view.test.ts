@@ -1,9 +1,16 @@
 // @vitest-environment jsdom
 import { describe, expect, it, vi } from "vitest";
-import { createWorkbenchViewClass, renderWorkbench, type ItemViewConstructor } from "../../src/ui/workbench-view";
+import {
+  createWorkbenchViewClass,
+  renderWorkbench,
+  type ItemViewConstructor,
+  type WorkbenchActions,
+  type WorkbenchViewModel,
+} from "../../src/ui/workbench-view";
 import { createQuickCaptureModalClass, type ModalConstructor } from "../../src/ui/quick-capture-modal";
 import { createSettingsTabClass, type PluginSettingTabConstructor } from "../../src/ui/settings-tab";
 import { createSettingsSectionsSurface } from "../../src/ui/settings-sections";
+import type { WorkbenchRoute } from "../../src/ui/workbench-route";
 import {
   activateWorkbench,
   activateWorkbenchWithRetry,
@@ -23,6 +30,13 @@ import {
   READ_ONLY_ACCEPTANCE_POLICY,
 } from "../../src/runtime/safety-policy";
 import { EMPTY_RECENT_CLOUD_DIRECTORIES } from "../../src/storage/recent-cloud-directories";
+import { LARGE_CATALOG_AUTO_CHAIN_MAX_SEGMENTS } from "../../src/catalog/hybrid-catalog-types";
+
+const INACTIVE_AUTO_RESUME = {
+  autoResumeState: "inactive" as const,
+  autoSegmentIndex: 0,
+  autoSegmentLimit: LARGE_CATALOG_AUTO_CHAIN_MAX_SEGMENTS,
+};
 import {
   controllerFixture,
   manualProjectionScheduler,
@@ -30,6 +44,11 @@ import {
   noOpWorkbenchActions,
   populatedWorkbenchModel,
   quickCaptureFixture,
+  TEST_CLOUD_VERIFICATION_ROOT_HASHER,
+  TEST_HYBRID_ACTIVE_AUTHORITY,
+  TEST_INACTIVE_HYBRID_EXECUTION,
+  TEST_LARGE_BATCH_AUTHORITY,
+  TEST_NEEDS_TXT_WORKFLOW,
   type ProjectionSchedulerDependency,
 } from "../helpers/ui-fixtures";
 import {
@@ -37,12 +56,94 @@ import {
   FakeCloudCatalogRuntime,
   FakeHybridCatalogRuntime,
 } from "../fakes/fake-cloud-catalog-runtime";
-import { HybridCatalogError } from "../../src/catalog/hybrid-catalog-types";
+import {
+  HybridCatalogError,
+} from "../../src/catalog/hybrid-catalog-types";
+import type { LargeCatalogBatchSummary } from "../../src/catalog/hybrid-catalog-runtime";
+import type { CatalogDisplayItem, CloudCatalogViewModel } from "../../src/catalog/cloud-catalog-runtime";
+import type { CloudDirectorySelection } from "../../src/catalog/cloud-directory-selection";
+import type { CloudDirectoryPickerPresenter } from "../../src/ui/cloud-directory-picker";
+import { deriveCloudVerificationScope } from "../../src/catalog/cloud-verification-scope";
+import type {
+  FolderSelectionHostActions,
+  FolderSelectionHostCapability,
+  FolderSelectionRenderState,
+} from "../../src/ui/folder-selection-host";
+import { createFolderSelectionHostCapability } from "../../src/ui/folder-selection-page";
 
 const createTestDiv = (): HTMLDivElement => document.createElementNS(
   "http://www.w3.org/1999/xhtml",
   "div",
 ) as HTMLDivElement;
+
+const libraryRecord = (index: number): CatalogDisplayItem => ({
+  catalogId: `txt:${String(index).padStart(64, "0")}`,
+  filename: `会话最近查看-${index}.pdf`,
+  pathLabel: `/合成目录-${index}/会话最近查看-${index}.pdf`,
+  cloudPathAvailable: false,
+  verificationStatus: "unverified",
+  differenceKinds: [],
+  hierarchyTags: [`folder/合成目录-${index}`],
+});
+
+const libraryCatalog = (
+  items: readonly CatalogDisplayItem[],
+  query = "",
+): CloudCatalogViewModel => ({
+  ...populatedWorkbenchModel().catalog,
+  status: "ready",
+  source: "unified",
+  pdfCount: 6,
+  query,
+  total: items.length,
+  items,
+});
+
+const inlineFolderSelectionState = (): FolderSelectionRenderState => ({
+  revision: 7,
+  locale: "zh-CN",
+  returnLabel: "返回云端核验",
+  legacyProgressMode: "none",
+  state: {
+    phase: "local",
+    purpose: { kind: "scan" },
+    query: "科学",
+    enabledSources: ["recent", "session-cache", "txt-group", "cloud-locator"],
+    rankedCandidates: [],
+    selectedPath: null,
+    draftSelection: null,
+    lookupDetail: null,
+    browserPath: null,
+    browserHighlightedPath: null,
+    browserLayer: null,
+    visibleBrowserDirectories: [],
+    browserActivity: "idle",
+    browserDetail: { round: null, fixedError: null },
+    statusCode: null,
+  },
+});
+
+const noOpFolderSelectionActions = (): FolderSelectionHostActions => ({
+  onBack: () => undefined,
+  onQuery: () => undefined,
+  onToggleSource: () => undefined,
+  onSelectCandidate: () => undefined,
+  onUse: () => undefined,
+  onBrowseOther: () => undefined,
+  onConfirmLookup: () => undefined,
+  onRevealRoot: () => undefined,
+  onConfirmRoot: () => undefined,
+  onBrowserAction: {
+    onNavigate: () => undefined,
+    onHighlight: () => undefined,
+    onSelectCurrent: () => undefined,
+    onSelectHighlighted: () => undefined,
+    onSelectCategory: () => undefined,
+    onContinue: () => undefined,
+    onRetry: () => undefined,
+    onCancel: () => undefined,
+  },
+});
 
 describe("workbench", () => {
   it.each([
@@ -89,6 +190,7 @@ describe("workbench", () => {
     };
     const base = {
       ...populatedWorkbenchModel(),
+      route: { tab: "more", page: "knowledge-tools" } as const,
       locale,
       aiSuggestion: { action: "summarize" as const, text: "MODEL-OUTPUT" },
       suggestions: [suggestion],
@@ -102,6 +204,29 @@ describe("workbench", () => {
     for (const label of suggestionLabels) expect(root.textContent).toContain(label);
     expect(root.textContent).toContain("原文/Keep.md");
     expect(root.querySelector<HTMLButtonElement>("button:disabled")).not.toBeNull();
+  });
+
+  it.each([
+    ["task.txtContentUnchanged", "目录 TXT 内容没有变化，已保留当前书库绑定。"],
+    ["task.txtImportFailed", "目录 TXT 未导入；现有目录保持不变。"],
+    ["verification-must-pause", "请先暂停当前核验，再执行此操作。"],
+    ["scan-must-cancel", "请先取消当前云端扫描，再执行此操作。"],
+    ["cloud-authority-operation-busy", "另一项云端安全操作正在进行；请等待完成后重试。"],
+    ["authorization-attempt-unavailable", "本次授权已失效，请从对应的重新连接或更换账号操作重新开始。"],
+    ["folder-selection-preserved", "已保留已有核验进度。"],
+    ["folder-selection-binding-failed", "操作未能完成；本地数据保持不变。"],
+  ] as const)("localizes fixed task status %s on the shared workbench surface", (
+    statusMessage,
+    expected,
+  ) => {
+    const root = createTestDiv();
+    renderWorkbench(root, {
+      ...populatedWorkbenchModel(),
+      locale: "zh-CN",
+      statusMessage,
+    }, noOpWorkbenchActions());
+
+    expect(root.querySelector('[role="status"]')?.textContent).toContain(expected);
   });
 
   it.each([
@@ -142,7 +267,7 @@ describe("workbench", () => {
     await expect(result).resolves.toBeNull();
   });
 
-  it("mounts the shared grouped settings surface on the settings destination", async () => {
+  it("renders the More summary instead of a second settings surface", async () => {
     const root = createTestDiv();
     const startup = vi.fn(async () => undefined);
     const controller = {
@@ -158,6 +283,10 @@ describe("workbench", () => {
         aiModel: "",
         secretId: "",
         recentCloudDirectories: EMPTY_RECENT_CLOUD_DIRECTORIES,
+        boundCloudLibrary: null,
+        cloudVerificationGeneration: 0,
+        verificationBatchTombstones: { schemaVersion: 1, state: "valid", batchIds: [] } as const,
+        legacyVerificationAdoption: { schemaVersion: 1, state: "none" } as const,
       }),
       folderRuleProposals: () => [],
       previewSampleChange: () => undefined,
@@ -175,25 +304,287 @@ describe("workbench", () => {
 
     renderWorkbench(root, {
       ...populatedWorkbenchModel(),
-      activeTab: "settings",
+      route: { tab: "more", page: "overview" },
     }, noOpWorkbenchActions(), NORMAL_RUNTIME_POLICY, surface);
 
-    expect(Array.from(root.querySelectorAll("[data-settings-section]"))
-      .map((node) => node.getAttribute("data-settings-section"))).toEqual([
-      "language", "baidu", "large-catalog", "verification", "privacy-ai",
-    ]);
-    const startupInput = root.querySelector<HTMLInputElement>('input[type="checkbox"]')!;
-    startupInput.checked = true;
-    startupInput.dispatchEvent(new Event("change", { bubbles: true }));
-    await Promise.resolve();
-    expect(startup).toHaveBeenCalledWith(true);
+    expect(root.querySelectorAll("[data-settings-section]")).toHaveLength(0);
+    expect(root.textContent).toContain("笔记改动");
+    expect(root.textContent).toContain("高级功能");
+    expect(startup).not.toHaveBeenCalled();
   });
 
-  it("always renders the dedicated verification page on the verification destination", () => {
+  it("dispatches each legal temporary route without reviving the retired five-page shell", () => {
+    const root = createTestDiv();
+    const base = populatedWorkbenchModel();
+    const settingsSurface = {
+      render: (host: HTMLElement) => {
+        const marker = host.ownerDocument.createElement("p");
+        marker.dataset.settingsMarker = "true";
+        host.append(marker);
+      },
+      dispose: () => undefined,
+    };
+
+    renderWorkbench(
+      root,
+      { ...base, route: { tab: "library" } },
+      noOpWorkbenchActions(),
+      NORMAL_RUNTIME_POLICY,
+      settingsSurface,
+    );
+    expect(root.querySelector(".knowledge-workbench__cloud-catalog")).not.toBeNull();
+
+    renderWorkbench(root, {
+      ...base,
+      route: { tab: "task", page: "overview" },
+    }, noOpWorkbenchActions(), NORMAL_RUNTIME_POLICY, settingsSurface);
+    expect(root.querySelector(".knowledge-workbench__task-page")).not.toBeNull();
+
+    renderWorkbench(root, {
+      ...base,
+      route: { tab: "task", page: "category-selection" },
+    }, noOpWorkbenchActions(), NORMAL_RUNTIME_POLICY, settingsSurface);
+    expect(root.querySelector(".knowledge-workbench__category-page")).not.toBeNull();
+
+    renderWorkbench(root, {
+      ...base,
+      route: { tab: "task", page: "folder-selection" },
+    }, noOpWorkbenchActions(), NORMAL_RUNTIME_POLICY, settingsSurface);
+    expect(root.querySelector(".knowledge-workbench__verification-page")).not.toBeNull();
+
+    renderWorkbench(root, {
+      ...base,
+      route: { tab: "more", page: "history" },
+    }, noOpWorkbenchActions(), NORMAL_RUNTIME_POLICY, settingsSurface);
+    expect(root.textContent).toContain("暂无操作记录");
+
+    renderWorkbench(root, {
+      ...base,
+      route: { tab: "more", page: "knowledge-tools" },
+    }, noOpWorkbenchActions(), NORMAL_RUNTIME_POLICY, settingsSurface);
+    expect(root.querySelector(".knowledge-workbench__start")).not.toBeNull();
+
+    for (const page of [
+      "connection",
+      "catalog-data",
+      "language",
+      "advanced",
+      "privacy-ai",
+    ] as const) {
+      renderWorkbench(root, {
+        ...base,
+        route: { tab: "more", page },
+      }, noOpWorkbenchActions(), NORMAL_RUNTIME_POLICY, settingsSurface);
+      expect(root.querySelector('[data-settings-marker="true"]')).not.toBeNull();
+    }
+  });
+
+  it("routes Advanced to one scan subsection, knowledge tools, Task, and More back", () => {
+    const root = createTestDiv();
+    const routes: WorkbenchRoute[] = [];
+    const openTaskOverview = vi.fn();
+    const render = vi.fn((host: HTMLElement, _locale: string, options?: {
+      section?: string;
+      onBackToMore?: () => void;
+      onOpenTaskOverview?: () => void;
+    }) => {
+      const back = host.ownerDocument.createElement("button");
+      back.dataset.action = "more-back";
+      back.addEventListener("click", () => options?.onBackToMore?.());
+      const task = host.ownerDocument.createElement("button");
+      task.dataset.action = "open-task-overview";
+      task.addEventListener("click", () => options?.onOpenTaskOverview?.());
+      host.append(back, task);
+    });
+    renderWorkbench(root, {
+      ...populatedWorkbenchModel(),
+      route: { tab: "more", page: "advanced" },
+    }, noOpWorkbenchActions({
+      onSelectRoute: (route) => routes.push(route),
+      onOpenTaskOverview: openTaskOverview,
+    }), NORMAL_RUNTIME_POLICY, { render, dispose: () => undefined });
+
+    expect(render.mock.calls[0]?.[2]).toMatchObject({ section: "cloud-scan-advanced" });
+    root.querySelector<HTMLButtonElement>('[data-action="open-task-overview"]')?.click();
+    root.querySelector<HTMLButtonElement>('[data-action="more-back"]')?.click();
+    root.querySelector<HTMLButtonElement>('[data-action="open-knowledge-tools"]')?.click();
+    root.querySelector<HTMLButtonElement>('[data-action="open-privacy-ai"]')?.click();
+    expect(openTaskOverview).toHaveBeenCalledOnce();
+    expect(routes).toEqual([
+      { tab: "more", page: "overview" },
+      { tab: "more", page: "knowledge-tools" },
+      { tab: "more", page: "privacy-ai" },
+    ]);
+  });
+
+  it("disposes a rendered settings surface when switching subsection or leaving its route", () => {
+    const root = createTestDiv();
+    const render = vi.fn((host: HTMLElement) => {
+      const marker = host.ownerDocument.createElement("p");
+      marker.dataset.settingsMarker = "true";
+      host.append(marker);
+    });
+    const dispose = vi.fn();
+    const surface = { render, dispose };
+    const base = populatedWorkbenchModel();
+
+    renderWorkbench(root, {
+      ...base,
+      route: { tab: "more", page: "overview" },
+    }, noOpWorkbenchActions(), NORMAL_RUNTIME_POLICY, surface);
+    renderWorkbench(root, {
+      ...base,
+      route: { tab: "more", page: "connection" },
+    }, noOpWorkbenchActions(), NORMAL_RUNTIME_POLICY, surface);
+
+    renderWorkbench(root, {
+      ...base,
+      route: { tab: "more", page: "language" },
+    }, noOpWorkbenchActions(), NORMAL_RUNTIME_POLICY, surface);
+
+    expect(render).toHaveBeenCalledTimes(2);
+    expect(dispose).toHaveBeenCalledOnce();
+
+    renderWorkbench(root, {
+      ...base,
+      route: { tab: "library" },
+    }, noOpWorkbenchActions(), NORMAL_RUNTIME_POLICY, surface);
+    renderWorkbench(root, {
+      ...base,
+      route: { tab: "library" },
+    }, noOpWorkbenchActions(), NORMAL_RUNTIME_POLICY, surface);
+
+    expect(dispose).toHaveBeenCalledTimes(2);
+  });
+
+  it("disposes the active settings surface once when the concrete view closes", async () => {
+    class ItemViewSurface {
+      readonly contentEl = createTestDiv();
+    }
+    const fixture = controllerFixture();
+    fixture.controller.selectRoute({ tab: "more", page: "advanced" });
+    const render = vi.fn();
+    const dispose = vi.fn();
+    const WorkbenchView = createWorkbenchViewClass(
+      ItemViewSurface as unknown as ItemViewConstructor,
+      NORMAL_RUNTIME_POLICY,
+    );
+    const view = new WorkbenchView(
+      {} as WorkspaceLeaf,
+      fixture.controller,
+      { render, dispose },
+    );
+
+    await view.onOpen();
+    expect(render).toHaveBeenCalledOnce();
+    await view.onClose();
+    await view.onClose();
+
+    expect(dispose).toHaveBeenCalledOnce();
+    fixture.controller.dispose();
+  });
+
+  it("maps the three shell destinations to their legal default routes", () => {
+    const root = createTestDiv();
+    const onSelectRoute = vi.fn();
+    renderWorkbench(root, populatedWorkbenchModel(), noOpWorkbenchActions({
+      onSelectRoute,
+    }));
+
+    root.querySelector<HTMLButtonElement>('[data-workbench-page="task"]')?.click();
+    root.querySelector<HTMLButtonElement>('[data-workbench-page="more"]')?.click();
+
+    expect(onSelectRoute.mock.calls).toEqual([
+      [{ tab: "task", page: "overview" }],
+      [{ tab: "more", page: "overview" }],
+    ]);
+  });
+
+  it("keeps only five explicitly opened catalog details in a detached session MRU", () => {
+    const root = createTestDiv();
+    const base = populatedWorkbenchModel();
+    const records = Array.from({ length: 7 }, (_, index) => libraryRecord(index + 1));
+    const onSelectCatalogRecord = vi.fn();
+    const actions = noOpWorkbenchActions({ onSelectCatalogRecord });
+    const renderPage = (items: readonly CatalogDisplayItem[], query = "") => {
+      renderWorkbench(root, {
+        ...base,
+        catalog: libraryCatalog(items, query),
+        selectedCatalogId: null,
+      }, actions);
+    };
+
+    for (const record of records.slice(0, 6)) {
+      renderPage([record]);
+      root.querySelector<HTMLElement>('[data-action="open-catalog-detail"]')?.click();
+    }
+    renderPage([records[2]!]);
+    root.querySelector<HTMLElement>('[data-action="open-catalog-detail"]')?.click();
+    renderPage([records[6]!]);
+    renderPage([]);
+
+    const recentText = root.textContent ?? "";
+    expect(recentText).not.toContain(records[0]!.filename);
+    expect(recentText).not.toContain(records[6]!.filename);
+    for (const record of [records[1]!, records[2]!, records[3]!, records[4]!, records[5]!]) {
+      expect(recentText).toContain(record.filename);
+    }
+    expect(recentText.indexOf(records[2]!.filename)).toBeLessThan(
+      recentText.indexOf(records[5]!.filename),
+    );
+    expect(recentText.split(records[2]!.filename).length - 1).toBe(1);
+    expect(onSelectCatalogRecord).toHaveBeenCalledTimes(7);
+
+    renderPage([], "会话");
+    expect(root.textContent).not.toContain(records[2]!.filename);
+  });
+
+  it("routes the library reminder only to the task overview", () => {
+    const root = createTestDiv();
+    const onSelectRoute = vi.fn();
+    renderWorkbench(root, populatedWorkbenchModel(), noOpWorkbenchActions({
+      onSelectRoute,
+    }));
+
+    root.querySelector<HTMLButtonElement>('[data-action="open-library-task"]')?.click();
+
+    expect(onSelectRoute).toHaveBeenCalledOnce();
+    expect(onSelectRoute).toHaveBeenCalledWith({ tab: "task", page: "overview" });
+  });
+
+  it("clears the catalog-detail MRU when the concrete Workbench view closes", async () => {
+    class ItemViewSurface {
+      readonly contentEl = createTestDiv();
+    }
+    const record = libraryRecord(8);
+    const catalog = new FakeCloudCatalogRuntime(libraryCatalog([record]));
+    const fixture = controllerFixture({ catalog });
+    const WorkbenchView = createWorkbenchViewClass(
+      ItemViewSurface as unknown as ItemViewConstructor,
+      NORMAL_RUNTIME_POLICY,
+    );
+    const view = new WorkbenchView({} as WorkspaceLeaf, fixture.controller);
+
+    await view.onOpen();
+    view.contentEl.querySelector<HTMLElement>('[data-action="open-catalog-detail"]')?.click();
+    await vi.waitFor(() => expect(fixture.controller.snapshot().selectedCatalogId)
+      .toBe(record.catalogId));
+    catalog.setSnapshot(libraryCatalog([]));
+    await vi.waitFor(() => expect(view.contentEl.textContent).toContain(record.filename));
+
+    await view.onClose();
+    await view.onOpen();
+    expect(view.contentEl.textContent).not.toContain(record.filename);
+
+    await view.onClose();
+    fixture.controller.dispose();
+  });
+
+  it("renders the single-action task page on the task destination", () => {
     const root = createTestDiv();
     renderWorkbench(root, {
       ...populatedWorkbenchModel(),
-      activeTab: "verification",
+      route: { tab: "task", page: "overview" },
       suggestions: [{
         operation: { id: "legacy-suggestion", kind: "rename", sourcePath: "A.md", targetPath: "B.md" },
         localRationale: { source: "local", summary: "legacy", signals: [], confidence: "high", impact: 1 },
@@ -201,27 +592,172 @@ describe("workbench", () => {
       }],
     }, noOpWorkbenchActions());
 
-    expect(root.querySelector(".knowledge-workbench__verification-page")).not.toBeNull();
-    expect(root.textContent).toContain("云端核验能力不可用");
+    expect(root.querySelector(".knowledge-workbench__task-page")).not.toBeNull();
+    expect(root.querySelectorAll("[data-task-primary]")).toHaveLength(1);
+    expect(root.textContent).toContain("选择目录数据");
     expect(root.querySelector('[aria-label="Organization suggestions"]')).toBeNull();
+  });
+
+  it("keeps the real DOM TXT picker alive across an unrelated rerender and rejects a double click", async () => {
+    class ItemViewSurface {
+      readonly contentEl = createTestDiv();
+    }
+    const hybrid = new FakeHybridCatalogRuntime({ status: "empty" });
+    const fixture = controllerFixture({
+      catalog: new FakeCloudCatalogRuntime({}, undefined, hybrid),
+    });
+    fixture.controller.selectRoute({ tab: "task", page: "overview" });
+    const WorkbenchView = createWorkbenchViewClass(
+      ItemViewSurface as unknown as ItemViewConstructor,
+      NORMAL_RUNTIME_POLICY,
+    );
+    const view = new WorkbenchView({} as WorkspaceLeaf, fixture.controller);
+    document.body.append(view.contentEl);
+    await view.onOpen();
+
+    expect(document.querySelector('[data-local-catalog-txt-host] input[type="file"]')).toBeNull();
+    view.contentEl.querySelector<HTMLButtonElement>("[data-task-primary]")!.click();
+    const picker = await vi.waitFor(() => {
+      const input = document.querySelector<HTMLInputElement>(
+        '[data-local-catalog-txt-host] input[type="file"]',
+      );
+      expect(input).not.toBeNull();
+      return input!;
+    });
+    expect(picker.accept).toBe(".txt,text/plain");
+    expect(fixture.controller.snapshot().taskActionPending).toBe(true);
+    expect(view.contentEl.contains(picker)).toBe(false);
+    view.contentEl.querySelector<HTMLButtonElement>("[data-task-primary]")!.click();
+    expect(document.querySelectorAll('[data-local-catalog-txt-host] input[type="file"]')).toHaveLength(1);
+
+    fixture.controller.searchCatalog("unrelated");
+    await vi.waitFor(() => expect(picker.isConnected).toBe(true));
+    expect(fixture.controller.snapshot().taskActionPending).toBe(true);
+    picker.dispatchEvent(new Event("cancel"));
+    await vi.waitFor(() => expect(fixture.controller.snapshot().taskActionPending).toBe(false));
+    expect(hybrid.previewPaths).toEqual([]);
+
+    await view.onClose();
+    view.contentEl.remove();
+    fixture.controller.dispose();
+  });
+
+  it("renders the injected folder page inline and disposes it before returning to verification", () => {
+    const root = createTestDiv();
+    const dispose = vi.fn();
+    const render = vi.fn<FolderSelectionHostCapability["render"]>((host, state) => {
+      const marker = host.ownerDocument.createElement("p");
+      marker.dataset.inlineFolderSelection = "true";
+      marker.textContent = `${state.returnLabel}:${state.revision}`;
+      host.append(marker);
+      return { dispose };
+    });
+    const capability: FolderSelectionHostCapability = { available: true, render };
+    const folderSelectionActions = vi.fn(() => noOpFolderSelectionActions());
+    const model = {
+      ...populatedWorkbenchModel(),
+      route: { tab: "task", page: "folder-selection" } as const,
+      folderSelection: inlineFolderSelectionState(),
+    };
+
+    renderWorkbench(
+      root,
+      model,
+      noOpWorkbenchActions({ folderSelectionActions }),
+      NORMAL_RUNTIME_POLICY,
+      undefined,
+      capability,
+    );
+
+    expect(render).toHaveBeenCalledOnce();
+    expect(folderSelectionActions).toHaveBeenCalledWith(7);
+    expect(root.querySelector('[data-inline-folder-selection="true"]')?.textContent)
+      .toBe("返回云端核验:7");
+    expect(root.querySelector(".knowledge-workbench__verification-page")).toBeNull();
+
+    renderWorkbench(
+      root,
+      { ...model, folderSelection: undefined },
+      noOpWorkbenchActions(),
+      NORMAL_RUNTIME_POLICY,
+      undefined,
+      capability,
+    );
+
+    expect(dispose).toHaveBeenCalledOnce();
+    expect(root.querySelector(".knowledge-workbench__verification-page")).not.toBeNull();
+  });
+
+  it("never renders an injected normal folder page in read-only acceptance mode", () => {
+    const root = createTestDiv();
+    const render = vi.fn<FolderSelectionHostCapability["render"]>(() => ({
+      dispose: () => undefined,
+    }));
+
+    renderWorkbench(
+      root,
+      {
+        ...populatedWorkbenchModel(),
+        route: { tab: "task", page: "folder-selection" },
+        folderSelection: inlineFolderSelectionState(),
+      },
+      noOpWorkbenchActions({ folderSelectionActions: () => noOpFolderSelectionActions() }),
+      READ_ONLY_ACCEPTANCE_POLICY,
+      undefined,
+      { available: true, render },
+    );
+
+    expect(render).not.toHaveBeenCalled();
+    expect(root.querySelector(".knowledge-workbench__verification-page")).not.toBeNull();
+  });
+
+  it("falls back to the legacy verification page when inline actions are incomplete", () => {
+    const root = createTestDiv();
+    const render = vi.fn<FolderSelectionHostCapability["render"]>(() => ({
+      dispose: () => undefined,
+    }));
+
+    renderWorkbench(
+      root,
+      {
+        ...populatedWorkbenchModel(),
+        route: { tab: "task", page: "folder-selection" },
+        folderSelection: inlineFolderSelectionState(),
+      },
+      noOpWorkbenchActions(),
+      NORMAL_RUNTIME_POLICY,
+      undefined,
+      { available: true, render },
+    );
+
+    expect(render).not.toHaveBeenCalled();
+    expect(root.querySelector(".knowledge-workbench__verification-page")).not.toBeNull();
   });
 
   it("fills an empty verification draft without starting, resuming, or locating again", async () => {
     const root = createTestDiv();
     const groupKey = `group:${"d".repeat(64)}`;
     const onSetVerificationRoot = vi.fn();
+    const onApplyVerificationDirectorySelection = vi.fn();
     const onStartSelectedVerification = vi.fn(async () => undefined);
     const onResumeSelectedVerification = vi.fn(async () => undefined);
-    const onBrowseVerificationRoot = vi.fn(async () => "/Synthetic/Science");
+    const selection: CloudDirectorySelection = {
+      kind: "directory",
+      selectedPath: "/Synthetic/Science",
+      effectiveRoot: "/Synthetic/Science",
+    };
+    const onBrowseVerificationRoot = vi.fn(async () => selection);
     const model = {
       ...populatedWorkbenchModel(),
-      activeTab: "verification" as const,
+      route: { tab: "task", page: "folder-selection" } as const,
       verificationRoot: "",
       selectedVerificationGroupKeys: [groupKey],
       catalogConnection: { status: "authorized" as const },
       hybridCatalog: {
+        ...TEST_INACTIVE_HYBRID_EXECUTION,
         status: "ready" as const,
         active: {
+          ...TEST_HYBRID_ACTIVE_AUTHORITY,
           importedAt: 1,
           pdfCount: 1,
           unverifiedCount: 1,
@@ -230,8 +766,10 @@ describe("workbench", () => {
           cloudMissingCount: 0,
           groupCount: 1,
           verifiedGroupCount: 0,
+          coveredCandidatePdfCount: 0,
           groups: [{
             groupKey,
+            rootRelativePath: "Literature",
             label: "Literature",
             pdfCount: 1,
             mode: "recursive" as const,
@@ -245,6 +783,7 @@ describe("workbench", () => {
       onStartSelectedVerification,
       onResumeSelectedVerification,
       onBrowseVerificationRoot,
+      onApplyVerificationDirectorySelection,
     }));
 
     const choose = root.querySelector<HTMLButtonElement>(
@@ -256,13 +795,19 @@ describe("workbench", () => {
     await Promise.resolve();
 
     expect(onBrowseVerificationRoot).toHaveBeenCalledOnce();
-    expect(onSetVerificationRoot).toHaveBeenCalledWith("/Synthetic/Science");
+    expect(onApplyVerificationDirectorySelection).toHaveBeenCalledWith(selection);
+    expect(onSetVerificationRoot).not.toHaveBeenCalled();
     expect(onStartSelectedVerification).not.toHaveBeenCalled();
     expect(onResumeSelectedVerification).not.toHaveBeenCalled();
     expect(root.querySelector('[data-cloud-directory-current="true"]')?.textContent)
       .toContain("/Synthetic/Science");
 
-    renderWorkbench(root, { ...model, locale: "en", verificationRoot: "/Synthetic/Science" },
+    renderWorkbench(root, {
+      ...model,
+      locale: "en",
+      verificationRoot: "/Synthetic/Science",
+      verificationDirectorySelection: selection,
+    },
       noOpWorkbenchActions());
     expect(root.querySelector('[data-cloud-directory-current="true"]')?.textContent)
       .toContain("/Synthetic/Science");
@@ -272,14 +817,14 @@ describe("workbench", () => {
 
   it("disposes the prior verification field on rerender so a late choice cannot change the draft", async () => {
     const root = createTestDiv();
-    let resolveChoice!: (value: string | null) => void;
+    let resolveChoice!: (value: CloudDirectorySelection | null) => void;
     const onSetVerificationRoot = vi.fn();
     const model = {
       ...populatedWorkbenchModel(),
-      activeTab: "verification" as const,
+      route: { tab: "task", page: "folder-selection" } as const,
       verificationRoot: "/Synthetic/Existing",
       catalogConnection: { status: "authorized" as const },
-      hybridCatalog: { status: "ready" as const },
+      hybridCatalog: { ...TEST_INACTIVE_HYBRID_EXECUTION, status: "ready" as const },
     };
     const actions = noOpWorkbenchActions({
       onSetVerificationRoot,
@@ -289,7 +834,11 @@ describe("workbench", () => {
     root.querySelector<HTMLButtonElement>('[data-action="browse-verification-root"]')?.click();
 
     renderWorkbench(root, { ...model, locale: "en" }, actions);
-    resolveChoice("/Synthetic/Late");
+    resolveChoice({
+      kind: "directory",
+      selectedPath: "/Synthetic/Late",
+      effectiveRoot: "/Synthetic/Late",
+    });
     await Promise.resolve();
     await Promise.resolve();
 
@@ -304,10 +853,10 @@ describe("workbench", () => {
     document.body.append(root);
     const model = {
       ...populatedWorkbenchModel(),
-      activeTab: "verification" as const,
+      route: { tab: "task", page: "folder-selection" } as const,
       verificationRoot: "/Synthetic/Existing",
       catalogConnection: { status: "authorized" as const },
-      hybridCatalog: { status: "ready" as const },
+      hybridCatalog: { ...TEST_INACTIVE_HYBRID_EXECUTION, status: "ready" as const },
     };
     const actions = noOpWorkbenchActions();
     renderWorkbench(root, model, actions);
@@ -325,21 +874,188 @@ describe("workbench", () => {
     root.remove();
   });
 
+  it("keeps the advanced verification-root editor open across controller input rerenders", async () => {
+    class ItemViewSurface {
+      readonly contentEl = createTestDiv();
+    }
+    const fixture = controllerFixture();
+    fixture.controller.selectRoute({ tab: "task", page: "folder-selection" });
+    const ConcreteWorkbenchView = createWorkbenchViewClass(
+      ItemViewSurface as unknown as ItemViewConstructor,
+      NORMAL_RUNTIME_POLICY,
+    );
+    const view = new ConcreteWorkbenchView({} as WorkspaceLeaf, fixture.controller);
+    document.body.append(view.contentEl);
+    await view.onOpen();
+
+    const firstDetails = view.contentEl.querySelector<HTMLDetailsElement>(
+      'details[data-cloud-directory-advanced="true"]',
+    )!;
+    firstDetails.open = true;
+    const first = view.contentEl.querySelector<HTMLInputElement>(
+      '[data-verification-root="true"]',
+    )!;
+    first.focus();
+    first.value = "/S";
+    first.setSelectionRange(2, 2, "none");
+    first.dispatchEvent(new Event("input", { bubbles: true }));
+
+    const secondDetails = view.contentEl.querySelector<HTMLDetailsElement>(
+      'details[data-cloud-directory-advanced="true"]',
+    )!;
+    const second = view.contentEl.querySelector<HTMLInputElement>(
+      '[data-verification-root="true"]',
+    )!;
+    expect(secondDetails.open).toBe(true);
+    expect(document.activeElement).toBe(second);
+    expect([second.selectionStart, second.selectionEnd]).toEqual([2, 2]);
+
+    second.value = "/Science";
+    second.setSelectionRange(8, 8, "none");
+    second.dispatchEvent(new Event("input", { bubbles: true }));
+    expect(view.contentEl.querySelector<HTMLDetailsElement>(
+      'details[data-cloud-directory-advanced="true"]',
+    )?.open).toBe(true);
+    expect(fixture.controller.snapshot().verificationRoot).toBe("/Science");
+
+    await view.onClose();
+    view.contentEl.remove();
+    fixture.controller.dispose();
+  });
+
+  it("preserves Task run details and focus while a new segment resets its quota", () => {
+    const root = createTestDiv();
+    document.body.append(root);
+    const groupKey = `group:${"7".repeat(64)}`;
+    const active = {
+      ...TEST_HYBRID_ACTIVE_AUTHORITY,
+      importedAt: 1,
+      pdfCount: 68_959,
+      coveredCandidatePdfCount: 11_870,
+      unverifiedCount: 57_089,
+      verifiedCount: 10_000,
+      differenceCount: 1_870,
+      cloudMissingCount: 0,
+      groupCount: 24,
+      verifiedGroupCount: 7,
+      groups: [{
+        groupKey,
+        rootRelativePath: "Literature",
+        label: "Literature",
+        pdfCount: 252,
+        mode: "recursive" as const,
+        verificationStatus: "unverified" as const,
+      }],
+    };
+    const batch = (
+      overrides: Partial<LargeCatalogBatchSummary> = {},
+    ): LargeCatalogBatchSummary => ({
+      ...TEST_LARGE_BATCH_AUTHORITY,
+      batchId: "batch-rerender",
+      status: "scanning",
+      stopReason: null,
+      resumeAvailable: false,
+      runOrdinal: 1,
+      selectedGroupCount: 1,
+      completedGroupCount: 0,
+      remainingGroupCount: 1,
+      currentGroupIndex: 0,
+      currentGroupKey: groupKey,
+      pdfCount: 9_500,
+      directoryCount: 120,
+      ignoredFileCount: 3,
+      listRequestCount: 27,
+      cumulativeListRequestCount: 427,
+      committedPdfCount: 11_870,
+      committedPageCount: 14,
+      completedDirectoryCount: 112,
+      pendingDirectoryCount: 8,
+      autoResumeState: "running",
+      autoSegmentIndex: 1,
+      autoSegmentLimit: LARGE_CATALOG_AUTO_CHAIN_MAX_SEGMENTS,
+      ...overrides,
+    });
+    const firstModel = {
+      ...populatedWorkbenchModel(),
+      route: { tab: "task", page: "overview" } as const,
+      workflow: {
+        kind: "running" as const,
+        primaryAction: "pause" as const,
+        titleKey: "workflow.running.title" as const,
+        descriptionKey: "workflow.running.description" as const,
+        recommendedGroup: null,
+        canShowTechnicalDetails: true,
+      },
+      verificationRoot: "/Synthetic",
+      selectedVerificationGroupKeys: [groupKey],
+      catalogConnection: { status: "authorized" as const },
+      hybridCatalog: { ...TEST_INACTIVE_HYBRID_EXECUTION, status: "scanning" as const, active, batch: batch() },
+    };
+    renderWorkbench(root, firstModel, noOpWorkbenchActions());
+    const details = root.querySelector<HTMLDetailsElement>('[data-verification-run-details]')!;
+    details.open = true;
+    const summary = details.querySelector<HTMLElement>("summary")!;
+    summary.focus();
+
+    const nextSegmentModel = {
+      ...firstModel,
+      hybridCatalog: {
+        ...TEST_INACTIVE_HYBRID_EXECUTION,
+        status: "scanning" as const,
+        active,
+        batch: batch({
+          runOrdinal: 2,
+          pdfCount: 200,
+          directoryCount: 2,
+          ignoredFileCount: 0,
+          listRequestCount: 1,
+          cumulativeListRequestCount: 428,
+          committedPdfCount: 12_070,
+          committedPageCount: 15,
+          completedDirectoryCount: 113,
+          pendingDirectoryCount: 7,
+          autoSegmentIndex: 2,
+        }),
+      },
+    };
+    renderWorkbench(root, nextSegmentModel, noOpWorkbenchActions());
+
+    const rerendered = root.querySelector<HTMLDetailsElement>('[data-verification-run-details]')!;
+    expect(rerendered.open).toBe(true);
+    expect(document.activeElement).toBe(rerendered.querySelector("summary"));
+    expect(rerendered.querySelector('[data-verification-run-requests]')?.textContent)
+      .toContain("428");
+    expect(root.querySelector<HTMLProgressElement>('[data-verification-segment-budget]')?.value)
+      .toBe(200);
+    expect(root.querySelector<HTMLProgressElement>('[data-verification-overall-progress]')?.value)
+      .toBe(11_870);
+    root.remove();
+  });
+
   it("restores focus to the replacement choose button after selection rerenders the host", async () => {
     const root = createTestDiv();
     document.body.append(root);
     let currentModel = {
       ...populatedWorkbenchModel(),
-      activeTab: "verification" as const,
+      route: { tab: "task", page: "folder-selection" } as const,
       verificationRoot: "",
       catalogConnection: { status: "authorized" as const },
-      hybridCatalog: { status: "ready" as const },
+      hybridCatalog: { ...TEST_INACTIVE_HYBRID_EXECUTION, status: "ready" as const },
     };
     let actions = noOpWorkbenchActions();
+    const selection: CloudDirectorySelection = {
+      kind: "directory",
+      selectedPath: "/Synthetic/Chosen",
+      effectiveRoot: "/Synthetic/Chosen",
+    };
     actions = noOpWorkbenchActions({
-      onBrowseVerificationRoot: async () => "/Synthetic/Chosen",
-      onSetVerificationRoot: (value) => {
-        currentModel = { ...currentModel, verificationRoot: value };
+      onBrowseVerificationRoot: async () => selection,
+      onApplyVerificationDirectorySelection: (value) => {
+        currentModel = {
+          ...currentModel,
+          verificationRoot: value.effectiveRoot,
+          verificationDirectorySelection: value,
+        };
         renderWorkbench(root, currentModel, actions);
       },
     });
@@ -365,6 +1081,7 @@ describe("workbench", () => {
     }
     const groupKey = `group:${"e".repeat(64)}`;
     const active = {
+      ...TEST_HYBRID_ACTIVE_AUTHORITY,
       importedAt: 1,
       pdfCount: 1,
       unverifiedCount: 1,
@@ -373,15 +1090,30 @@ describe("workbench", () => {
       cloudMissingCount: 0,
       groupCount: 1,
       verifiedGroupCount: 0,
+      coveredCandidatePdfCount: 0,
       groups: [{
         groupKey,
+        rootRelativePath: "Science",
         label: "Science",
         pdfCount: 1,
         mode: "recursive" as const,
         verificationStatus: "unverified" as const,
       }],
     };
+    const binding = {
+      schemaVersion: 1 as const,
+      path: "/Wrong-candidate",
+      sourceImportSha256: active.sourceImportSha256,
+      verificationGeneration: 1,
+    };
     const pausedBatch = {
+      ...TEST_LARGE_BATCH_AUTHORITY,
+      ...INACTIVE_AUTO_RESUME,
+      verificationScope: deriveCloudVerificationScope(
+        binding,
+        TEST_CLOUD_VERIFICATION_ROOT_HASHER,
+      ),
+      selectedGroupKeys: [groupKey],
       batchId: "batch-paused",
       status: "paused" as const,
       stopReason: "time-limit" as const,
@@ -393,6 +1125,14 @@ describe("workbench", () => {
       ignoredFileCount: 0,
       listRequestCount: 1,
       cumulativeListRequestCount: 1,
+      selectedGroupCount: 1,
+      completedGroupCount: 0,
+      currentGroupIndex: 0,
+      currentGroupKey: null,
+      committedPdfCount: 0,
+      committedPageCount: 0,
+      completedDirectoryCount: 0,
+      pendingDirectoryCount: 0,
     };
     const hybrid = new FakeHybridCatalogRuntime({ status: "paused", active, batch: pausedBatch });
     const connection = new FakeCloudCatalogConnectionRuntime({ status: "authorized" });
@@ -400,8 +1140,14 @@ describe("workbench", () => {
       catalog: new FakeCloudCatalogRuntime({}, connection, hybrid),
       catalogLargeScanConfirmation: { request: async () => true },
     });
+    fixture.store.setSettingsForTest({
+      ...fixture.store.settings(),
+      boundCloudLibrary: binding,
+      cloudVerificationGeneration: binding.verificationGeneration,
+    });
     fixture.controller.setVerificationRoot("/Wrong-candidate");
-    fixture.controller.selectTab("verification");
+    fixture.controller.selectRoute({ tab: "task", page: "folder-selection" });
+    fixture.controller.toggleVerificationGroup(groupKey);
     hybrid.beforeResume = () => {
       hybrid.setSnapshot({ status: "scanning", active, batch: pausedBatch });
       hybrid.setSnapshot({
@@ -437,10 +1183,23 @@ describe("workbench", () => {
     expect(view.contentEl.textContent).not.toContain("已保存的核验检查点不可用");
     expect(fixture.controller.snapshot().verificationActionMessageCode).toBeUndefined();
 
+    const correctedBinding = { ...binding, path: "/Correct-candidate" };
+    const correctedBatch = {
+      ...pausedBatch,
+      verificationScope: deriveCloudVerificationScope(
+        correctedBinding,
+        TEST_CLOUD_VERIFICATION_ROOT_HASHER,
+      ),
+    };
+    fixture.store.setSettingsForTest({
+      ...fixture.store.settings(),
+      boundCloudLibrary: correctedBinding,
+    });
+
     hybrid.setSnapshot({
       status: "error",
       active,
-      batch: pausedBatch,
+      batch: correctedBatch,
       messageCode: "hybrid-cloud-root-mismatch",
     });
     expect(view.contentEl.textContent).not.toContain("恢复根目录不匹配");
@@ -473,11 +1232,11 @@ describe("workbench", () => {
     hybrid.setSnapshot({
       status: "error",
       active,
-      batch: pausedBatch,
+      batch: correctedBatch,
       messageCode: "hybrid-batch-invalid",
     });
     expect(view.contentEl.textContent).toContain("已保存的核验检查点不可用");
-    hybrid.setSnapshot({ status: "paused", active, batch: pausedBatch });
+    hybrid.setSnapshot({ status: "paused", active, batch: correctedBatch });
     view.contentEl.querySelector<HTMLButtonElement>('[data-action="resume-verification"]')?.click();
     await vi.waitFor(() => expect(hybrid.resumeRoots).toEqual(["/Correct-candidate"]));
 
@@ -492,6 +1251,7 @@ describe("workbench", () => {
     }
     const groupKey = `group:${"f".repeat(64)}`;
     const active = {
+      ...TEST_HYBRID_ACTIVE_AUTHORITY,
       importedAt: 1,
       pdfCount: 1,
       unverifiedCount: 1,
@@ -500,8 +1260,10 @@ describe("workbench", () => {
       cloudMissingCount: 0,
       groupCount: 1,
       verifiedGroupCount: 0,
+      coveredCandidatePdfCount: 0,
       groups: [{
         groupKey,
+        rootRelativePath: "Science",
         label: "Science",
         pdfCount: 1,
         mode: "recursive" as const,
@@ -512,6 +1274,8 @@ describe("workbench", () => {
       status: "paused",
       active,
       batch: {
+        ...TEST_LARGE_BATCH_AUTHORITY,
+        ...INACTIVE_AUTO_RESUME,
         batchId: "batch-malformed-root",
         status: "paused",
         stopReason: "time-limit",
@@ -523,6 +1287,14 @@ describe("workbench", () => {
         ignoredFileCount: 0,
         listRequestCount: 1,
         cumulativeListRequestCount: 1,
+        selectedGroupCount: 1,
+        completedGroupCount: 0,
+        currentGroupIndex: 0,
+        currentGroupKey: null,
+        committedPdfCount: 0,
+        committedPageCount: 0,
+        completedDirectoryCount: 0,
+        pendingDirectoryCount: 0,
       },
     });
     let confirmationCalls = 0;
@@ -538,7 +1310,7 @@ describe("workbench", () => {
     });
     fixture.controller.setVerificationRoot("malformed-relative-root");
     fixture.controller.toggleVerificationGroup(groupKey);
-    fixture.controller.selectTab("verification");
+    fixture.controller.selectRoute({ tab: "task", page: "folder-selection" });
     const ConcreteWorkbenchView = createWorkbenchViewClass(
       ItemViewSurface as unknown as ItemViewConstructor,
       NORMAL_RUNTIME_POLICY,
@@ -610,7 +1382,7 @@ describe("workbench", () => {
     };
     const model = {
       ...populatedWorkbenchModel(),
-      activeTab: "workbench" as const,
+      route: { tab: "more", page: "knowledge-tools" } as const,
       startSection: "suggestions" as const,
       suggestions: [suggestion],
     };
@@ -658,6 +1430,7 @@ describe("workbench", () => {
       folderRules: [{ prefix: "Notes", kind: "note" }],
     });
     await fixture.controller.setLocale(locale);
+    fixture.controller.selectRoute({ tab: "more", page: "knowledge-tools" });
     const localSuggestions = fixture.controller.refreshSuggestions();
     expect(localSuggestions.length).toBeGreaterThan(0);
     await fixture.controller.selectCenter({ kind: "document", id: "a" });
@@ -690,7 +1463,10 @@ describe("workbench", () => {
   it("routes explicit map AI actions using selected paths rather than note bodies", () => {
     const root = createTestDiv();
     const calls: unknown[] = [];
-    renderWorkbench(root, populatedWorkbenchModel(), noOpWorkbenchActions({
+    renderWorkbench(root, {
+      ...populatedWorkbenchModel(),
+      route: { tab: "more", page: "knowledge-tools" },
+    }, noOpWorkbenchActions({
       onSummarize: (paths) => { calls.push(["summarize", [...paths]]); },
       onNameCluster: (paths) => { calls.push(["name-cluster", [...paths]]); },
       onExplainRelation: (paths, id) => { calls.push(["explain-relation", [...paths], id]); },
@@ -710,7 +1486,7 @@ describe("workbench", () => {
     renderWorkbench(root, {
       locale: "zh-CN" as const,
       status: "ready",
-      activeTab: "workbench",
+      route: { tab: "more", page: "knowledge-tools" },
       startSection: "overview",
       catalog: {
         status: "no-snapshot",
@@ -731,6 +1507,12 @@ describe("workbench", () => {
         total: 0,
         items: [],
       },
+      pendingCatalogTxt: null,
+      taskActionPending: false,
+      taskActionRevision: 1,
+      taskPauseRequested: false,
+      boundLibraryPath: null,
+      workflow: TEST_NEEDS_TXT_WORKFLOW,
       verificationRoot: "",
       verificationRootLocked: false,
       selectedVerificationGroupKeys: [],
@@ -745,7 +1527,7 @@ describe("workbench", () => {
       scanProgress: { status: "idle", completed: 0, label: "Index" },
       mapProgress: { status: "idle", completed: 0, label: "Map" },
     }, {
-      onSelectTab: () => undefined,
+      onSelectRoute: () => undefined,
       onSelectStartSection: () => undefined,
       onSelectTodayFilter: () => undefined,
       onSelectMapFilter: () => undefined,
@@ -777,6 +1559,11 @@ describe("workbench", () => {
       onStartSelectedVerification: async () => undefined,
       onResumeSelectedVerification: async () => undefined,
       onCancelSelectedVerification: () => undefined,
+      onTaskPrimary: () => undefined,
+      onTaskChooseDifferentCategory: () => undefined,
+      onTaskSaveCategorySelection: () => undefined,
+      onTaskCancelCategorySelection: () => undefined,
+      onTaskOpenDetails: () => undefined,
     });
     expect(root.querySelector('[role="tablist"]')).toBeNull();
     expect(root.textContent).not.toContain("WorkbenchOrganization suggestionsOperation historyCloud CatalogSettings");
@@ -788,14 +1575,17 @@ describe("workbench", () => {
   it("labels the main page region with its selected navigation button", () => {
     const root = createTestDiv();
     renderWorkbench(root, populatedWorkbenchModel(), noOpWorkbenchActions());
-    const selected = root.querySelector<HTMLElement>('[data-workbench-page="workbench"]')!;
+    const selected = root.querySelector<HTMLElement>('[data-workbench-page="library"]')!;
     const panel = root.querySelector<HTMLElement>("main")!;
     expect(panel.getAttribute("aria-labelledby")).toBe(selected.id);
   });
 
   it("keeps actions as native buttons with visible labels", () => {
     const root = createTestDiv();
-    renderWorkbench(root, populatedWorkbenchModel(), noOpWorkbenchActions());
+    renderWorkbench(root, {
+      ...populatedWorkbenchModel(),
+      route: { tab: "more", page: "knowledge-tools" },
+    }, noOpWorkbenchActions());
     expect(root.querySelector(".knowledge-workbench__split")).not.toBeNull();
     for (const button of Array.from(root.querySelectorAll("button"))) {
       expect(button.textContent?.trim() || button.getAttribute("aria-label")).toBeTruthy();
@@ -814,19 +1604,327 @@ describe("workbench", () => {
     const selected: string[] = [];
     const root = createTestDiv();
     const model = populatedWorkbenchModel();
-    const actions = noOpWorkbenchActions({ onSelectTab: (tab) => selected.push(tab) });
+    const actions = noOpWorkbenchActions({
+      onSelectRoute: (route) => selected.push(route.tab),
+    });
     document.body.append(root);
     renderWorkbench(root, model, actions);
-    const first = root.querySelector<HTMLButtonElement>('[data-workbench-page="workbench"]')!;
+    const first = root.querySelector<HTMLButtonElement>('[data-workbench-page="library"]')!;
     first.focus();
     first.dispatchEvent(new KeyboardEvent("keydown", { key: "End", bubbles: true }));
     expect(selected).toEqual([]);
-    expect(document.activeElement?.getAttribute("data-workbench-page")).toBe("settings");
-    renderWorkbench(root, { ...model, activeTab: "settings" }, actions);
-    expect(document.activeElement?.getAttribute("data-workbench-page")).toBe("settings");
+    expect(document.activeElement?.getAttribute("data-workbench-page")).toBe("more");
+    renderWorkbench(root, { ...model, route: { tab: "more", page: "overview" } }, actions);
+    expect(document.activeElement?.getAttribute("data-workbench-page")).toBe("more");
     document.activeElement?.dispatchEvent(new KeyboardEvent("keydown", { key: "Home", bubbles: true }));
     expect(selected).toEqual([]);
-    expect(document.activeElement?.getAttribute("data-workbench-page")).toBe("workbench");
+    expect(document.activeElement?.getAttribute("data-workbench-page")).toBe("library");
+    root.remove();
+  });
+
+  it("restores task focus across action replacement, temporary disablement, and category returns", () => {
+    const root = createTestDiv();
+    document.body.append(root);
+    const ready = {
+      ...populatedWorkbenchModel(),
+      route: { tab: "task", page: "overview" } as const,
+      boundLibraryPath: "/Science",
+      workflow: {
+        kind: "ready" as const,
+        primaryAction: "start" as const,
+        titleKey: "workflow.ready.title" as const,
+        descriptionKey: "workflow.ready.description" as const,
+        recommendedGroup: null,
+        canShowTechnicalDetails: false,
+      },
+    };
+    const running = {
+      ...ready,
+      workflow: {
+        kind: "running" as const,
+        primaryAction: "pause" as const,
+        titleKey: "workflow.running.title" as const,
+        descriptionKey: "workflow.running.description" as const,
+        recommendedGroup: null,
+        canShowTechnicalDetails: true,
+      },
+    };
+    const paused = {
+      ...ready,
+      workflow: {
+        kind: "paused" as const,
+        primaryAction: "resume" as const,
+        titleKey: "workflow.paused.title" as const,
+        descriptionKey: "workflow.paused.description" as const,
+        recommendedGroup: null,
+        canShowTechnicalDetails: true,
+      },
+    };
+    renderWorkbench(root, ready, noOpWorkbenchActions());
+    root.querySelector<HTMLButtonElement>("[data-task-primary]")!.focus();
+    renderWorkbench(root, ready, noOpWorkbenchActions());
+    expect(document.activeElement).toBe(root.querySelector("[data-task-primary]"));
+
+    renderWorkbench(root, running, noOpWorkbenchActions());
+    expect(document.activeElement).toBe(root.querySelector("[data-task-primary='pause']"));
+    renderWorkbench(root, { ...running, taskPauseRequested: true }, noOpWorkbenchActions());
+    expect(root.querySelector<HTMLButtonElement>("[data-task-primary]")?.disabled).toBe(true);
+    renderWorkbench(root, paused, noOpWorkbenchActions());
+    expect(document.activeElement).toBe(root.querySelector("[data-task-primary='resume']"));
+
+    renderWorkbench(root, { ...ready, route: { tab: "task", page: "category-selection" } }, noOpWorkbenchActions());
+    renderWorkbench(root, ready, noOpWorkbenchActions());
+    expect(document.activeElement).toBe(root.querySelector("[data-task-choose-category]"));
+
+    renderWorkbench(root, { ...paused, route: { tab: "task", page: "category-selection" } }, noOpWorkbenchActions());
+    renderWorkbench(root, paused, noOpWorkbenchActions());
+    expect(document.activeElement).toBe(root.querySelector("[data-task-primary='resume']"));
+    root.remove();
+  });
+
+  it("keeps folder search autofocus on entry and restores task primary after return", () => {
+    const root = createTestDiv();
+    document.body.append(root);
+    const overview = {
+      ...populatedWorkbenchModel(),
+      route: { tab: "task", page: "overview" } as const,
+      workflow: {
+        kind: "ready" as const,
+        primaryAction: "start" as const,
+        titleKey: "workflow.ready.title" as const,
+        descriptionKey: "workflow.ready.description" as const,
+        recommendedGroup: null,
+        canShowTechnicalDetails: false,
+      },
+    };
+    const folder = {
+      ...overview,
+      route: { tab: "task", page: "folder-selection" } as const,
+      folderSelection: inlineFolderSelectionState(),
+    };
+    renderWorkbench(
+      root,
+      folder,
+      noOpWorkbenchActions({ folderSelectionActions: () => noOpFolderSelectionActions() }),
+      NORMAL_RUNTIME_POLICY,
+      undefined,
+      createFolderSelectionHostCapability(),
+    );
+    expect(document.activeElement).toBe(root.querySelector("[data-folder-selection-query]"));
+    renderWorkbench(root, overview, noOpWorkbenchActions());
+    expect(document.activeElement).toBe(root.querySelector("[data-task-primary]"));
+    root.remove();
+  });
+
+  it("preserves the folder search's middle selection across an in-page rerender", () => {
+    const root = createTestDiv();
+    document.body.append(root);
+    const folder = {
+      ...populatedWorkbenchModel(),
+      route: { tab: "task", page: "folder-selection" } as const,
+      folderSelection: {
+        ...inlineFolderSelectionState(),
+        state: {
+          ...inlineFolderSelectionState().state,
+          query: "科学文库",
+        },
+      },
+    };
+    const actions = noOpWorkbenchActions({
+      folderSelectionActions: () => noOpFolderSelectionActions(),
+    });
+    const host = createFolderSelectionHostCapability();
+    renderWorkbench(root, folder, actions, NORMAL_RUNTIME_POLICY, undefined, host);
+    const first = root.querySelector<HTMLInputElement>("[data-folder-selection-query]")!;
+    first.focus();
+    first.setSelectionRange(1, 2, "forward");
+
+    renderWorkbench(root, folder, actions, NORMAL_RUNTIME_POLICY, undefined, host);
+
+    const replacement = root.querySelector<HTMLInputElement>("[data-folder-selection-query]")!;
+    expect(document.activeElement).toBe(replacement);
+    expect(replacement.selectionStart).toBe(1);
+    expect(replacement.selectionEnd).toBe(2);
+    root.remove();
+  });
+
+  it("does not reclaim external focus after pending task updates or a task subpage return", () => {
+    const root = createTestDiv();
+    const outside = document.createElementNS("http://www.w3.org/1999/xhtml", "textarea") as HTMLTextAreaElement;
+    document.body.append(root, outside);
+    const ready = {
+      ...populatedWorkbenchModel(),
+      route: { tab: "task", page: "overview" } as const,
+      boundLibraryPath: "/Science",
+      workflow: {
+        kind: "ready" as const,
+        primaryAction: "start" as const,
+        titleKey: "workflow.ready.title" as const,
+        descriptionKey: "workflow.ready.description" as const,
+        recommendedGroup: null,
+        canShowTechnicalDetails: false,
+      },
+    };
+    const running = {
+      ...ready,
+      workflow: {
+        kind: "running" as const,
+        primaryAction: "pause" as const,
+        titleKey: "workflow.running.title" as const,
+        descriptionKey: "workflow.running.description" as const,
+        recommendedGroup: null,
+        canShowTechnicalDetails: true,
+      },
+    };
+    const paused = {
+      ...ready,
+      workflow: {
+        kind: "paused" as const,
+        primaryAction: "resume" as const,
+        titleKey: "workflow.paused.title" as const,
+        descriptionKey: "workflow.paused.description" as const,
+        recommendedGroup: null,
+        canShowTechnicalDetails: true,
+      },
+    };
+    renderWorkbench(root, ready, noOpWorkbenchActions());
+    root.querySelector<HTMLButtonElement>("[data-task-primary]")!.focus();
+    renderWorkbench(root, { ...running, taskPauseRequested: true }, noOpWorkbenchActions());
+    outside.focus();
+    renderWorkbench(root, paused, noOpWorkbenchActions());
+    expect(document.activeElement).toBe(outside);
+
+    renderWorkbench(root, { ...ready, route: { tab: "task", page: "category-selection" } }, noOpWorkbenchActions());
+    outside.focus();
+    renderWorkbench(root, ready, noOpWorkbenchActions());
+    expect(document.activeElement).toBe(outside);
+    outside.remove();
+    root.remove();
+  });
+
+  it("restores task targets after real category and folder return actions", () => {
+    const root = createTestDiv();
+    document.body.append(root);
+    const groupKey = `group:${"f".repeat(64)}`;
+    const overview: WorkbenchViewModel = {
+      ...populatedWorkbenchModel(),
+      route: { tab: "task", page: "overview" } as const,
+      boundLibraryPath: "/Science",
+      verificationRoot: "/Science",
+      workflow: {
+        kind: "ready" as const,
+        primaryAction: "start" as const,
+        titleKey: "workflow.ready.title" as const,
+        descriptionKey: "workflow.ready.description" as const,
+        recommendedGroup: null,
+        canShowTechnicalDetails: false,
+      },
+      hybridCatalog: {
+        ...TEST_INACTIVE_HYBRID_EXECUTION,
+        status: "ready" as const,
+        active: {
+          ...TEST_HYBRID_ACTIVE_AUTHORITY,
+          importedAt: 1,
+          pdfCount: 1,
+          unverifiedCount: 1,
+          verifiedCount: 0,
+          differenceCount: 0,
+          cloudMissingCount: 0,
+          groupCount: 1,
+          verifiedGroupCount: 0,
+          coveredCandidatePdfCount: 0,
+          groups: [{
+            groupKey,
+            rootRelativePath: "Science",
+            label: "Science",
+            pdfCount: 1,
+            mode: "recursive" as const,
+            verificationStatus: "unverified" as const,
+          }],
+        },
+      },
+    };
+    const category: WorkbenchViewModel = {
+      ...overview,
+      route: { tab: "task", page: "category-selection" },
+    };
+    const folder: WorkbenchViewModel = {
+      ...overview,
+      route: { tab: "task", page: "folder-selection" },
+      folderSelection: {
+        ...inlineFolderSelectionState(),
+        state: {
+          ...inlineFolderSelectionState().state,
+          selectedPath: "/Science",
+          draftSelection: {
+            kind: "directory",
+            selectedPath: "/Science",
+            effectiveRoot: "/Science",
+          },
+        },
+      },
+    };
+    const fallbackOverview: WorkbenchViewModel = { ...overview, boundLibraryPath: null };
+    let returnModel: WorkbenchViewModel = overview;
+    let actions: WorkbenchActions;
+    const returnToOverview = () => renderWorkbench(
+      root,
+      returnModel,
+      actions,
+      NORMAL_RUNTIME_POLICY,
+      undefined,
+      createFolderSelectionHostCapability(),
+    );
+    actions = noOpWorkbenchActions({
+      onTaskCancelCategorySelection: returnToOverview,
+      onTaskSaveCategorySelection: returnToOverview,
+      folderSelectionActions: () => ({
+        ...noOpFolderSelectionActions(),
+        onBack: returnToOverview,
+        onUse: returnToOverview,
+      }),
+    });
+    const renderSubpage = (model: WorkbenchViewModel) => renderWorkbench(
+      root,
+      model,
+      actions,
+      NORMAL_RUNTIME_POLICY,
+      undefined,
+      createFolderSelectionHostCapability(),
+    );
+
+    renderSubpage(category);
+    const cancel = root.querySelector<HTMLButtonElement>('[data-focus-key="task-category-cancel"]')!;
+    cancel.focus();
+    cancel.click();
+    expect(document.activeElement).toBe(root.querySelector("[data-task-choose-category]"));
+
+    renderSubpage(category);
+    const save = root.querySelector<HTMLButtonElement>('[data-focus-key="task-category-save"]')!;
+    save.focus();
+    save.click();
+    expect(document.activeElement).toBe(root.querySelector("[data-task-choose-category]"));
+
+    returnModel = fallbackOverview;
+    renderSubpage(category);
+    const fallbackCancel = root.querySelector<HTMLButtonElement>('[data-focus-key="task-category-cancel"]')!;
+    fallbackCancel.focus();
+    fallbackCancel.click();
+    expect(document.activeElement).toBe(root.querySelector("[data-task-primary]"));
+
+    returnModel = overview;
+    renderSubpage(folder);
+    expect(document.activeElement).toBe(root.querySelector("[data-folder-selection-query]"));
+    const back = root.querySelector<HTMLButtonElement>('[data-focus-key="folder-selection-back"]')!;
+    back.focus();
+    back.click();
+    expect(document.activeElement).toBe(root.querySelector("[data-task-primary]"));
+
+    renderSubpage(folder);
+    const use = root.querySelector<HTMLButtonElement>('[data-focus-key="folder-selection-use"]')!;
+    use.focus();
+    use.click();
+    expect(document.activeElement).toBe(root.querySelector("[data-task-primary]"));
     root.remove();
   });
 
@@ -835,6 +1933,7 @@ describe("workbench", () => {
       readonly contentEl = createTestDiv();
     }
     const fixture = controllerFixture();
+    fixture.controller.selectRoute({ tab: "more", page: "knowledge-tools" });
     const ConcreteWorkbenchView = createWorkbenchViewClass(ItemViewSurface as unknown as ItemViewConstructor, NORMAL_RUNTIME_POLICY);
     const view = new ConcreteWorkbenchView({} as WorkspaceLeaf, fixture.controller);
     document.body.append(view.contentEl);
@@ -865,6 +1964,7 @@ describe("workbench", () => {
       readonly contentEl = createTestDiv();
     }
     const fixture = controllerFixture();
+    fixture.controller.selectRoute({ tab: "more", page: "knowledge-tools" });
     const ConcreteWorkbenchView = createWorkbenchViewClass(ItemViewSurface as unknown as ItemViewConstructor, NORMAL_RUNTIME_POLICY);
     const view = new ConcreteWorkbenchView({} as WorkspaceLeaf, fixture.controller);
     document.body.append(view.contentEl);
@@ -915,6 +2015,7 @@ describe("workbench", () => {
     }
     const fixture = controllerFixture();
     await fixture.controller.setLocale(locale);
+    fixture.controller.selectRoute({ tab: "more", page: "knowledge-tools" });
     vi.spyOn(fixture.controller, "setMapFilter").mockRejectedValue(
       new Error("SECRET-RUNTIME-DETAIL"),
     );
@@ -989,7 +2090,10 @@ describe("workbench", () => {
     const root = createTestDiv();
     const searches: string[] = [];
     const selected: string[] = [];
-    renderWorkbench(root, populatedWorkbenchModel(), noOpWorkbenchActions({
+    renderWorkbench(root, {
+      ...populatedWorkbenchModel(),
+      route: { tab: "more", page: "knowledge-tools" },
+    }, noOpWorkbenchActions({
       onSearchMap: (query) => searches.push(query),
       onSelectCenter: (center) => selected.push(center.id),
     }));
@@ -1003,7 +2107,10 @@ describe("workbench", () => {
 
   it("windows future result lists beyond 100 rows without losing later entries", () => {
     const root = createTestDiv();
-    const model = populatedWorkbenchModel();
+    const model = {
+      ...populatedWorkbenchModel(),
+      route: { tab: "more", page: "knowledge-tools" } as const,
+    };
     const searchResults = Array.from({ length: 150 }, (_, index) => ({
       documentId: `id-${index}`,
       path: `Notes/${index}.md`,
@@ -1022,7 +2129,10 @@ describe("workbench", () => {
 
   it("routes a suggestion's primary action to preview without opening its note", () => {
     const root = createTestDiv();
-    const model = populatedWorkbenchModel();
+    const model = {
+      ...populatedWorkbenchModel(),
+      route: { tab: "more", page: "knowledge-tools" } as const,
+    };
     const previews: string[] = [];
     const opens: string[] = [];
     renderWorkbench(root, {
@@ -1057,7 +2167,7 @@ describe("workbench", () => {
     };
     renderWorkbench(root, {
       ...populatedWorkbenchModel(),
-      activeTab: "workbench",
+      route: { tab: "more", page: "knowledge-tools" },
       startSection: "suggestions",
       suggestions: [suggestion],
     }, noOpWorkbenchActions({
@@ -1950,6 +3060,7 @@ describe("workbench", () => {
     }
     const ConcreteWorkbenchView = createWorkbenchViewClass(ItemViewSurface as unknown as ItemViewConstructor, NORMAL_RUNTIME_POLICY);
     const controller = controllerFixture().controller;
+    controller.selectRoute({ tab: "more", page: "knowledge-tools" });
     const instance = new ConcreteWorkbenchView({} as WorkspaceLeaf, controller);
     expect(instance).toBeInstanceOf(ItemViewSurface);
     expect(instance).toBeInstanceOf(ConcreteWorkbenchView);
@@ -1958,11 +3069,187 @@ describe("workbench", () => {
     await instance.onClose();
   });
 
+  it("saves a detached category draft without starting cloud work", () => {
+    const groupKey = `group:${"7".repeat(64)}`;
+    const secondGroupKey = `group:${"8".repeat(64)}`;
+    const model = {
+      ...populatedWorkbenchModel(),
+      route: { tab: "task", page: "category-selection" } as const,
+      boundLibraryPath: "/科学文库",
+      verificationRoot: "/科学文库",
+      workflow: {
+        kind: "ready" as const,
+        primaryAction: "start" as const,
+        titleKey: "workflow.ready.title" as const,
+        descriptionKey: "workflow.ready.description" as const,
+        recommendedGroup: null,
+        canShowTechnicalDetails: false,
+      },
+      hybridCatalog: {
+        ...TEST_INACTIVE_HYBRID_EXECUTION,
+        status: "ready" as const,
+        active: {
+          ...TEST_HYBRID_ACTIVE_AUTHORITY,
+          importedAt: 1,
+          pdfCount: 6,
+          unverifiedCount: 6,
+          verifiedCount: 0,
+          differenceCount: 0,
+          cloudMissingCount: 0,
+          groupCount: 2,
+          verifiedGroupCount: 0,
+          coveredCandidatePdfCount: 0,
+          groups: [{
+            groupKey,
+            rootRelativePath: "7-医学",
+            label: "医学",
+            pdfCount: 4,
+            mode: "recursive" as const,
+            verificationStatus: "unverified" as const,
+          }, {
+            groupKey: secondGroupKey,
+            rootRelativePath: "8-语言",
+            label: "语言",
+            pdfCount: 2,
+            mode: "recursive" as const,
+            verificationStatus: "unverified" as const,
+          }],
+        },
+      },
+    };
+    const onTaskSaveCategorySelection = vi.fn();
+    const onStartSelectedVerification = vi.fn();
+    const onResumeSelectedVerification = vi.fn();
+    const root = createTestDiv();
+    renderWorkbench(root, model, noOpWorkbenchActions({
+      onTaskSaveCategorySelection,
+      onStartSelectedVerification,
+      onResumeSelectedVerification,
+    }));
+
+    const advanced = root.querySelector<HTMLDetailsElement>(
+      "[data-task-category-advanced]",
+    )!;
+    advanced.open = true;
+    const first = root.querySelector<HTMLInputElement>(
+      `[data-task-category-check="${groupKey}"]`,
+    )!;
+    const second = root.querySelector<HTMLInputElement>(
+      `[data-task-category-check="${secondGroupKey}"]`,
+    )!;
+    first.checked = true;
+    first.dispatchEvent(new Event("change", { bubbles: true }));
+    second.checked = true;
+    second.dispatchEvent(new Event("change", { bubbles: true }));
+    root.querySelector<HTMLButtonElement>("[data-task-category-save]")!.click();
+
+    expect(onTaskSaveCategorySelection).toHaveBeenCalledWith(model.taskActionRevision, {
+      rootPath: "/科学文库",
+      groupKeys: [groupKey, secondGroupKey],
+    });
+    expect(onStartSelectedVerification).not.toHaveBeenCalled();
+    expect(onResumeSelectedVerification).not.toHaveBeenCalled();
+  });
+
+  it("builds a detached verification purpose for the legacy picker bridge", async () => {
+    class ItemViewSurface {
+      readonly contentEl = createTestDiv();
+    }
+    const groupKey = `group:${"7".repeat(64)}`;
+    const hybrid = new FakeHybridCatalogRuntime({
+      status: "ready",
+      active: {
+        ...TEST_HYBRID_ACTIVE_AUTHORITY,
+        importedAt: 1,
+        pdfCount: 4,
+        unverifiedCount: 4,
+        verifiedCount: 0,
+        differenceCount: 0,
+        cloudMissingCount: 0,
+        groupCount: 1,
+        verifiedGroupCount: 0,
+        coveredCandidatePdfCount: 0,
+        groups: [{
+          groupKey,
+          rootRelativePath: "7-医学",
+          label: "医学",
+          pdfCount: 4,
+          mode: "recursive",
+          verificationStatus: "unverified",
+        }],
+      },
+    });
+    const fixture = controllerFixture({
+      catalog: new FakeCloudCatalogRuntime({}, undefined, hybrid),
+    });
+    const pickerRequest = vi.fn<CloudDirectoryPickerPresenter["request"]>(async (input) => ({
+      kind: "category",
+      selectedPath: "/科学文库/7-医学",
+      effectiveRoot: "/科学文库",
+      groupKey: input.purpose.kind === "verification"
+        ? input.purpose.groups[0]!.groupKey
+        : groupKey,
+    }));
+    const internals = fixture.controller as unknown as {
+      readonly dependencies: { catalogDirectoryPicker?: CloudDirectoryPickerPresenter };
+    };
+    internals.dependencies.catalogDirectoryPicker = { request: pickerRequest };
+    fixture.controller.selectRoute({ tab: "task", page: "folder-selection" });
+    fixture.controller.setVerificationRoot("/科学文库");
+    const WorkbenchView = createWorkbenchViewClass(
+      ItemViewSurface as unknown as ItemViewConstructor,
+      NORMAL_RUNTIME_POLICY,
+    );
+    const view = new WorkbenchView({} as WorkspaceLeaf, fixture.controller);
+    await view.onOpen();
+
+    view.contentEl.querySelector<HTMLButtonElement>(
+      '[data-action="browse-verification-root"]',
+    )?.click();
+    await vi.waitFor(() => expect(pickerRequest).toHaveBeenCalledOnce());
+    await vi.waitFor(() => expect(fixture.controller.snapshot().verificationDirectorySelection)
+      .toMatchObject({ kind: "category", groupKey }));
+
+    const request = pickerRequest.mock.calls[0]![0];
+    expect(request.purpose).toEqual({
+      kind: "verification",
+      groups: [{ groupKey, rootRelativePath: "7-医学", label: "医学" }],
+    });
+    expect(fixture.controller.snapshot()).toMatchObject({
+      verificationRoot: "/科学文库",
+      selectedVerificationGroupKeys: [groupKey],
+    });
+    expect(hybrid.startInputs).toEqual([]);
+    expect(hybrid.resumeInputs).toEqual([]);
+
+    expect(view.contentEl.textContent).toContain("/科学文库/7-医学");
+    const categoryChoice = view.contentEl.querySelector<HTMLInputElement>(
+      `[data-group-key="${groupKey}"]`,
+    )!;
+    expect(categoryChoice.disabled).toBe(false);
+    categoryChoice.checked = false;
+    categoryChoice.dispatchEvent(new Event("change", { bubbles: true }));
+    await vi.waitFor(() => expect(
+      fixture.controller.snapshot().verificationDirectorySelection,
+    ).toBeUndefined());
+    expect(fixture.controller.snapshot()).toMatchObject({
+      verificationRoot: "/科学文库",
+      selectedVerificationGroupKeys: [],
+    });
+    expect(view.contentEl.textContent).not.toContain("/科学文库/7-医学");
+    expect(view.contentEl.querySelector<HTMLInputElement>(
+      '[data-verification-root="true"]',
+    )?.value).toBe("/科学文库");
+    await view.onClose();
+    fixture.controller.dispose();
+  });
+
   it("surfaces pin persistence rejection in the concrete workbench status", async () => {
     class ItemViewSurface {
       readonly contentEl = createTestDiv();
     }
     const fixture = controllerFixture();
+    fixture.controller.selectRoute({ tab: "more", page: "knowledge-tools" });
     fixture.store.failNext = new Error("pin store failed");
     const WorkbenchView = createWorkbenchViewClass(ItemViewSurface as unknown as ItemViewConstructor, NORMAL_RUNTIME_POLICY);
     const view = new WorkbenchView({} as WorkspaceLeaf, fixture.controller);
@@ -1981,6 +3268,7 @@ describe("workbench", () => {
       readonly contentEl = createTestDiv();
     }
     const fixture = controllerFixture({ workspaceError: new Error("leaf unavailable") });
+    fixture.controller.selectRoute({ tab: "more", page: "knowledge-tools" });
     const WorkbenchView = createWorkbenchViewClass(ItemViewSurface as unknown as ItemViewConstructor, NORMAL_RUNTIME_POLICY);
     const view = new WorkbenchView({} as WorkspaceLeaf, fixture.controller);
     await view.onOpen();
@@ -1998,6 +3286,7 @@ describe("workbench", () => {
       readonly contentEl = createTestDiv();
     }
     const fixture = controllerFixture({ quickCaptureError: new Error("create failed") });
+    fixture.controller.selectRoute({ tab: "more", page: "knowledge-tools" });
     const WorkbenchView = createWorkbenchViewClass(ItemViewSurface as unknown as ItemViewConstructor, NORMAL_RUNTIME_POLICY);
     const view = new WorkbenchView({} as WorkspaceLeaf, fixture.controller);
     await view.onOpen();
@@ -2023,11 +3312,36 @@ describe("workbench", () => {
       getLeavesOfType(): typeof leaf[] { return this.leaves; },
       getLeaf(): typeof leaf { this.leaves.push(leaf); return leaf; },
       async revealLeaf(value: typeof leaf): Promise<void> { this.revealCalls.push(value); },
+      setActiveLeaf: vi.fn(),
     };
     await activateWorkbench({ workspace } as unknown as App);
     expect(leaf.setViewStateCalls).toBe(1);
     expect(workspace.revealCalls).toEqual([leaf]);
+    expect(workspace.setActiveLeaf).toHaveBeenCalledWith(leaf, { focus: true });
     expect(workspace.getLeavesOfType()[0]?.view).toBe(view);
+
+    await activateWorkbench({ workspace } as unknown as App);
+    expect(leaf.setViewStateCalls).toBe(1);
+    expect(workspace.revealCalls).toEqual([leaf, leaf]);
+    expect(workspace.setActiveLeaf).toHaveBeenCalledTimes(2);
+  });
+
+  it("surfaces reveal failures instead of leaving activation work unhandled", async () => {
+    const errors: unknown[] = [];
+    runVisibleHostAction(
+      () => activateWorkbench({
+        workspace: {
+          getLeavesOfType: () => [{ view: {} }],
+          getLeaf: () => { throw new Error("new leaf should not be needed"); },
+          revealLeaf: async () => { throw new Error("reveal unavailable"); },
+          setActiveLeaf: vi.fn(),
+        },
+      } as unknown as App),
+      (error) => errors.push(error),
+    );
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(errors).toEqual([expect.objectContaining({ message: "reveal unavailable" })]);
   });
 
   it("reports a first-open activation rejection before a workbench view is mounted", async () => {
@@ -2295,6 +3609,10 @@ describe("workbench", () => {
         aiModel: "",
         secretId: "",
         recentCloudDirectories: EMPTY_RECENT_CLOUD_DIRECTORIES,
+        boundCloudLibrary: null,
+        cloudVerificationGeneration: 0,
+        verificationBatchTombstones: { schemaVersion: 1, state: "valid", batchIds: [] } as const,
+        legacyVerificationAdoption: { schemaVersion: 1, state: "none" } as const,
       }),
       folderRuleProposals: () => [{
         prefix: "References",
@@ -2344,6 +3662,10 @@ describe("workbench", () => {
       aiModel: "",
       secretId: "",
       recentCloudDirectories: EMPTY_RECENT_CLOUD_DIRECTORIES,
+      boundCloudLibrary: null,
+      cloudVerificationGeneration: 0,
+      verificationBatchTombstones: { schemaVersion: 1, state: "valid", batchIds: [] } as const,
+      legacyVerificationAdoption: { schemaVersion: 1, state: "none" } as const,
     };
     const values: boolean[] = [];
     const controller = {
@@ -2393,6 +3715,10 @@ describe("workbench", () => {
         aiModel: "",
         secretId: "",
         recentCloudDirectories: EMPTY_RECENT_CLOUD_DIRECTORIES,
+        boundCloudLibrary: null,
+        cloudVerificationGeneration: 0,
+        verificationBatchTombstones: { schemaVersion: 1, state: "valid", batchIds: [] } as const,
+        legacyVerificationAdoption: { schemaVersion: 1, state: "none" } as const,
       }),
       folderRuleProposals: () => [{
         prefix: "References",
@@ -2445,6 +3771,10 @@ describe("workbench", () => {
         aiModel: "",
         secretId: "",
         recentCloudDirectories: EMPTY_RECENT_CLOUD_DIRECTORIES,
+        boundCloudLibrary: null,
+        cloudVerificationGeneration: 0,
+        verificationBatchTombstones: { schemaVersion: 1, state: "valid", batchIds: [] } as const,
+        legacyVerificationAdoption: { schemaVersion: 1, state: "none" } as const,
       }),
       folderRuleProposals: () => [],
       previewSampleChange: () => undefined,
@@ -2494,6 +3824,10 @@ describe("workbench", () => {
         aiModel: "",
         secretId: "",
         recentCloudDirectories: EMPTY_RECENT_CLOUD_DIRECTORIES,
+        boundCloudLibrary: null,
+        cloudVerificationGeneration: 0,
+        verificationBatchTombstones: { schemaVersion: 1, state: "valid", batchIds: [] } as const,
+        legacyVerificationAdoption: { schemaVersion: 1, state: "none" } as const,
       }),
       folderRuleProposals: () => [],
       previewSampleChange: () => undefined,

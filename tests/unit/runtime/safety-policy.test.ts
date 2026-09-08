@@ -54,6 +54,10 @@ describe("runtime safety policy", () => {
       aiModel: "fixture",
       secretId: "fixture-secret",
       recentCloudDirectories: EMPTY_RECENT_CLOUD_DIRECTORIES,
+      boundCloudLibrary: null,
+      cloudVerificationGeneration: 0,
+      verificationBatchTombstones: { schemaVersion: 1, state: "valid", batchIds: [] } as const,
+      legacyVerificationAdoption: { schemaVersion: 1, state: "none" } as const,
     };
     expect(effectiveSettings(NORMAL_RUNTIME_POLICY, settings)).toEqual(settings);
     expect(effectiveSettings(READ_ONLY_ACCEPTANCE_POLICY, settings)).toEqual({

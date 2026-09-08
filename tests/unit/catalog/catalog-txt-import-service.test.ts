@@ -64,6 +64,46 @@ class MemoryHybridCatalogStore implements CandidateCatalogStorePort {
   }> | null> {
     return this.active;
   }
+
+  async loadActiveCandidateDescriptor(): Promise<CandidateCatalogDescriptor | null> {
+    return this.active?.descriptor ?? null;
+  }
+
+  async loadActiveCandidateSummary() {
+    if (this.active === null) return null;
+    const groups = new Map<string, { label: string; rootRelativePath: string; pdfCount: number }>();
+    for (const record of this.active.records) {
+      const rootRelativePath = record.topLevelGroupId === "txt-root-items"
+        ? ""
+        : record.relativePath.split("/")[0] ?? "";
+      const prior = groups.get(record.topLevelGroupId);
+      groups.set(record.topLevelGroupId, {
+        label: prior?.label ?? (rootRelativePath || "Root items"),
+        rootRelativePath,
+        pdfCount: (prior?.pdfCount ?? 0) + 1,
+      });
+    }
+    return {
+      descriptor: this.active.descriptor,
+      groups: [...groups].map(([groupKey, value]) => ({
+        groupKey,
+        ...value,
+        mode: groupKey === "txt-root-items" ? "direct-files-only" as const : "recursive" as const,
+      })),
+    };
+  }
+
+  async loadActiveCandidateGroups(groupKeys: readonly string[]): Promise<Readonly<{
+    descriptor: CandidateCatalogDescriptor;
+    records: readonly TxtCandidateRecordV1[];
+  }> | null> {
+    if (this.active === null) return null;
+    const selected = new Set(groupKeys);
+    return {
+      descriptor: this.active.descriptor,
+      records: this.active.records.filter((record) => selected.has(record.topLevelGroupId)),
+    };
+  }
 }
 
 describe("CatalogTxtImportService", () => {

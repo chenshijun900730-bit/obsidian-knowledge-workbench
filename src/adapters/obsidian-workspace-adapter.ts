@@ -125,6 +125,44 @@ export async function activateWorkbench(app: App): Promise<void> {
     await leaf.setViewState({ type: VIEW_TYPE, active: true });
   }
   await app.workspace.revealLeaf(leaf);
+  app.workspace.setActiveLeaf?.(leaf, { focus: true });
+}
+
+/** Narrow feature check for Obsidian's undocumented Settings close capability. */
+export function closeObsidianSettingsIfSupported(app: App): boolean {
+  const host = app as unknown as Readonly<{
+    setting?: Readonly<{ close?: unknown }>;
+  }>;
+  const close = host.setting?.close;
+  if (typeof close !== "function") return false;
+  close.call(host.setting);
+  return true;
+}
+
+/** Host-only Settings handoff; callers supply localized, visible feedback. */
+export async function handoffFromObsidianSettings(input: Readonly<{
+  app: App;
+  isExpectedView: (view: unknown) => boolean;
+  reportUnavailable: (message: string) => void;
+  notify: (message: "handoff-failed" | "close-guidance") => void;
+}>): Promise<void> {
+  let settingsClosed = false;
+  try {
+    settingsClosed = closeObsidianSettingsIfSupported(input.app);
+  } catch {
+    input.notify("handoff-failed");
+  }
+  if (!settingsClosed) input.notify("close-guidance");
+  try {
+    await requireActivatedWorkbench(
+      input.app,
+      input.isExpectedView,
+      input.reportUnavailable,
+    );
+  } catch (error) {
+    input.notify("handoff-failed");
+    throw error;
+  }
 }
 
 export async function activateWorkbenchWithRetry(

@@ -532,7 +532,17 @@ describe("guarded development installer", () => {
     const value = await fixture();
     const target = join(value.vaultPath, OBSIDIAN_CONFIG_DIRECTORY, "plugins", "knowledge-workbench");
     await mkdir(target, { recursive: true });
-    await writeFile(join(target, "data.json"), "PRIVATE-SENTINEL", "utf8");
+    // Installation must not normalize or adopt an upgraded catalog's local authority.
+    const legacyData = `${JSON.stringify({ settings: {
+      legacyVerificationAdoption: { schemaVersion: 1, state: "pending" },
+      cloudVerificationGeneration: 0,
+      boundCloudLibrary: null,
+      recentCloudDirectories: { schemaVersion: 1, items: [{
+        path: "/Synthetic Library", filename: "Synthetic Library", lastUsedAt: "2026-09-06T00:00:00.000Z",
+      }] },
+    }, syntheticSearchSentinel: "unchanged" }, null, 2)}\n`;
+    await writeFile(join(target, "data.json"), legacyData, "utf8");
+    const dataBefore = await lstat(join(target, "data.json"), { bigint: true });
     const community = join(value.vaultPath, OBSIDIAN_CONFIG_DIRECTORY, "community-plugins.json");
     const originalCommunityPlugins = `[\n  "other-plugin"\n]\n`;
     await writeFile(community, originalCommunityPlugins, "utf8");
@@ -546,7 +556,10 @@ describe("guarded development installer", () => {
     );
     expect(installer.formatInstallSuccess(result)).not.toContain("disabled");
     expect((await readdir(target)).sort()).toEqual(["data.json", "main.js", "manifest.json", "styles.css"]);
-    await expect(readFile(join(target, "data.json"), "utf8")).resolves.toBe("PRIVATE-SENTINEL");
+    await expect(readFile(join(target, "data.json"), "utf8")).resolves.toBe(legacyData);
+    const dataAfter = await lstat(join(target, "data.json"), { bigint: true });
+    expect({ ino: dataAfter.ino, mtimeNs: dataAfter.mtimeNs, size: dataAfter.size })
+      .toEqual({ ino: dataBefore.ino, mtimeNs: dataBefore.mtimeNs, size: dataBefore.size });
     await expect(readFile(community, "utf8")).resolves.toBe(originalCommunityPlugins);
   });
 

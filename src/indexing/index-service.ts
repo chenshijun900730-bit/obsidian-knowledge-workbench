@@ -42,7 +42,7 @@ export class IndexService {
     private readonly pathPolicy: IndexPathPolicy = ALLOW_ALL,
   ) {
     if (!Number.isInteger(concurrency) || concurrency <= 0) throw new RangeError("Index scan concurrency must be a positive integer");
-    for (const record of store.activeIndex()?.records ?? []) this.records.set(record.path, record);
+    store.forEachActiveIndexRecord((record) => this.records.set(record.path, record));
   }
 
   activeRecords(): readonly DocumentRecord[] {
@@ -113,7 +113,8 @@ export class IndexService {
 
     throwIfAborted(signal);
     await this.store.promoteStaging(scanId, this.clock.now());
-    this.records = new Map((this.store.activeIndex()?.records ?? []).map((record) => [record.path, record]));
+    this.records = new Map();
+    this.store.forEachActiveIndexRecord((record) => this.records.set(record.path, record));
     this.emit();
   }
 

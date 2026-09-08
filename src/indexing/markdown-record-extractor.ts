@@ -1,5 +1,6 @@
 import { OWNED_FIELDS, type DocumentRecord, type OwnedField, type OwnedFieldValue, type VaultNote } from "../core/types";
 import { sha256 } from "../core/hash";
+import { MAX_INDEX_HEADINGS, MAX_INDEX_TOKENS } from "./index-record-limits";
 
 const RELATION_FIELDS = ["source", "author", "domain", "type"] as const;
 const MAX_TOKEN_CODE_POINTS = 128;
@@ -40,7 +41,10 @@ export async function extractDocumentRecord(note: VaultNote): Promise<DocumentRe
       if ([...token].length <= MAX_TOKEN_CODE_POINTS) tokenCounts.set(token, (tokenCounts.get(token) ?? 0) + 1);
     }
   }
-  const tokens = [...tokenCounts].sort(([left, leftCount], [right, rightCount]) => rightCount - leftCount || left.localeCompare(right)).slice(0, 256).map(([token]) => token);
+  const tokens = [...tokenCounts]
+    .sort(([left, leftCount], [right, rightCount]) => rightCount - leftCount || left.localeCompare(right))
+    .slice(0, MAX_INDEX_TOKENS)
+    .map(([token]) => token);
   const explicitKind = ownedFields["knowledge-workbench-kind"];
   return {
     id: note.path.normalize("NFC"),
@@ -49,7 +53,7 @@ export async function extractDocumentRecord(note: VaultNote): Promise<DocumentRe
     kind: explicitKind === "note" || explicitKind === "reference" ? explicitKind : "unclassified",
     title,
     aliases: stringList(note.frontmatter.aliases),
-    headings: [...note.headings],
+    headings: note.headings.slice(0, MAX_INDEX_HEADINGS),
     tags: stringList(note.frontmatter.tags).map((tag) => tag.replace(/^#/, "")).sort(),
     ownedFields,
     relationFields,

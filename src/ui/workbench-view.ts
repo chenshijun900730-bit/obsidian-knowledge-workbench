@@ -16,31 +16,61 @@ import type {
   CloudCatalogConnectionViewModel,
   CloudCatalogViewModel,
 } from "../catalog/cloud-catalog-runtime";
-import type { HybridCatalogViewModel } from "../catalog/hybrid-catalog-runtime";
+import type {
+  HybridCatalogGroupViewModel,
+  HybridCatalogViewModel,
+} from "../catalog/hybrid-catalog-runtime";
 import type {
   CatalogDifferenceKind,
   CatalogVerificationStatus,
 } from "../catalog/hybrid-catalog-types";
-import { renderCloudCatalogTab } from "./cloud-catalog-tab";
 import {
   createWorkbenchI18n,
   type WorkbenchI18n,
   type WorkbenchLocale,
   type WorkbenchMessageKey,
 } from "../i18n/workbench-i18n";
-import { renderWorkbenchShell, type WorkbenchTab } from "./workbench-shell";
+import { renderWorkbenchShell } from "./workbench-shell";
 import { renderStartPage, type StartSection } from "./start-page";
-import type { SettingsSectionsSurface } from "./settings-sections";
+import { renderMorePage } from "./more-page";
 import {
+  routeForTab,
+  type WorkbenchRoute,
+} from "./workbench-route";
+import type { SettingsSectionId, SettingsSectionsSurface } from "./settings-sections";
+import {
+  renderVerificationCategoryEditor,
   renderVerificationPage,
   type VerificationPageSurface,
 } from "./verification-page";
 import type { VerificationActionMessageCode } from "./catalog-message-presenter";
+import type {
+  CloudDirectoryPickerPurpose,
+  CloudDirectorySelection,
+} from "../catalog/cloud-directory-selection";
+import type {
+  LibraryWorkflowState,
+  PendingCatalogTxtDraft,
+} from "./library-workflow-state";
+import {
+  renderLibraryPage,
+  type RecentLibraryItem,
+} from "./library-page";
+import { renderTaskPage } from "./task-page";
+import { TASK_FOCUS_KEYS, type TextSelectionDirection } from "./task-focus";
+import { createLocalCatalogTxtPicker } from "./local-catalog-txt-picker";
+import type {
+  DisposableSurface,
+  FolderSelectionHostActions,
+  FolderSelectionHostCapability,
+  FolderSelectionRenderState,
+} from "./folder-selection-host";
 
-export type { WorkbenchTab } from "./workbench-shell";
+export type { WorkbenchRoute, WorkbenchTab } from "./workbench-route";
 export type { StartSection } from "./start-page";
 export type ProgressStatus = "idle" | "running" | "canceled" | "error" | "complete";
 type HostActionMessageKey = Extract<WorkbenchMessageKey, `host.action.${string}`>;
+const TASK_FAILED_MESSAGE: HostActionMessageKey = "host.action.taskFailed";
 type AiStatusMessageKey = Extract<WorkbenchMessageKey, `ai.${string}`>;
 export interface WorkbenchProgress {
   readonly status: ProgressStatus;
@@ -50,15 +80,24 @@ export interface WorkbenchProgress {
 }
 export interface WorkbenchViewModel {
   readonly locale: WorkbenchLocale;
+  readonly openAtStartup?: boolean;
   readonly status: "ready" | "canceled" | "error";
   readonly statusMessage?: string;
-  readonly activeTab: WorkbenchTab;
+  readonly route: WorkbenchRoute;
   readonly startSection: StartSection;
   readonly catalog: CloudCatalogViewModel;
   readonly catalogConnection?: CloudCatalogConnectionViewModel;
   readonly hybridCatalog?: HybridCatalogViewModel;
+  readonly pendingCatalogTxt: PendingCatalogTxtDraft | null;
+  readonly taskActionPending: boolean;
+  readonly taskActionRevision: number;
+  readonly taskPauseRequested: boolean;
+  readonly boundLibraryPath: string | null;
+  readonly workflow: LibraryWorkflowState;
+  readonly folderSelection?: FolderSelectionRenderState;
   readonly verificationRoot: string;
   readonly verificationRootLocked: boolean;
+  readonly verificationDirectorySelection?: CloudDirectorySelection;
   readonly verificationActionMessageCode?: VerificationActionMessageCode;
   readonly selectedVerificationGroupKeys: readonly string[];
   readonly selectedCatalogId: string | null;
@@ -76,7 +115,8 @@ export interface WorkbenchViewModel {
   readonly aiSuggestion?: Readonly<{ action: AiAction; text: string }>;
 }
 export interface WorkbenchActions {
-  readonly onSelectTab: (tab: WorkbenchTab) => void;
+  readonly onSelectRoute: (route: WorkbenchRoute) => void;
+  readonly onOpenTaskOverview?: () => void;
   readonly onSelectStartSection: (section: StartSection) => void;
   readonly onSetLocale?: (locale: WorkbenchLocale) => void | Promise<void>;
   readonly onSelectTodayFilter: (filter: TodayFilter) => void;
@@ -119,7 +159,20 @@ export interface WorkbenchActions {
   readonly onStartSelectedVerification: () => Promise<void>;
   readonly onResumeSelectedVerification: () => Promise<void>;
   readonly onCancelSelectedVerification: () => void;
-  readonly onBrowseVerificationRoot?: () => Promise<string | null>;
+  readonly onTaskPrimary: (revision: number) => Promise<void> | void;
+  readonly onTaskChooseDifferentCategory: () => void;
+  readonly onTaskSaveCategorySelection: (
+    revision: number,
+    input: Readonly<{ rootPath: string; groupKeys: readonly string[] }>,
+  ) => void;
+  readonly onTaskCancelCategorySelection: () => void;
+  readonly onTaskOpenDetails: () => void;
+  readonly onBrowseVerificationRoot?: () => Promise<CloudDirectorySelection | null>;
+  readonly onApplyVerificationDirectorySelection?: (selection: CloudDirectorySelection) => void;
+  readonly onOpenVerificationFolderSelection?: () => void;
+  readonly folderSelectionActions?: (
+    expectedRevision: number,
+  ) => FolderSelectionHostActions;
 }
 
 const PROGRESS_LABEL_KEYS = {
@@ -153,14 +206,154 @@ const STATUS_MESSAGE_KEYS: Readonly<Record<string, WorkbenchMessageKey>> = {
   "History cleared": "host.status.historyCleared",
   "Map calculation failed": "host.status.mapFailed",
   "Workbench projection refresh failed": "host.status.projectionFailed",
+  "task.txtContentUnchanged": "task.txtContentUnchanged",
+  "task.txtImportFailed": "task.txtImportFailed",
+  "verification-must-pause": "cloudAuthority.verificationMustPause",
+  "scan-must-cancel": "cloudAuthority.scanMustCancel",
+  "cloud-authority-operation-busy": "cloudAuthority.operationBusy",
+  "authorization-attempt-unavailable": "cloudAuthority.authorizationAttemptUnavailable",
+  "folder-selection-preserved": "host.status.folderSelectionPreserved",
+  "folder-selection-binding-failed": "host.status.actionFailed",
 };
 
 const verificationPageSurfaces = new WeakMap<HTMLElement, VerificationPageSurface>();
+const folderSelectionPageSurfaces = new WeakMap<HTMLElement, DisposableSurface>();
+const settingsPageSurfaces = new WeakMap<HTMLElement, SettingsSectionsSurface>();
+const settingsPageSections = new WeakMap<HTMLElement, string>();
+const recentLibraryItems = new WeakMap<HTMLElement, readonly RecentLibraryItem[]>();
+
+interface FocusIntent {
+  readonly key: string;
+  readonly selection: Readonly<{
+    start: number | null;
+    end: number | null;
+    direction: TextSelectionDirection;
+  }> | null;
+}
+
+interface RenderFocusState {
+  readonly route: WorkbenchRoute;
+  readonly pending: FocusIntent | null;
+}
+
+const renderFocusStates = new WeakMap<HTMLElement, RenderFocusState>();
+
+const isTaskOverview = (route: WorkbenchRoute): boolean => (
+  route.tab === "task" && route.page === "overview"
+);
+
+const isTaskSubpage = (route: WorkbenchRoute, page: "category-selection" | "folder-selection"): boolean => (
+  route.tab === "task" && route.page === page
+);
+
+const focusTarget = (root: HTMLElement, keys: readonly string[]): HTMLElement | null => {
+  for (const key of keys) {
+    const target = Array.from(root.querySelectorAll<HTMLElement>("[data-focus-key]"))
+      .find((candidate) => candidate.dataset.focusKey === key);
+    if (target !== undefined && !target.matches(":disabled")) return target;
+  }
+  return null;
+};
+
+const recordRecentLibraryItem = (
+  root: HTMLElement,
+  model: WorkbenchViewModel,
+  catalogId: string,
+): void => {
+  const record = model.catalog.items.find((item) => item.catalogId === catalogId);
+  if (record === undefined) return;
+  const filenameSuffix = `/${record.filename}`;
+  const pathDirectory = record.pathLabel.endsWith(filenameSuffix)
+    ? record.pathLabel.slice(0, -filenameSuffix.length)
+    : record.pathLabel;
+  const directoryTag = record.hierarchyTags
+    .map((tag) => tag.replace(/^folder\//u, ""))
+    .join(" › ") || pathDirectory || "/";
+  const recent = Object.freeze({
+    catalogId: record.catalogId,
+    filename: record.filename,
+    directoryTag,
+  });
+  recentLibraryItems.set(root, Object.freeze([
+    recent,
+    ...(recentLibraryItems.get(root) ?? []).filter((item) => item.catalogId !== catalogId),
+  ].slice(0, 5)));
+};
+
+const verificationPickerPurpose = (
+  model: WorkbenchViewModel,
+): Extract<CloudDirectoryPickerPurpose, { kind: "verification" }> => ({
+  kind: "verification",
+  groups: (model.hybridCatalog?.active?.groups ?? [])
+    .filter((group) => group.groupKey !== "txt-root-items")
+    .map((group) => ({
+      groupKey: group.groupKey,
+      rootRelativePath: group.rootRelativePath,
+      label: group.label,
+    })),
+});
+
+const visibleTaskGroupScope = (
+  model: WorkbenchViewModel,
+): readonly HybridCatalogGroupViewModel[] => {
+  const groups = model.hybridCatalog?.active?.groups ?? [];
+  const byKey = new Map(groups.map((group) => [group.groupKey, group]));
+  const batchOwnsScope = model.workflow.kind === "running"
+    || model.workflow.kind === "paused"
+    || model.workflow.kind === "retry-later";
+  const keys = batchOwnsScope && model.hybridCatalog?.batch !== undefined
+    ? model.hybridCatalog.batch.selectedGroupKeys
+    : model.selectedVerificationGroupKeys.length > 0
+      ? model.selectedVerificationGroupKeys
+      : model.workflow.recommendedGroup === null
+        ? []
+        : [model.workflow.recommendedGroup.groupKey];
+  return keys.flatMap((key) => {
+    const group = byKey.get(key);
+    return group === undefined ? [] : [{ ...group }];
+  });
+};
+
+const acceptanceTaskWorkflow = (): LibraryWorkflowState => ({
+  kind: "unavailable",
+  primaryAction: "open-library",
+  titleKey: "workflow.unavailable.title",
+  descriptionKey: "workflow.unavailable.description",
+  recommendedGroup: null,
+  canShowTechnicalDetails: true,
+});
 
 const disposeVerificationPage = (root: HTMLElement): void => {
   verificationPageSurfaces.get(root)?.dispose();
   verificationPageSurfaces.delete(root);
 };
+
+const isSettingsRoute = (route: WorkbenchRoute): boolean => (
+  route.tab === "more"
+  && route.page !== "overview"
+  && route.page !== "history"
+  && route.page !== "knowledge-tools"
+);
+
+const disposeSettingsPage = (root: HTMLElement): void => {
+  settingsPageSurfaces.get(root)?.dispose();
+  settingsPageSurfaces.delete(root);
+  settingsPageSections.delete(root);
+};
+
+const SETTINGS_SECTION_BY_ROUTE: Readonly<Partial<Record<
+  Extract<WorkbenchRoute, { tab: "more" }>["page"], SettingsSectionId
+>>> = {
+  connection: "baidu",
+  "catalog-data": "catalog-data",
+  language: "language",
+  advanced: "cloud-scan-advanced",
+  "privacy-ai": "privacy-ai",
+};
+
+const settingsSectionForRoute = (route: WorkbenchRoute): SettingsSectionId | undefined => (
+  route.tab === "more" ? SETTINGS_SECTION_BY_ROUTE[route.page] : undefined
+);
 
 const localizedStatusMessage = (
   message: string | undefined,
@@ -228,13 +421,20 @@ export function renderWorkbench(
   actions: WorkbenchActions,
   policy: RuntimeSafetyPolicy = NORMAL_RUNTIME_POLICY,
   settingsSurface?: SettingsSectionsSurface,
+  folderSelectionHost?: FolderSelectionHostCapability,
 ): void {
   const doc = root.ownerDocument;
   const i18n = createWorkbenchI18n(model.locale);
+  const previousFocusState = renderFocusStates.get(root);
   const active = doc.activeElement;
-  const focusKey = active !== null && root.contains(active)
+  const activeIsInWorkbench = active !== null && root.contains(active);
+  const activeFocusKey = activeIsInWorkbench
     ? (active as HTMLElement).dataset.focusKey
     : undefined;
+  const activeIsDocumentFallback = active === null
+    || active === doc.body
+    || active === doc.documentElement;
+  const hasUnmanagedFocus = !activeIsDocumentFallback && activeFocusKey === undefined;
   const selection = active !== null && active.matches("input, textarea")
     ? {
         start: (active as HTMLInputElement).selectionStart,
@@ -242,7 +442,58 @@ export function renderWorkbench(
         direction: (active as HTMLInputElement).selectionDirection,
       }
     : null;
+  const capturedFocus = activeFocusKey === undefined
+    ? null
+    : { key: activeFocusKey, selection } satisfies FocusIntent;
+  const carriedFocus = hasUnmanagedFocus
+    ? null
+    : capturedFocus ?? previousFocusState?.pending ?? null;
+  const isInlineFolderSelection = (
+    isTaskSubpage(model.route, "folder-selection")
+    && policy.mode !== "read-only-acceptance"
+    && model.folderSelection !== undefined
+    && folderSelectionHost?.available === true
+    && actions.folderSelectionActions !== undefined
+  );
+  const enteringFolderSelection = isInlineFolderSelection
+    && (previousFocusState === undefined
+      || !isTaskSubpage(previousFocusState.route, "folder-selection"));
+  const categoryReturn = previousFocusState !== undefined
+    && isTaskSubpage(previousFocusState.route, "category-selection")
+    && isTaskOverview(model.route);
+  const folderReturn = previousFocusState !== undefined
+    && isTaskSubpage(previousFocusState.route, "folder-selection")
+    && isTaskOverview(model.route);
+  const requestedFocusKeys = hasUnmanagedFocus
+    ? []
+    : enteringFolderSelection
+    ? []
+    : categoryReturn
+      ? [TASK_FOCUS_KEYS.chooseCategory, TASK_FOCUS_KEYS.primary]
+      : folderReturn
+        ? [TASK_FOCUS_KEYS.primary]
+        : carriedFocus === null ? [] : [carriedFocus.key];
+  const verificationRunDetailsOpen = root.querySelector<HTMLDetailsElement>(
+    "details[data-verification-run-details]",
+  )?.open ?? false;
+  const verificationDirectoryAdvancedOpen = root.querySelector<HTMLDetailsElement>(
+    "details[data-cloud-directory-advanced]",
+  )?.open ?? false;
+  const renderedSettingsSurface = settingsPageSurfaces.get(root);
+  const nextSettingsSection = settingsSectionForRoute(model.route);
+  if (
+    renderedSettingsSurface !== undefined
+    && (
+      !isSettingsRoute(model.route)
+      || renderedSettingsSurface !== settingsSurface
+      || settingsPageSections.get(root) !== nextSettingsSection
+    )
+  ) {
+    disposeSettingsPage(root);
+  }
   disposeVerificationPage(root);
+  folderSelectionPageSurfaces.get(root)?.dispose();
+  folderSelectionPageSurfaces.delete(root);
   root.replaceChildren();
   root.classList.add("knowledge-workbench");
   const readOnlyAcceptance = policy.mode === "read-only-acceptance";
@@ -255,12 +506,12 @@ export function renderWorkbench(
     onSuggestLabels: undefined,
   } : actions;
   const shell = renderWorkbenchShell(root, {
-    activePage: model.activeTab,
+    activePage: model.route.tab,
     i18n,
     connectionStatus: model.catalog.status === "unavailable"
       ? "unavailable"
       : model.catalogConnection?.status ?? "unavailable",
-    onSelectPage: actions.onSelectTab,
+    onSelectPage: (tab) => actions.onSelectRoute(routeForTab(tab)),
     onSetLocale: (locale) => { void actions.onSetLocale?.(locale); },
   });
   shell.status.textContent = statusText(model, i18n);
@@ -276,44 +527,155 @@ export function renderWorkbench(
     shell.status.before(banner);
   }
   const panel = shell.panel;
-  if (model.activeTab !== "settings") settingsSurface?.dispose();
-  if (model.activeTab === "workbench") {
-    renderStartPage(panel, { model, actions: surfaceActions, policy });
-  } else if (model.activeTab === "verification") {
-    verificationPageSurfaces.set(root, renderVerificationPage(panel, {
-      i18n,
-      rootPath: model.verificationRoot,
-      rootLocked: model.verificationRootLocked,
-      actionMessageCode: model.verificationActionMessageCode,
-      selectedGroupKeys: model.selectedVerificationGroupKeys,
-      connection: model.catalogConnection,
-      hybrid: model.hybridCatalog,
-      actions: {
-        onRootChange: surfaceActions.onSetVerificationRoot,
-        onToggleGroup: surfaceActions.onToggleVerificationGroup,
-        onStart: surfaceActions.onStartSelectedVerification,
-        onResume: surfaceActions.onResumeSelectedVerification,
-        onCancel: surfaceActions.onCancelSelectedVerification,
-        ...(surfaceActions.onBrowseVerificationRoot === undefined ? {} : {
-          onBrowseRoot: surfaceActions.onBrowseVerificationRoot,
-        }),
+  if (model.route.tab === "library") {
+    renderLibraryPage(panel, {
+      catalog: model.catalog,
+      selectedCatalogId: model.selectedCatalogId,
+      recentItems: recentLibraryItems.get(root) ?? [],
+      filtersExpanded: model.catalogFiltersExpanded,
+      workflow: model.workflow,
+      i18n: createWorkbenchI18n(model.locale),
+    }, {
+      ...surfaceActions,
+      onOpenTask: () => surfaceActions.onSelectRoute({
+        tab: "task",
+        page: "overview",
+      }),
+      onOpenCatalogDetail: (catalogId) => {
+        recordRecentLibraryItem(root, model, catalogId);
+        surfaceActions.onSelectCatalogRecord(catalogId);
       },
+    });
+  } else if (
+    model.route.tab === "task"
+    && model.route.page === "folder-selection"
+  ) {
+    if (
+      !readOnlyAcceptance
+      && model.folderSelection !== undefined
+      && folderSelectionHost?.available === true
+      && surfaceActions.folderSelectionActions !== undefined
+    ) {
+      folderSelectionPageSurfaces.set(root, folderSelectionHost.render(
+        panel,
+        model.folderSelection,
+        surfaceActions.folderSelectionActions(model.folderSelection.revision),
+      ));
+    } else {
+      verificationPageSurfaces.set(root, renderVerificationPage(panel, {
+        i18n,
+        rootPath: model.verificationRoot,
+        directorySelection: model.verificationDirectorySelection,
+        rootLocked: model.verificationRootLocked,
+        actionMessageCode: model.verificationActionMessageCode,
+        runDetailsOpen: verificationRunDetailsOpen,
+        selectedGroupKeys: model.selectedVerificationGroupKeys,
+        connection: model.catalogConnection,
+        hybrid: model.hybridCatalog,
+        actions: {
+          onRootChange: surfaceActions.onSetVerificationRoot,
+          onToggleGroup: surfaceActions.onToggleVerificationGroup,
+          onStart: surfaceActions.onStartSelectedVerification,
+          onResume: surfaceActions.onResumeSelectedVerification,
+          onCancel: surfaceActions.onCancelSelectedVerification,
+          onDirectorySelection: surfaceActions.onApplyVerificationDirectorySelection
+            ?? (() => undefined),
+          ...(surfaceActions.onBrowseVerificationRoot === undefined ? {} : {
+            onBrowseRoot: surfaceActions.onBrowseVerificationRoot,
+          }),
+        },
+      }));
+    }
+  } else if (
+    model.route.tab === "task"
+    && model.route.page === "category-selection"
+  ) {
+    const groups = model.hybridCatalog?.active?.groups ?? [];
+    const selectedGroupKeys = model.selectedVerificationGroupKeys.length > 0
+      ? model.selectedVerificationGroupKeys
+      : model.workflow.recommendedGroup === null
+        ? []
+        : [model.workflow.recommendedGroup.groupKey];
+    verificationPageSurfaces.set(root, renderVerificationCategoryEditor(panel, {
+      i18n,
+      groups,
+      selectedGroupKeys,
+      rootPath: model.verificationRoot || model.boundLibraryPath || "",
+      expectedRootPath: model.boundLibraryPath || "",
+    }, {
+      onSave: (input) => surfaceActions.onTaskSaveCategorySelection(
+        model.taskActionRevision,
+        input,
+      ),
+      onCancel: surfaceActions.onTaskCancelCategorySelection,
     }));
-  } else if (model.activeTab === "history") {
+  } else if (model.route.tab === "task") {
+    const taskWorkflow = readOnlyAcceptance ? acceptanceTaskWorkflow() : model.workflow;
+    renderTaskPage(panel, {
+      i18n,
+      workflow: taskWorkflow,
+      boundLibraryPath: model.boundLibraryPath,
+      visibleGroupScope: readOnlyAcceptance ? [] : visibleTaskGroupScope(model),
+      taskActionRevision: model.taskActionRevision,
+      hybrid: model.hybridCatalog,
+      actionPending: model.taskActionPending,
+      pauseRequested: model.taskPauseRequested,
+    }, {
+      onPrimary: surfaceActions.onTaskPrimary,
+      onChooseDifferentCategory: surfaceActions.onTaskChooseDifferentCategory,
+      onOpenDetails: surfaceActions.onTaskOpenDetails,
+    }, verificationRunDetailsOpen);
+  } else if (model.route.tab === "more" && model.route.page === "overview") {
+    renderMorePage(panel, {
+      locale: model.locale,
+      connectionStatus: model.catalogConnection?.status,
+      rememberedLibrary: model.boundLibraryPath,
+      activeCatalogCount: model.hybridCatalog?.active?.pdfCount ?? model.catalog.pdfCount,
+      openAtStartup: model.openAtStartup ?? false,
+      onSelectRoute: surfaceActions.onSelectRoute,
+    });
+  } else if (model.route.page === "history") {
     renderHistory(panel, model.history ?? { entries: [] }, {
       onUndo: surfaceActions.onUndoHistory ?? (() => undefined),
       onViewRecovery: surfaceActions.onViewRecovery ?? (() => undefined),
       onClear: surfaceActions.onClearHistory ?? (() => undefined),
       onExport: surfaceActions.onExportHistory ?? (() => undefined),
     }, policy, i18n);
-  } else if (model.activeTab === "cloud-catalog") {
-    renderCloudCatalogTab(panel, model.catalog, surfaceActions, {
-      i18n: createWorkbenchI18n(model.locale),
-      selectedCatalogId: model.selectedCatalogId,
-      filtersExpanded: model.catalogFiltersExpanded,
-    });
+  } else if (model.route.page === "knowledge-tools") {
+    renderStartPage(panel, { model, actions: surfaceActions, policy });
   } else if (settingsSurface !== undefined) {
-    settingsSurface.render(panel, model.locale);
+    const section = settingsSectionForRoute(model.route);
+    if (section === undefined) {
+      settingsSurface.render(panel, model.locale);
+    } else {
+      const subpage = doc.createElement("div");
+      subpage.className = "knowledge-workbench__more-subpage";
+      panel.append(subpage);
+      settingsSurface.render(subpage, model.locale, {
+        section,
+        onBackToMore: () => surfaceActions.onSelectRoute({ tab: "more", page: "overview" }),
+        onOpenTaskOverview: () => surfaceActions.onOpenTaskOverview?.(),
+      });
+      if (model.route.tab === "more" && model.route.page === "advanced") {
+        const privacyAi = doc.createElement("button");
+        privacyAi.type = "button";
+        privacyAi.dataset.action = "open-privacy-ai";
+        privacyAi.textContent = i18n.t("settings.section.privacyAi");
+        privacyAi.addEventListener("click", () => surfaceActions.onSelectRoute({
+          tab: "more", page: "privacy-ai",
+        }));
+        const knowledgeTools = doc.createElement("button");
+        knowledgeTools.type = "button";
+        knowledgeTools.dataset.action = "open-knowledge-tools";
+        knowledgeTools.textContent = i18n.t("more.advanced.title");
+        knowledgeTools.addEventListener("click", () => surfaceActions.onSelectRoute({
+          tab: "more", page: "knowledge-tools",
+        }));
+        subpage.prepend(knowledgeTools, privacyAi);
+      }
+    }
+    settingsPageSurfaces.set(root, settingsSurface);
+    if (section !== undefined) settingsPageSections.set(root, section);
   } else {
     const placeholder = doc.createElement("p");
     placeholder.className = "knowledge-workbench__placeholder";
@@ -325,23 +687,37 @@ export function renderWorkbench(
   if (!readOnlyAcceptance && model.aiSuggestion !== undefined) {
     renderAiSuggestion(panel, model.aiSuggestion.text, i18n);
   }
-  if (focusKey !== undefined) {
-    const target = Array.from(root.querySelectorAll<HTMLElement>("[data-focus-key]"))
-      .find((candidate) => candidate.dataset.focusKey === focusKey);
-    target?.focus({ preventScroll: true });
-    if (selection !== null && target?.matches("input, textarea")) {
+  if (verificationDirectoryAdvancedOpen) {
+    const advanced = root.querySelector<HTMLDetailsElement>(
+      "details[data-cloud-directory-advanced]",
+    );
+    if (advanced !== null) advanced.open = true;
+  }
+  const target = focusTarget(root, requestedFocusKeys);
+  if (target !== null) {
+    target.focus({ preventScroll: true });
+    const selectionToRestore = carriedFocus?.selection ?? null;
+    if (selectionToRestore !== null && target.matches("input, textarea")) {
       const input = target as HTMLInputElement;
-      const start = Math.min(selection.start ?? input.value.length, input.value.length);
-      const end = Math.min(selection.end ?? start, input.value.length);
-      input.setSelectionRange(start, end, selection.direction ?? "none");
+      const start = Math.min(selectionToRestore.start ?? input.value.length, input.value.length);
+      const end = Math.min(selectionToRestore.end ?? start, input.value.length);
+      input.setSelectionRange(start, end, selectionToRestore.direction ?? "none");
     }
   }
+  const restored = target !== null && doc.activeElement === target;
+  const pending = hasUnmanagedFocus || enteringFolderSelection || restored
+    ? null
+    : requestedFocusKeys.length === 0
+      ? carriedFocus
+      : { key: requestedFocusKeys.at(-1)!, selection: null } satisfies FocusIntent;
+  renderFocusStates.set(root, { route: model.route, pending });
 }
 
 export interface WorkbenchViewController {
   snapshot(): WorkbenchViewModel;
   subscribe(listener: () => void): () => void;
-  selectTab(tab: WorkbenchTab): void;
+  selectRoute(route: WorkbenchRoute): void;
+  openTaskOverview?(): void;
   selectStartSection(section: StartSection): void;
   setTodayFilter(filter: TodayFilter): void;
   setLocale(locale: WorkbenchLocale): Promise<void>;
@@ -367,11 +743,27 @@ export interface WorkbenchViewController {
   copyCatalogPath(catalogId: string): Promise<void>;
   openBaidu(): Promise<void>;
   setVerificationRoot(value: string): void;
-  chooseCatalogRoot?(initialRoot: string): Promise<string | null>;
+  chooseCatalogRoot?(input: Readonly<{
+    initialRoot: string;
+    purpose: CloudDirectoryPickerPurpose;
+  }>): Promise<CloudDirectorySelection | null>;
+  applyCatalogRootSelection?(selection: CloudDirectorySelection): void;
+  openVerificationFolderSelection?(): void;
+  folderSelectionActions?(expectedRevision: number): FolderSelectionHostActions;
+  closeFolderSelection?(): void;
   toggleVerificationGroup(groupKey: string): void;
   startSelectedVerification(): Promise<void>;
   resumeSelectedVerification(): Promise<void>;
   cancelSelectedVerification(): void;
+  performTaskPrimaryAction?(expectedRevision: number): Promise<void>;
+  performTaskTxtSelection?(
+    expectedRevision: number,
+    requestPath: () => Promise<string | null>,
+  ): Promise<void>;
+  saveTaskCategorySelection?(
+    expectedRevision: number,
+    input: Readonly<{ rootPath: string; groupKeys: readonly string[] }>,
+  ): void;
   selectCenter(center: Readonly<{ kind: "document" | "topic"; id: string }>): Promise<void>;
   previewSuggestion(suggestionId: string): Promise<void>;
   previewSuggestionIds(suggestionIds: readonly string[]): Promise<void>;
@@ -397,11 +789,14 @@ export function createWorkbenchViewClass(
 ) {
   return class WorkbenchView extends ItemViewBase {
     private unsubscribe: (() => void) | null = null;
+    private readonly localCatalogTxtPicker = createLocalCatalogTxtPicker();
+    private localCatalogTxtHost: HTMLElement | null = null;
 
     constructor(
       leaf: WorkspaceLeaf,
       private readonly controller: WorkbenchViewController,
       private readonly settingsSurface?: SettingsSectionsSurface,
+      private readonly folderSelectionHost?: FolderSelectionHostCapability,
     ) {
       super(leaf);
     }
@@ -421,8 +816,14 @@ export function createWorkbenchViewClass(
     async onClose(): Promise<void> {
       this.unsubscribe?.();
       this.unsubscribe = null;
-      this.settingsSurface?.dispose();
+      disposeSettingsPage(this.contentEl);
       disposeVerificationPage(this.contentEl);
+      folderSelectionPageSurfaces.get(this.contentEl)?.dispose();
+      folderSelectionPageSurfaces.delete(this.contentEl);
+      recentLibraryItems.delete(this.contentEl);
+      this.controller.closeFolderSelection?.();
+      this.localCatalogTxtHost?.remove();
+      this.localCatalogTxtHost = null;
       this.contentEl.replaceChildren();
     }
 
@@ -430,8 +831,30 @@ export function createWorkbenchViewClass(
       const chooseCatalogRoot = policy.mode === "normal"
         ? this.controller.chooseCatalogRoot?.bind(this.controller)
         : undefined;
-      renderWorkbench(this.contentEl, this.controller.snapshot(), {
-        onSelectTab: (tab) => this.controller.selectTab(tab),
+      const applyCatalogRootSelection = policy.mode === "normal"
+        ? this.controller.applyCatalogRootSelection?.bind(this.controller)
+        : undefined;
+      const openFolderSelectionMethod = this.controller.openVerificationFolderSelection
+        ?.bind(this.controller);
+      const folderSelectionActionsMethod = this.controller.folderSelectionActions
+        ?.bind(this.controller);
+      const inlineFolderSelectionAvailable = policy.mode === "normal"
+        && this.folderSelectionHost?.available === true
+        && openFolderSelectionMethod !== undefined
+        && folderSelectionActionsMethod !== undefined;
+      const openFolderSelection = inlineFolderSelectionAvailable
+        ? openFolderSelectionMethod
+        : undefined;
+      const folderSelectionActions = inlineFolderSelectionAvailable
+        ? folderSelectionActionsMethod
+        : undefined;
+      const snapshot = this.controller.snapshot();
+      renderWorkbench(this.contentEl, snapshot, {
+        onSelectRoute: (route) => this.controller.selectRoute(route),
+        onOpenTaskOverview: () => {
+          if (this.controller.openTaskOverview !== undefined) this.controller.openTaskOverview();
+          else this.controller.selectRoute({ tab: "task", page: "overview" });
+        },
         onSelectStartSection: (section) => this.controller.selectStartSection(section),
         onSetLocale: (locale) => this.runAction("host.action.languageFailed", () => this.controller.setLocale(locale)),
         onSelectTodayFilter: (filter) => this.controller.setTodayFilter(filter),
@@ -480,12 +903,60 @@ export function createWorkbenchViewClass(
         onStartSelectedVerification: () => this.controller.startSelectedVerification(),
         onResumeSelectedVerification: () => this.controller.resumeSelectedVerification(),
         onCancelSelectedVerification: () => this.controller.cancelSelectedVerification(),
-        ...(chooseCatalogRoot === undefined ? {} : {
-          onBrowseVerificationRoot: () => chooseCatalogRoot(
-            this.controller.snapshot().verificationRoot,
-          ),
+        onTaskPrimary: (revision) => this.runTaskAction(async () => {
+          if (
+            policy.mode === "normal"
+            && this.controller.snapshot().workflow.primaryAction === "choose-txt"
+          ) {
+            const select = this.controller.performTaskTxtSelection?.bind(this.controller);
+            if (select === undefined) throw new Error("catalog-unavailable");
+            await select(
+              revision,
+              () => this.localCatalogTxtPicker.request(this.localCatalogTxtPickerHost()),
+            );
+            return;
+          }
+          const perform = this.controller.performTaskPrimaryAction?.bind(this.controller);
+          if (perform === undefined) throw new Error("catalog-unavailable");
+          await perform(revision);
         }),
-      }, policy, this.settingsSurface);
+        onTaskChooseDifferentCategory: () => this.controller.selectRoute({
+          tab: "task",
+          page: "category-selection",
+        }),
+        onTaskSaveCategorySelection: (revision, input) => {
+          try {
+            const save = this.controller.saveTaskCategorySelection?.bind(this.controller);
+            if (save === undefined) throw new Error("catalog-unavailable");
+            save(revision, input);
+          } catch {
+            this.controller.reportError(TASK_FAILED_MESSAGE);
+          }
+        },
+        onTaskCancelCategorySelection: () => this.controller.selectRoute({
+          tab: "task",
+          page: "overview",
+        }),
+        onTaskOpenDetails: () => undefined,
+        ...(openFolderSelection === undefined
+          ? (chooseCatalogRoot === undefined ? {} : {
+              onBrowseVerificationRoot: () => chooseCatalogRoot({
+                initialRoot: this.controller.snapshot().verificationRoot,
+                purpose: verificationPickerPurpose(this.controller.snapshot()),
+              }),
+            })
+          : {
+              onBrowseVerificationRoot: async () => {
+                openFolderSelection();
+                return null;
+              },
+              onOpenVerificationFolderSelection: openFolderSelection,
+            }),
+        ...(folderSelectionActions === undefined ? {} : { folderSelectionActions }),
+        ...(applyCatalogRootSelection === undefined ? {} : {
+          onApplyVerificationDirectorySelection: applyCatalogRootSelection,
+        }),
+      }, policy, this.settingsSurface, this.folderSelectionHost);
     }
 
     private runAction(labelKey: HostActionMessageKey, operation: () => Promise<unknown>): void {
@@ -496,6 +967,25 @@ export function createWorkbenchViewClass(
       } catch {
         this.controller.reportError(labelKey);
       }
+    }
+
+    private async runTaskAction(operation: () => Promise<void>): Promise<void> {
+      try {
+        await operation();
+      } catch {
+        this.controller.reportError(TASK_FAILED_MESSAGE);
+      }
+    }
+
+    /** A sibling of the rerendered page root; removed only when the view closes. */
+    private localCatalogTxtPickerHost(): HTMLElement {
+      if (this.localCatalogTxtHost?.isConnected) return this.localCatalogTxtHost;
+      const host = this.contentEl.ownerDocument.createElement("div");
+      host.dataset.localCatalogTxtHost = "true";
+      host.setAttribute("aria-hidden", "true");
+      (this.contentEl.parentElement ?? this.contentEl.ownerDocument.body).append(host);
+      this.localCatalogTxtHost = host;
+      return host;
     }
 
     private runAiAction(operation: () => Promise<AiResult<string>> | undefined): void {

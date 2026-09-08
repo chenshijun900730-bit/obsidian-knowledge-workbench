@@ -1,22 +1,18 @@
 import type { App, Modal } from "obsidian";
-import { normalizeCatalogScanRoot } from "../catalog/catalog-path";
 import { LARGE_CATALOG_RUN_BUDGET } from "../catalog/hybrid-catalog-types";
+import {
+  validateVerificationLaunchRequest,
+  type VerificationLaunchGroup,
+  type VerificationLaunchRequest,
+  type VerificationLaunchSelectionValidator,
+} from "../catalog/verification-launch-request";
 import {
   createWorkbenchI18n,
   type WorkbenchLocaleProvider,
 } from "../i18n/workbench-i18n";
 
-export interface CatalogLargeScanConfirmationGroup {
-  readonly groupKey: string;
-  readonly label: string;
-  readonly pdfCount: number;
-}
-
-export interface CatalogLargeScanConfirmationRequest {
-  readonly kind: "start" | "resume";
-  readonly cloudRoot: string;
-  readonly groups: readonly CatalogLargeScanConfirmationGroup[];
-}
+export type CatalogLargeScanConfirmationGroup = VerificationLaunchGroup;
+export type CatalogLargeScanConfirmationRequest = VerificationLaunchRequest;
 
 export interface CatalogLargeScanConfirmationPresenter {
   request(input: CatalogLargeScanConfirmationRequest): Promise<boolean>;
@@ -24,43 +20,10 @@ export interface CatalogLargeScanConfirmationPresenter {
 
 export type CatalogLargeScanModalConstructor = abstract new (app: App) => Modal;
 
-const GROUP_PATTERN = /^(?:txt-root-items|group:[a-f0-9]{64})$/u;
-
-const checkedRequest = (
-  input: CatalogLargeScanConfirmationRequest,
-): CatalogLargeScanConfirmationRequest => {
-  if (
-    (input.kind !== "start" && input.kind !== "resume")
-    || (input.kind === "start" && (
-      input.groups.length < 1
-      || input.groups.length > LARGE_CATALOG_RUN_BUDGET.maxSelectedTopLevelGroups
-    ))
-    || (input.kind === "resume" && input.groups.length !== 0)
-  ) throw new RangeError("invalid-large-catalog-selection");
-  const seen = new Set<string>();
-  const groups = input.groups.map((group) => {
-    const label = group.label.normalize("NFC").trim();
-    if (
-      !GROUP_PATTERN.test(group.groupKey)
-      || seen.has(group.groupKey)
-      || label.length === 0
-      || /\p{Cc}/u.test(label)
-      || !Number.isSafeInteger(group.pdfCount)
-      || group.pdfCount < 1
-    ) throw new RangeError("invalid-large-catalog-selection");
-    seen.add(group.groupKey);
-    return { groupKey: group.groupKey, label, pdfCount: group.pdfCount };
-  });
-  return {
-    kind: input.kind,
-    cloudRoot: normalizeCatalogScanRoot(input.cloudRoot),
-    groups,
-  };
-};
-
 export function createCatalogLargeScanConfirmationModalClass(
   ModalBase: CatalogLargeScanModalConstructor,
   getLocale: WorkbenchLocaleProvider = () => "en",
+  validateSelection?: VerificationLaunchSelectionValidator,
 ) {
   return class CatalogLargeScanConfirmationModal extends ModalBase
     implements CatalogLargeScanConfirmationPresenter {
@@ -72,7 +35,7 @@ export function createCatalogLargeScanConfirmationModalClass(
 
     request(input: CatalogLargeScanConfirmationRequest): Promise<boolean> {
       if (this.result !== null) return this.result;
-      this.requestValue = checkedRequest(input);
+      this.requestValue = validateVerificationLaunchRequest(input, validateSelection);
       this.opener = this.contentEl.ownerDocument.activeElement as HTMLElement | null;
       this.result = new Promise((resolve) => { this.settleResult = resolve; });
       this.open();
@@ -95,6 +58,25 @@ export function createCatalogLargeScanConfirmationModalClass(
       scope.textContent = i18n.t(request.kind === "start"
         ? "verification.confirm.start.scope"
         : "verification.confirm.resume.scope", { root: request.cloudRoot });
+      const structuredSummary: HTMLElement[] = [];
+      if (request.kind === "start" && request.directorySelection !== undefined) {
+        const selectedFolder = doc.createElement("p");
+        selectedFolder.textContent = i18n.t("verification.confirm.start.selectedFolder", {
+          path: request.directorySelection.selectedPath,
+        });
+        const effectiveRoot = doc.createElement("p");
+        effectiveRoot.textContent = i18n.t("verification.confirm.start.effectiveRoot", {
+          path: request.cloudRoot,
+        });
+        structuredSummary.push(selectedFolder, effectiveRoot);
+        if (request.directorySelection.kind === "category") {
+          const category = doc.createElement("p");
+          category.textContent = i18n.t("verification.confirm.start.category", {
+            category: request.groups[0]?.label ?? "",
+          });
+          structuredSummary.push(category);
+        }
+      }
       const selection = doc.createElement("p");
       selection.textContent = request.kind === "start"
         ? i18n.t("verification.confirm.start.selection", {
@@ -129,7 +111,7 @@ export function createCatalogLargeScanConfirmationModalClass(
         : "verification.confirm.resume.action");
       confirm.addEventListener("click", () => this.finish(true));
       actions.append(cancel, confirm);
-      this.contentEl.append(scope, selection, budget, safety, actions);
+      this.contentEl.append(scope, ...structuredSummary, selection, budget, safety, actions);
       confirm.focus();
     }
 

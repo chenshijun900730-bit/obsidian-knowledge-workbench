@@ -1,11 +1,17 @@
 import { PLUGIN_DATA_SCHEMA_VERSION } from "../constants";
 import { normalizeAiEndpoint, normalizeAiModel, normalizeAiSecretId } from "../ai/ai-config";
+import { sha256 } from "../core/hash";
 import type { PluginDataPort } from "../core/ports";
 import { OWNED_FIELDS, type DocumentKind, type DocumentRecord, type OwnedFieldValue } from "../core/types";
 import { effectiveSettings, type RuntimeSafetyPolicy } from "../runtime/safety-policy";
 import { isWorkbenchLocale } from "../i18n/workbench-i18n";
+import { MAX_INDEX_HEADINGS, MAX_INDEX_TOKENS } from "../indexing/index-record-limits";
+import { decodeBoundCloudLibrary } from "./cloud-library-binding";
+import { decodeLegacyVerificationAdoption } from "./legacy-verification-adoption";
 import type {
   ActiveIndex,
+  CloudVerificationSettings,
+  CloudVerificationTransitionIntent,
   FolderRule,
   OperationalState,
   PluginData,
@@ -16,6 +22,10 @@ import {
   EMPTY_RECENT_CLOUD_DIRECTORIES,
   decodeRecentCloudDirectories,
 } from "./recent-cloud-directories";
+import {
+  decodeVerificationBatchTombstones,
+  repairVerificationBatchTombstones,
+} from "./verification-batch-tombstones";
 
 const ACTIVE_JOURNAL_STATUSES = new Set(["planned", "executing", "rolling-back", "recovery-required"]);
 const MAX_JOURNALS = 100;
@@ -56,6 +66,10 @@ const defaultSettings = (): PluginSettings => ({
   aiModel: "",
   secretId: "",
   recentCloudDirectories: EMPTY_RECENT_CLOUD_DIRECTORIES,
+  boundCloudLibrary: null,
+  cloudVerificationGeneration: 0,
+  verificationBatchTombstones: { schemaVersion: 1, state: "valid", batchIds: [] },
+  legacyVerificationAdoption: { schemaVersion: 1, state: "none" },
 });
 
 const defaultOperational = (): OperationalState => ({
@@ -87,12 +101,184 @@ const decodeFolderRules = (value: unknown): FolderRule[] => {
   });
 };
 
-const decodeStringList = (value: unknown): string[] | null => {
+const decodeStringList = (value: unknown, limit = Number.POSITIVE_INFINITY): string[] | null => {
   if (!Array.isArray(value) || !value.every((item): item is string => typeof item === "string")) return null;
-  return [...value];
+  return value.slice(0, limit);
 };
 
-const decodeSettings = (value: unknown): PluginSettings => {
+const decodeCloudVerificationGeneration = (value: unknown): number => (
+  typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : 0
+);
+
+const cloudVerificationSettings = (settings: PluginSettings): CloudVerificationSettings => ({
+  boundCloudLibrary: clone(settings.boundCloudLibrary),
+  cloudVerificationGeneration: settings.cloudVerificationGeneration,
+  verificationBatchTombstones: clone(settings.verificationBatchTombstones),
+  legacyVerificationAdoption: clone(settings.legacyVerificationAdoption),
+});
+
+const preserveCloudVerificationSettings = (
+  settings: PluginSettings,
+  authority: CloudVerificationSettings,
+): PluginSettings => ({
+  ...settings,
+  ...clone(authority),
+});
+
+const sameCloudVerificationValue = (left: unknown, right: unknown): boolean => (
+  JSON.stringify(left) === JSON.stringify(right)
+);
+
+const checkedNextGeneration = (generation: number): number => {
+  if (generation >= Number.MAX_SAFE_INTEGER) {
+    throw new RangeError("Cloud verification generation cannot be incremented");
+  }
+  return generation + 1;
+};
+
+const assertExpectedTombstones = (
+  current: CloudVerificationSettings,
+  next: CloudVerificationSettings,
+  currentWorkflowBatchId: string | null,
+): void => {
+  const expected = repairVerificationBatchTombstones(
+    current.verificationBatchTombstones,
+    currentWorkflowBatchId,
+  );
+  if (!sameCloudVerificationValue(next.verificationBatchTombstones, expected)) {
+    throw new RangeError("Cloud verification tombstone batch transition is invalid");
+  }
+};
+
+const assertAdoptedScopeMatchesBinding = async (
+  next: CloudVerificationSettings,
+): Promise<void> => {
+  const adoption = next.legacyVerificationAdoption;
+  if (adoption.state !== "adopted") return;
+  if (
+    next.boundCloudLibrary === null
+    || adoption.verificationGeneration !== next.cloudVerificationGeneration
+    || adoption.sourceImportSha256 !== next.boundCloudLibrary.sourceImportSha256
+    || adoption.cloudRootSha256 !== await sha256(next.boundCloudLibrary.path)
+  ) {
+    throw new RangeError("Legacy adoption does not match the bound cloud library generation");
+  }
+};
+
+const assertLibraryBindingTransition = (
+  current: CloudVerificationSettings,
+  next: CloudVerificationSettings,
+  currentWorkflowBatchId: string | null,
+): Promise<void> => {
+  if (next.boundCloudLibrary === null) {
+    throw new RangeError("A library-binding transition requires a bound cloud library");
+  }
+  const rootChanged = current.boundCloudLibrary !== null
+    && current.boundCloudLibrary.path !== next.boundCloudLibrary.path;
+  const rotatesGeneration = current.cloudVerificationGeneration === 0 || rootChanged;
+  const expectedGeneration = rotatesGeneration
+    ? checkedNextGeneration(current.cloudVerificationGeneration)
+    : current.cloudVerificationGeneration;
+  if (
+    next.cloudVerificationGeneration !== expectedGeneration
+    || next.boundCloudLibrary.verificationGeneration !== expectedGeneration
+  ) {
+    throw new RangeError("Cloud verification generation transition is invalid");
+  }
+
+  const currentAdoption = current.legacyVerificationAdoption;
+  const nextAdoption = next.legacyVerificationAdoption;
+  if (currentAdoption.state === "invalid") {
+    if (nextAdoption.state !== "ineligible") {
+      throw new RangeError("Invalid legacy adoption requires an explicit fresh binding");
+    }
+  } else if (current.cloudVerificationGeneration > 0) {
+    if (!sameCloudVerificationValue(nextAdoption, currentAdoption)) {
+      throw new RangeError("Legacy adoption cannot be created or replaced after generation zero");
+    }
+  } else if (currentAdoption.state === "pending") {
+    if (!["adopted", "none", "ineligible"].includes(nextAdoption.state)) {
+      throw new RangeError("Pending legacy adoption must be resolved by the first binding");
+    }
+  } else if (!sameCloudVerificationValue(nextAdoption, currentAdoption)) {
+    throw new RangeError("Legacy adoption transition is invalid");
+  }
+
+  assertExpectedTombstones(current, next, currentWorkflowBatchId);
+  return currentAdoption.state === "pending" && nextAdoption.state === "adopted"
+    ? assertAdoptedScopeMatchesBinding(next)
+    : Promise.resolve();
+};
+
+const assertIdentityReplacementTransition = (
+  current: CloudVerificationSettings,
+  next: CloudVerificationSettings,
+  currentWorkflowBatchId: string | null,
+): void => {
+  const expectedGeneration = checkedNextGeneration(current.cloudVerificationGeneration);
+  if (next.cloudVerificationGeneration !== expectedGeneration || next.boundCloudLibrary !== null) {
+    throw new RangeError("Identity replacement must rotate the generation and clear the binding");
+  }
+  const expectedAdoption = ["pending", "invalid"].includes(
+    current.legacyVerificationAdoption.state,
+  )
+    ? { schemaVersion: 1 as const, state: "ineligible" as const }
+    : current.legacyVerificationAdoption;
+  if (!sameCloudVerificationValue(next.legacyVerificationAdoption, expectedAdoption)) {
+    throw new RangeError("Identity replacement legacy adoption transition is invalid");
+  }
+  assertExpectedTombstones(current, next, currentWorkflowBatchId);
+};
+
+const assertTxtSourceReplacementTransition = (
+  current: CloudVerificationSettings,
+  next: CloudVerificationSettings,
+): void => {
+  if (
+    next.cloudVerificationGeneration !== current.cloudVerificationGeneration
+    || next.boundCloudLibrary !== null
+    || !sameCloudVerificationValue(
+      next.verificationBatchTombstones,
+      current.verificationBatchTombstones,
+    )
+    || !sameCloudVerificationValue(
+      next.legacyVerificationAdoption,
+      current.legacyVerificationAdoption,
+    )
+  ) {
+    throw new RangeError("TXT source replacement may only clear the cloud library binding");
+  }
+};
+
+const assertCloudVerificationTransition = (
+  current: CloudVerificationSettings,
+  next: CloudVerificationSettings,
+  transition: CloudVerificationTransitionIntent | undefined,
+): Promise<void> => {
+  if (transition === undefined) {
+    throw new RangeError("Cloud verification authority transition intent is required");
+  }
+  if (transition.kind === "library-binding") {
+    return assertLibraryBindingTransition(current, next, transition.currentWorkflowBatchId);
+  }
+  if (transition.kind === "identity-replacement") {
+    assertIdentityReplacementTransition(current, next, transition.currentWorkflowBatchId);
+    return Promise.resolve();
+  }
+  if (transition.kind === "txt-source-replacement") {
+    if (transition.currentWorkflowBatchId !== null) {
+      throw new RangeError("TXT source replacement cannot supersede a workflow batch");
+    }
+    assertTxtSourceReplacementTransition(current, next);
+    return Promise.resolve();
+  }
+  throw new RangeError("Cloud verification authority transition intent is invalid");
+};
+
+const decodeSettings = (
+  value: unknown,
+  missingLegacyAdoptionState: "pending" | "invalid" = "pending",
+): PluginSettings => {
   if (!isObject(value)) return defaultSettings();
   const writePreviewAcknowledged = value.writePreviewAcknowledged === true;
   let aiEndpoint = "";
@@ -108,6 +294,13 @@ const decodeSettings = (value: unknown): PluginSettings => {
   if (typeof value.secretId === "string") {
     try { secretId = normalizeAiSecretId(value.secretId); } catch { aiConfigurationValid = false; }
   } else if (value.secretId !== undefined) aiConfigurationValid = false;
+  const cloudVerificationGeneration = decodeCloudVerificationGeneration(
+    value.cloudVerificationGeneration,
+  );
+  const decodedBinding = decodeBoundCloudLibrary(value.boundCloudLibrary);
+  const boundCloudLibrary = decodedBinding?.verificationGeneration === cloudVerificationGeneration
+    ? decodedBinding
+    : null;
   return {
     locale: isWorkbenchLocale(value.locale) ? value.locale : "zh-CN",
     writeEnabled: value.writeEnabled === true && writePreviewAcknowledged,
@@ -120,6 +313,15 @@ const decodeSettings = (value: unknown): PluginSettings => {
     aiModel,
     secretId,
     recentCloudDirectories: decodeRecentCloudDirectories(value.recentCloudDirectories),
+    boundCloudLibrary,
+    cloudVerificationGeneration,
+    verificationBatchTombstones: decodeVerificationBatchTombstones(
+      value.verificationBatchTombstones,
+    ),
+    legacyVerificationAdoption: decodeLegacyVerificationAdoption(
+      value.legacyVerificationAdoption,
+      missingLegacyAdoptionState,
+    ),
   };
 };
 
@@ -162,12 +364,12 @@ const decodeRelationFields = (value: unknown): Record<string, OwnedFieldValue> |
 const decodeDocumentRecord = (value: unknown): DocumentRecord | null => {
   if (!isObject(value)) return null;
   const aliases = decodeStringList(value.aliases);
-  const headings = decodeStringList(value.headings);
+  const headings = decodeStringList(value.headings, MAX_INDEX_HEADINGS);
   const tags = decodeStringList(value.tags);
   const ownedFields = decodeOwnedFields(value.ownedFields);
   const relationFields = decodeRelationFields(value.relationFields);
   const outgoingLinks = decodeStringList(value.outgoingLinks);
-  const tokens = decodeStringList(value.tokens);
+  const tokens = decodeStringList(value.tokens, MAX_INDEX_TOKENS);
   if (
     typeof value.id !== "string"
     || typeof value.path !== "string"
@@ -262,7 +464,10 @@ const decodeOperational = (value: unknown): OperationalState => {
 
 const decodeData = (value: unknown): PluginData => {
   if (!isObject(value)) return freshData();
-  const settings = decodeSettings(value.settings);
+  const settings = decodeSettings(
+    value.settings,
+    value.schemaVersion === PLUGIN_DATA_SCHEMA_VERSION ? "pending" : "invalid",
+  );
   if (value.schemaVersion !== PLUGIN_DATA_SCHEMA_VERSION) {
     const operational = isObject(value.operational) ? value.operational : null;
     const journals = operational !== null && Object.prototype.hasOwnProperty.call(operational, "journals")
@@ -288,6 +493,20 @@ const decodeData = (value: unknown): PluginData => {
   };
 };
 
+const recordNeedsSearchFieldCompaction = (value: unknown): boolean => isObject(value) && (
+  (Array.isArray(value.headings) && value.headings.length > MAX_INDEX_HEADINGS)
+  || (Array.isArray(value.tokens) && value.tokens.length > MAX_INDEX_TOKENS)
+);
+
+const indexNeedsSearchFieldCompaction = (value: unknown): boolean => isObject(value)
+  && Array.isArray(value.records)
+  && value.records.some(recordNeedsSearchFieldCompaction);
+
+const dataNeedsSearchFieldCompaction = (value: unknown): boolean => isObject(value) && (
+  indexNeedsSearchFieldCompaction(value.activeIndex)
+  || indexNeedsSearchFieldCompaction(value.staging)
+);
+
 const isJournalId = (value: unknown, id: string): value is { readonly id: string } => isObject(value) && typeof value.id === "string" && value.id === id;
 const removeKey = <T>(record: Readonly<Record<string, T>>, key: string): Record<string, T> => Object.fromEntries(
   Object.entries(record).filter(([entryKey]) => entryKey !== key),
@@ -301,11 +520,18 @@ export class PluginDataStore {
 
   constructor(private readonly port: PluginDataPort) {}
 
+  private async loadCompacted(): Promise<void> {
+    const persisted = await this.port.load();
+    const decoded = decodeData(persisted);
+    if (dataNeedsSearchFieldCompaction(persisted)) await this.port.save(clone(decoded));
+    this.data = decoded;
+    this.loaded = true;
+    this.poison = null;
+  }
+
   async load(): Promise<void> {
     try {
-      this.data = decodeData(await this.port.load());
-      this.loaded = true;
-      this.poison = null;
+      await this.loadCompacted();
     } catch (cause) {
       this.loaded = false;
       const detail = cause instanceof Error ? cause.message : String(cause);
@@ -317,9 +543,7 @@ export class PluginDataStore {
   async reload(): Promise<void> {
     const operation = this.tail.catch(() => undefined).then(async () => {
       try {
-        this.data = decodeData(await this.port.load());
-        this.loaded = true;
-        this.poison = null;
+        await this.loadCompacted();
       } catch (cause) {
         this.loaded = false;
         const detail = cause instanceof Error ? cause.message : String(cause);
@@ -351,6 +575,14 @@ export class PluginDataStore {
 
   activeIndex(): ActiveIndex | null {
     return clone(this.data.activeIndex);
+  }
+
+  hasActiveIndex(): boolean {
+    return this.data.activeIndex !== null;
+  }
+
+  forEachActiveIndexRecord(visitor: (record: DocumentRecord) => void): void {
+    for (const record of this.data.activeIndex?.records ?? []) visitor(record);
   }
 
   staging(): ScanCheckpoint | null {
@@ -394,15 +626,52 @@ export class PluginDataStore {
   }
 
   saveSettings(settings: PluginSettings): Promise<void> {
-    const snapshot = decodeSettings(settings);
-    return this.update((data) => ({ ...data, settings: snapshot }));
+    const requested = clone(settings);
+    return this.update((data) => ({
+      ...data,
+      settings: preserveCloudVerificationSettings(
+        decodeSettings(requested),
+        cloudVerificationSettings(data.settings),
+      ),
+    }));
   }
 
   updateSettings(change: (settings: PluginSettings) => PluginSettings): Promise<void> {
-    return this.update((data) => ({
-      ...data,
-      settings: decodeSettings(change(clone(data.settings))),
-    }));
+    return this.update((data) => {
+      const authority = cloudVerificationSettings(data.settings);
+      return {
+        ...data,
+        settings: preserveCloudVerificationSettings(
+          decodeSettings(change(clone(data.settings))),
+          authority,
+        ),
+      };
+    });
+  }
+
+  updateCloudVerificationSettings(
+    settings: CloudVerificationSettings,
+    transition: CloudVerificationTransitionIntent,
+  ): Promise<void> {
+    const expectedCurrent = cloudVerificationSettings(this.data.settings);
+    const requestedSettings = clone(settings);
+    const requestedTransition = clone(transition);
+    return this.update(async (data) => {
+      const current = cloudVerificationSettings(data.settings);
+      if (!sameCloudVerificationValue(current, expectedCurrent)) {
+        throw new RangeError("Cloud verification authority changed before the transaction committed");
+      }
+      const decoded = decodeSettings({ ...data.settings, ...requestedSettings });
+      const next = cloudVerificationSettings(decoded);
+      await assertCloudVerificationTransition(current, next, requestedTransition);
+      return {
+        ...data,
+        settings: {
+          ...data.settings,
+          ...next,
+        },
+      };
+    });
   }
 
   saveCheckpoint(staging: ScanCheckpoint): Promise<void> {

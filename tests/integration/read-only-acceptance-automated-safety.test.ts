@@ -35,6 +35,16 @@ import {
 } from "../../src/ui/workbench-controller";
 import { FakeVault } from "../fakes/fake-vault";
 import { MemoryPluginDataPort } from "../fakes/memory-plugin-data-port";
+import {
+  FakeCloudCatalogConnectionRuntime,
+  FakeCloudCatalogRuntime,
+  FakeHybridCatalogRuntime,
+} from "../fakes/fake-cloud-catalog-runtime";
+import { controllerFixture, noOpWorkbenchActions } from "../helpers/ui-fixtures";
+import { renderWorkbench } from "../../src/ui/workbench-view";
+import { NORMAL_RUNTIME_POLICY } from "../../src/runtime/safety-policy";
+import type { HybridCatalogActiveSummary } from "../../src/catalog/hybrid-catalog-runtime";
+import { UnifiedCatalogSearchService } from "../../src/catalog/unified-catalog-search-service";
 
 const capturedComposition = vi.hoisted<{ value: unknown }>(() => ({ value: null }));
 const JSDOMRuntime = (jsdomRuntime as unknown as {
@@ -115,6 +125,10 @@ const historicalUnsafeData = (): PluginData => ({
     aiModel: ACCEPTANCE_MODEL,
     secretId: "",
     recentCloudDirectories: EMPTY_RECENT_CLOUD_DIRECTORIES,
+    boundCloudLibrary: null,
+    cloudVerificationGeneration: 0,
+    verificationBatchTombstones: { schemaVersion: 1, state: "valid", batchIds: [] } as const,
+    legacyVerificationAdoption: { schemaVersion: 1, state: "pending" } as const,
   },
   activeIndex: null,
   staging: null,
@@ -332,6 +346,7 @@ const createAcceptanceControllerFixture = async () => {
       delay: vi.fn(async () => undefined),
     },
     catalog: DISABLED_CLOUD_CATALOG_RUNTIME,
+    cloudVerificationRootHasher: () => null,
     catalogConfirmation: { request: async () => false },
   };
   const controller = new WorkbenchController(dependencies);
@@ -360,6 +375,258 @@ const createAcceptanceControllerFixture = async () => {
 afterEach(() => {
   acceptanceDom.window.document.body.replaceChildren();
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
+});
+
+const syntheticActive = (): HybridCatalogActiveSummary => ({
+  sourceImportSha256: "a".repeat(64),
+  legacyArtifactSetSha256: "b".repeat(64),
+  importedAt: 1,
+  pdfCount: 21,
+  unverifiedCount: 20,
+  verifiedCount: 1,
+  differenceCount: 0,
+  cloudMissingCount: 0,
+  groupCount: 6,
+  verifiedGroupCount: 1,
+  coveredCandidatePdfCount: 1,
+  groups: Array.from({ length: 6 }, (_, index) => ({
+    groupKey: `group:${String(index + 1).repeat(64)}`,
+    rootRelativePath: `Category-${index}`,
+    label: `Category-${index}`,
+    pdfCount: index + 1,
+    mode: "recursive",
+    verificationStatus: index === 0 ? "verified" : "unverified",
+  })),
+});
+
+// Keep network/storage synthetic, but exercise the production local search engine.
+class SyntheticSearchCatalogRuntime extends FakeCloudCatalogRuntime {
+  private readonly search: UnifiedCatalogSearchService;
+
+  constructor(...args: ConstructorParameters<typeof FakeCloudCatalogRuntime>) {
+    super(...args);
+    this.search = new UnifiedCatalogSearchService(this.snapshot().items.map((item) => ({
+      schemaVersion: 1,
+      catalogId: item.catalogId,
+      candidateId: item.catalogId,
+      fsId: null,
+      relativePath: item.pathLabel,
+      cloudPath: item.cloudPathAvailable ? `/Synthetic Library/${item.pathLabel}` : null,
+      filename: item.filename,
+      title: item.filename,
+      isbnCandidates: [],
+      sizeBytes: null,
+      serverModifiedAt: null,
+      topLevelGroupId: `group:${"1".repeat(64)}`,
+      hierarchyTags: item.hierarchyTags,
+      verificationStatus: item.verificationStatus,
+      differenceKinds: item.differenceKinds,
+      visibleByDefault: true,
+    })));
+  }
+
+  override setQuery(query: string): void {
+    super.setQuery(query);
+    const page = this.search.query({ text: query, offset: 0, limit: 50 });
+    this.setSnapshot({
+      ...this.snapshot(), query, page: 0, total: page.total,
+      items: page.items.map((record) => ({
+        catalogId: record.catalogId,
+        filename: record.filename,
+        pathLabel: record.relativePath,
+        cloudPathAvailable: record.cloudPath !== null,
+        verificationStatus: record.verificationStatus,
+        differenceKinds: record.differenceKinds,
+        hierarchyTags: record.hierarchyTags,
+      })),
+    });
+  }
+}
+
+const syntheticTaskFixture = () => {
+  const active = syntheticActive();
+  const hybrid = new FakeHybridCatalogRuntime({ status: "ready", active });
+  const connection = new FakeCloudCatalogConnectionRuntime({ status: "authorized" });
+  const catalog = new SyntheticSearchCatalogRuntime({
+    status: "ready", source: "unified", pdfCount: 21, total: 2,
+    verificationCounts: { unverified: 20, verified: 1, difference: 0, cloudMissing: 0 },
+    items: [{
+      catalogId: "synthetic-verified", filename: "Synthetic.pdf",
+      pathLabel: "Category-0/Synthetic.pdf", cloudPathAvailable: true,
+      verificationStatus: "verified", differenceKinds: [], hierarchyTags: ["folder/Category-0"],
+    }, {
+      catalogId: "synthetic-unrelated", filename: "Unrelated.pdf",
+      pathLabel: "Category-1/Unrelated.pdf", cloudPathAvailable: false,
+      verificationStatus: "unverified", differenceKinds: [], hierarchyTags: ["folder/Category-1"],
+    }],
+  }, connection, hybrid);
+  const fixture = controllerFixture({ catalog, activeIndex: true });
+  fixture.store.setSettingsForTest({
+    ...fixture.store.settings(),
+    boundCloudLibrary: {
+      schemaVersion: 1, path: "/Synthetic Library",
+      sourceImportSha256: active.sourceImportSha256, verificationGeneration: 1,
+    },
+    cloudVerificationGeneration: 1,
+  });
+  fixture.controller.setVerificationRoot("/Synthetic Library");
+  return { ...fixture, active, hybrid, connection, catalog };
+};
+
+describe("simplified workbench cross-cutting release gate (synthetic dependencies)", () => {
+  it("keeps pending upgrade search, coverage and paused progress intact through offline startup and navigation", async () => {
+    const request = vi.fn(() => { throw new Error("unexpected-network"); });
+    vi.stubGlobal("fetch", request);
+    vi.stubGlobal("XMLHttpRequest", request);
+    vi.stubGlobal("WebSocket", request);
+    const fixture = syntheticTaskFixture();
+    fixture.store.setSettingsForTest({
+      ...fixture.store.settings(),
+      boundCloudLibrary: null,
+      cloudVerificationGeneration: 0,
+      legacyVerificationAdoption: { schemaVersion: 1, state: "pending" },
+      recentCloudDirectories: { schemaVersion: 1, items: [{
+        path: "/Synthetic Library", filename: "Synthetic Library", lastUsedAt: "2026-09-06T00:00:00.000Z",
+      }] },
+    });
+    fixture.hybrid.legacyLocalAuthority = {
+      kind: "legacy-local-only",
+      sourceImportSha256: fixture.active.sourceImportSha256,
+      activeManifestSha256: "c".repeat(64),
+    };
+    fixture.hybrid.setSnapshot({
+      status: "paused", active: fixture.active,
+      batch: { status: "paused", batchId: "legacy-paused", pdfCount: 7,
+        committedPageCount: 2, selectedGroupKeys: [fixture.active.groups[1]!.groupKey],
+        resumeAvailable: false, runOrdinal: 1 },
+    });
+    const settingsBefore = fixture.store.settings();
+    const catalogBefore = fixture.catalog.snapshot();
+    const hybridBefore = fixture.hybrid.snapshot();
+    const root = acceptanceDom.window.document.createElement("div");
+    try {
+      await runStartupGate({
+        verifyArtifact: async () => undefined,
+        loadStore: async () => fixture.store,
+        enforcePolicy: async () => undefined,
+      });
+      await fixture.controller.initializeCatalog();
+      expect(fixture.controller.snapshot().catalog.items.map((item) => item.catalogId))
+        .toEqual(["synthetic-verified", "synthetic-unrelated"]);
+      for (const route of [
+        { tab: "library" }, { tab: "task", page: "overview" },
+        { tab: "more", page: "overview" }, { tab: "library" },
+      ] as const) {
+        fixture.controller.selectRoute(route);
+        fixture.controller.searchCatalog("Synthetic");
+        renderWorkbench(root, fixture.controller.snapshot(), noOpWorkbenchActions(), NORMAL_RUNTIME_POLICY);
+      }
+      const searched = fixture.controller.snapshot().catalog;
+      expect(searched.items).not.toEqual(catalogBefore.items);
+      expect(searched.items).toEqual([catalogBefore.items[0]]);
+      expect(searched.total).toBe(1);
+      expect(searched.query).toBe("Synthetic");
+      expect(searched.verificationCounts).toEqual(catalogBefore.verificationCounts);
+      expect(searched.pdfCount).toBe(catalogBefore.pdfCount);
+      expect(fixture.hybrid.snapshot()).toEqual(hybridBefore);
+      expect(fixture.store.settings()).toEqual(settingsBefore);
+      expect(fixture.catalog.verificationAuthorities).toEqual([fixture.hybrid.legacyLocalAuthority]);
+      expect(fixture.hybrid.preparedAdoptionScopes).toEqual([]);
+      expect(fixture.hybrid.revalidatedAdoptions).toEqual([]);
+      expect(fixture.hybrid.startInputs).toEqual([]);
+      expect(fixture.hybrid.resumeInputs).toEqual([]);
+      expect(fixture.hybrid.snapshot().executionActive).toBe(false);
+      expect(fixture.connection.beginAuthorizationCalls).toBe(0);
+      expect(fixture.connection.startScanCalls).toEqual([]);
+      expect(fixture.catalog.openBaiduCalls).toBe(0);
+      expect(fixture.vault.writeCalls).toEqual([]);
+      expect(request).not.toHaveBeenCalled();
+      fixture.controller.searchCatalog("");
+      expect(fixture.controller.snapshot().catalog.items).toEqual(catalogBefore.items);
+      expect(fixture.hybrid.snapshot()).toEqual(hybridBefore);
+      expect(fixture.store.settings()).toEqual(settingsBefore);
+      expect(fixture.vault.writeCalls).toEqual([]);
+      expect(request).not.toHaveBeenCalled();
+    } finally { fixture.controller.dispose(); }
+  });
+
+  it.each([1, 2, 3, 4, 5])("launches exactly the previously displayed root and %i-group scope once", async (count) => {
+    const fixture = syntheticTaskFixture();
+    try {
+      fixture.controller.saveTaskCategorySelection(fixture.controller.snapshot().taskActionRevision, {
+        rootPath: "/Synthetic Library",
+        groupKeys: fixture.active.groups.slice(1, count + 1).map((group) => group.groupKey).reverse(),
+      });
+      const displayed = fixture.controller.snapshot();
+      const root = acceptanceDom.window.document.createElement("div");
+      const actions = noOpWorkbenchActions({
+        onTaskPrimary: (revision) => fixture.controller.performTaskPrimaryAction(revision),
+      });
+      renderWorkbench(root, { ...displayed, route: { tab: "task", page: "overview" } }, actions, NORMAL_RUNTIME_POLICY);
+      expect(displayed.boundLibraryPath).toBe("/Synthetic Library");
+      expect(root.querySelector('[data-task-scope="true"]')?.textContent).toContain("Synthetic Library");
+      for (const key of displayed.selectedVerificationGroupKeys) {
+        expect(root.textContent).toContain(fixture.active.groups.find((group) => group.groupKey === key)!.label);
+      }
+      const scopeValues = root.querySelectorAll('[data-task-scope="true"] dd');
+      expect(scopeValues[0]?.textContent).toBe("Synthetic Library");
+      expect(scopeValues[1]?.textContent).toBe(displayed.selectedVerificationGroupKeys
+        .map((key) => fixture.active.groups.find((group) => group.groupKey === key)!.label).join("、"));
+      const primary = root.querySelector<HTMLButtonElement>("[data-task-primary]");
+      expect(primary).not.toBeNull();
+      expect(primary!.dataset.taskPrimary).toBe("start");
+      primary!.click();
+      primary!.click();
+      await vi.waitFor(() => expect(fixture.hybrid.startInputs).toHaveLength(1));
+      expect(fixture.hybrid.startInputs).toEqual([{
+        cloudRoot: displayed.boundLibraryPath,
+        groupKeys: displayed.selectedVerificationGroupKeys,
+      }]);
+      expect(fixture.hybrid.startInputs[0]!.groupKeys).toHaveLength(count);
+      expect(fixture.connection.startScanCalls).toEqual([]);
+      expect(fixture.connection.beginAuthorizationCalls).toBe(0);
+      expect(fixture.vault.writeCalls).toEqual([]);
+    } finally { fixture.controller.dispose(); }
+  });
+
+  it("holds one launch permit across rerenders, rejects conflicting authority immediately and permits one pause", async () => {
+    const fixture = syntheticTaskFixture();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    fixture.hybrid.beforeStart = () => gate;
+    const revision = fixture.controller.snapshot().taskActionRevision;
+    const starting = fixture.controller.performTaskPrimaryAction(revision);
+    try {
+      await Promise.resolve();
+      await Promise.resolve();
+      fixture.catalog.setSnapshot({ ...fixture.catalog.snapshot(), query: "unrelated rerender" });
+      expect(fixture.controller.snapshot().taskActionPending).toBe(true);
+      await expect(fixture.controller.performTaskPrimaryAction(revision)).rejects.toThrow("task-action-busy");
+      const settingsBefore = fixture.store.settings();
+      await expect(fixture.controller.connectCatalog({ appKey: "synthetic", secretKey: "synthetic" }, "replace-identity"))
+        .rejects.toThrow("cloud-authority-operation-busy");
+      await expect(fixture.controller.requestCatalogScan("/Synthetic Library"))
+        .rejects.toThrow("cloud-authority-operation-busy");
+      expect(fixture.store.settings()).toEqual(settingsBefore);
+      fixture.hybrid.setSnapshot({ status: "scanning", executionActive: true, active: fixture.active });
+      const running = fixture.controller.snapshot();
+      expect(running.workflow.primaryAction).toBe("pause");
+      fixture.controller.requestTaskPause(running.taskActionRevision);
+      fixture.controller.requestTaskPause(running.taskActionRevision);
+      expect(fixture.hybrid.cancelCalls).toBe(1);
+      expect(fixture.controller.snapshot().taskActionPending).toBe(true);
+    } finally {
+      release();
+      await starting;
+      fixture.controller.dispose();
+    }
+    expect(fixture.hybrid.startInputs).toHaveLength(1);
+    expect(fixture.connection.savedCredentials).toEqual([]);
+    expect(fixture.connection.beginAuthorizationCalls).toBe(0);
+    expect(fixture.connection.startScanCalls).toEqual([]);
+    expect(fixture.vault.writeCalls).toEqual([]);
+  });
 });
 
 describe("read-only acceptance automated safety", () => {
@@ -390,7 +657,9 @@ describe("read-only acceptance automated safety", () => {
       "createChangePreview",
       "createHistoryConfirmation",
       "createSettingsTab",
+      "cloudVerificationRootHasher",
       "createCatalog",
+      "createFolderSelection",
       "createCatalogConfirmation",
     ]);
     expect(runtime.policy).toEqual(READ_ONLY_ACCEPTANCE_POLICY);
@@ -405,6 +674,18 @@ describe("read-only acceptance automated safety", () => {
     expect("createAi" in runtime).toBe(false);
     expect("createWorkbenchSettingsSurface" in runtime).toBe(false);
     expect("createCatalogDirectoryPicker" in runtime).toBe(false);
+    expect(runtime.cloudVerificationRootHasher("/样本")).toBeNull();
+    const folderSelection = runtime.createFolderSelection({
+      store: {} as never,
+      catalog: DISABLED_CLOUD_CATALOG_RUNTIME,
+      clock: { now: () => 0 },
+    });
+    expect(folderSelection.sessionFactory.available).toBe(false);
+    expect(folderSelection.hostCapability.available).toBe(false);
+    expect(() => folderSelection.sessionFactory.create({
+      purpose: { kind: "scan" },
+      initialPath: null,
+    })).toThrow("catalog-unavailable");
 
     const candidateWrites = {
       renameFile: vi.fn(async () => undefined),
@@ -418,6 +699,7 @@ describe("read-only acceptance automated safety", () => {
     const catalog = runtime.createCatalog({} as never);
     expect(catalog.connection).toBeUndefined();
     expect(catalog.directoryDiscovery).toBeUndefined();
+    expect(catalog.directoryBrowser).toBeUndefined();
     expect(catalog.directoryLocator).toBeUndefined();
     expect(catalog.snapshot()).toMatchObject({
       status: "unavailable",

@@ -20,8 +20,14 @@ const SURFACE_NAMESPACES = {
   "src/ui/cloud-directory-field.ts": ["directoryField."],
   "src/ui/catalog-progress-presenter.ts": ["progress.", "settings.status."],
   "src/ui/start-page.ts": ["start.", "today.", "map.", "catalog."],
-  "src/ui/workbench-view.ts": ["progress.", "status.", "host.", "acceptance.", "ai."],
-  "src/ui/settings-sections.ts": ["settings.", "directoryPicker.", "verification.", "progress.", "language."],
+  "src/ui/workbench-view.ts": [
+    "progress.", "status.", "host.", "acceptance.", "ai.", "task.", "workflow.",
+    "cloudAuthority.", "settings.", "more.",
+  ],
+  "src/ui/settings-sections.ts": [
+    "settings.", "directoryPicker.", "verification.", "progress.", "language.",
+    "cloudAuthority.", "more.",
+  ],
   "src/plugin/knowledge-workbench-plugin.ts": ["host."],
   "src/main.ts": [],
   "src/main-acceptance.ts": ["acceptance."],
@@ -855,7 +861,7 @@ const findingsForSource = (
     if (TECHNICAL_FILENAME_FRAGMENT.test(text)) return true;
     if (text === "en" || text === "zh-CN" || text === "en-US") return true;
     if (file === "src/ui/cloud-directory-picker.ts"
-      && (text === "ArrowDown" || text === "ArrowUp" || text === "Enter")) return true;
+      && (text === "ArrowDown" || text === "ArrowUp" || text === "Enter" || text === "Backspace")) return true;
     const parent = node.parent;
     if ((ts.isImportDeclaration(parent) || ts.isExportDeclaration(parent)) && parent.moduleSpecifier === node) return true;
     if (ts.isExternalModuleReference(parent) && parent.expression === node) return true;

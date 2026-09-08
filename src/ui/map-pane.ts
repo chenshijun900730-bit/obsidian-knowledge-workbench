@@ -5,6 +5,7 @@ import {
   type WorkbenchI18n,
   type WorkbenchMessageKey,
 } from "../i18n/workbench-i18n";
+import { createWindowedList } from "./windowed-list";
 
 const WINDOW_SIZE = 100;
 const ROW_HEIGHT = 36;
@@ -17,45 +18,6 @@ const appendButton = (parent: HTMLElement, label: string, onClick: () => void): 
   button.addEventListener("click", onClick);
   parent.append(button);
   return button;
-};
-
-const windowedList = <T>(
-  doc: Document,
-  rows: readonly T[],
-  renderRow: (row: T) => HTMLLIElement,
-): HTMLUListElement => {
-  const list = doc.createElement("ul");
-  list.className = "knowledge-workbench__windowed-list";
-  list.dataset.totalRows = String(rows.length);
-  let renderedStart = -1;
-  const paint = (): void => {
-    const maximumStart = Math.max(0, rows.length - WINDOW_SIZE);
-    const start = rows.length <= WINDOW_SIZE
-      ? 0
-      : Math.min(maximumStart, Math.max(0, Math.floor(list.scrollTop / ROW_HEIGHT) - WINDOW_OVERSCAN));
-    if (start === renderedStart) return;
-    renderedStart = start;
-    list.replaceChildren();
-    if (start > 0) {
-      const before = doc.createElement("li");
-      before.className = "knowledge-workbench__window-spacer";
-      before.setAttribute("aria-hidden", "true");
-      before.style.height = `${start * ROW_HEIGHT}px`;
-      list.append(before);
-    }
-    const end = Math.min(rows.length, start + WINDOW_SIZE);
-    for (const row of rows.slice(start, end)) list.append(renderRow(row));
-    if (end < rows.length) {
-      const after = doc.createElement("li");
-      after.className = "knowledge-workbench__window-spacer";
-      after.setAttribute("aria-hidden", "true");
-      after.style.height = `${(rows.length - end) * ROW_HEIGHT}px`;
-      list.append(after);
-    }
-  };
-  list.addEventListener("scroll", paint, { passive: true });
-  paint();
-  return list;
 };
 
 const renderSearch = (
@@ -77,14 +39,20 @@ const renderSearch = (
   label.append(input);
   search.append(label);
   if (results.length > 0) {
-    const list = windowedList(root.ownerDocument, results, (result) => {
-      const item = root.ownerDocument.createElement("li");
-      appendButton(item, `${result.title} — ${result.path}`, () => {
-        actions.onSelectCenter({ kind: "document", id: result.documentId });
-      });
-      return item;
+    const surface = createWindowedList(root.ownerDocument, {
+      rows: results,
+      rowHeight: ROW_HEIGHT,
+      windowSize: WINDOW_SIZE,
+      overscan: WINDOW_OVERSCAN,
+      renderRow: (result) => {
+        const item = root.ownerDocument.createElement("li");
+        appendButton(item, `${result.title} — ${result.path}`, () => {
+          actions.onSelectCenter({ kind: "document", id: result.documentId });
+        });
+        return item;
+      },
     });
-    search.append(list);
+    search.append(surface.element);
   }
   root.append(search);
 };
@@ -105,11 +73,18 @@ const appendDetailList = (
     parent.append(empty);
     return;
   }
-  parent.append(windowedList(parent.ownerDocument, values, (value) => {
-    const item = parent.ownerDocument.createElement("li");
-    item.textContent = value;
-    return item;
-  }));
+  const surface = createWindowedList(parent.ownerDocument, {
+    rows: values,
+    rowHeight: ROW_HEIGHT,
+    windowSize: WINDOW_SIZE,
+    overscan: WINDOW_OVERSCAN,
+    renderRow: (value) => {
+      const item = parent.ownerDocument.createElement("li");
+      item.textContent = value;
+      return item;
+    },
+  });
+  parent.append(surface.element);
 };
 
 const MAP_REASON_KEYS = {
@@ -167,20 +142,26 @@ export function renderMapPane(
     button.dataset.nodeKind = node.kind;
   }
   if (model.edges.length > 0) {
-    const edges = windowedList(root.ownerDocument, model.edges, (edge) => {
-      const item = root.ownerDocument.createElement("li");
-      item.className = edge.confirmed
-        ? "knowledge-workbench__relation knowledge-workbench__relation--confirmed"
-        : "knowledge-workbench__relation knowledge-workbench__relation--inferred";
-      item.textContent = i18n.t("map.relation.edge", {
-        status: i18n.t(edge.confirmed ? "map.relation.confirmed" : "map.relation.inferred"),
-        source: edge.sourceId,
-        target: edge.targetId,
-      });
-      return item;
+    const edges = createWindowedList(root.ownerDocument, {
+      rows: model.edges,
+      rowHeight: ROW_HEIGHT,
+      windowSize: WINDOW_SIZE,
+      overscan: WINDOW_OVERSCAN,
+      renderRow: (edge) => {
+        const item = root.ownerDocument.createElement("li");
+        item.className = edge.confirmed
+          ? "knowledge-workbench__relation knowledge-workbench__relation--confirmed"
+          : "knowledge-workbench__relation knowledge-workbench__relation--inferred";
+        item.textContent = i18n.t("map.relation.edge", {
+          status: i18n.t(edge.confirmed ? "map.relation.confirmed" : "map.relation.inferred"),
+          source: edge.sourceId,
+          target: edge.targetId,
+        });
+        return item;
+      },
     });
-    edges.classList.add("knowledge-workbench__map-edges");
-    canvas.append(edges);
+    edges.element.classList.add("knowledge-workbench__map-edges");
+    canvas.append(edges.element);
   }
   root.append(canvas);
 
@@ -210,19 +191,25 @@ export function renderMapPane(
     const relationHeading = root.ownerDocument.createElement("h4");
     relationHeading.textContent = i18n.t("map.details.reasons");
     details.append(relationHeading);
-    const relations = windowedList(root.ownerDocument, model.selected.relations, (relation) => {
-      const item = root.ownerDocument.createElement("li");
-      item.className = relation.confirmed
-        ? "knowledge-workbench__relation knowledge-workbench__relation--confirmed"
-        : "knowledge-workbench__relation knowledge-workbench__relation--inferred";
-      item.textContent = i18n.t("map.relation.detail", {
-        status: i18n.t(relation.confirmed ? "map.relation.confirmed" : "map.relation.inferred"),
-        node: relation.nodeId,
-        explanation: localizedExplanation(relation.explanation, i18n),
-      });
-      return item;
+    const relations = createWindowedList(root.ownerDocument, {
+      rows: model.selected.relations,
+      rowHeight: ROW_HEIGHT,
+      windowSize: WINDOW_SIZE,
+      overscan: WINDOW_OVERSCAN,
+      renderRow: (relation) => {
+        const item = root.ownerDocument.createElement("li");
+        item.className = relation.confirmed
+          ? "knowledge-workbench__relation knowledge-workbench__relation--confirmed"
+          : "knowledge-workbench__relation knowledge-workbench__relation--inferred";
+        item.textContent = i18n.t("map.relation.detail", {
+          status: i18n.t(relation.confirmed ? "map.relation.confirmed" : "map.relation.inferred"),
+          node: relation.nodeId,
+          explanation: localizedExplanation(relation.explanation, i18n),
+        });
+        return item;
+      },
     });
-    details.append(relations);
+    details.append(relations.element);
     root.append(details);
   }
 }

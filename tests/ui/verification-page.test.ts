@@ -1,13 +1,30 @@
 // @vitest-environment jsdom
 import { describe, expect, it, vi } from "vitest";
 import type { CloudCatalogConnectionViewModel } from "../../src/catalog/cloud-catalog-runtime";
-import type { HybridCatalogViewModel } from "../../src/catalog/hybrid-catalog-runtime";
+import type {
+  HybridCatalogViewModel,
+  LargeCatalogBatchSummary,
+} from "../../src/catalog/hybrid-catalog-runtime";
 import { createWorkbenchI18n } from "../../src/i18n/workbench-i18n";
 import {
+  renderVerificationCategoryEditor,
   renderVerificationPage,
   type VerificationPageActions,
   type VerificationPageModel,
 } from "../../src/ui/verification-page";
+import { LARGE_CATALOG_AUTO_CHAIN_MAX_SEGMENTS } from "../../src/catalog/hybrid-catalog-types";
+import type { CloudDirectorySelection } from "../../src/catalog/cloud-directory-selection";
+import {
+  TEST_HYBRID_ACTIVE_AUTHORITY,
+  TEST_INACTIVE_HYBRID_EXECUTION,
+  TEST_LARGE_BATCH_AUTHORITY,
+} from "../helpers/ui-fixtures";
+
+const INACTIVE_AUTO_RESUME = {
+  autoResumeState: "inactive" as const,
+  autoSegmentIndex: 0,
+  autoSegmentLimit: LARGE_CATALOG_AUTO_CHAIN_MAX_SEGMENTS,
+};
 
 const GROUP_KEY = `group:${"b".repeat(64)}`;
 const testRoot = (): HTMLDivElement => document.createElementNS(
@@ -15,6 +32,7 @@ const testRoot = (): HTMLDivElement => document.createElementNS(
   "div",
 ) as HTMLDivElement;
 const active = {
+  ...TEST_HYBRID_ACTIVE_AUTHORITY,
   importedAt: 1,
   pdfCount: 252,
   unverifiedCount: 252,
@@ -23,8 +41,10 @@ const active = {
   cloudMissingCount: 0,
   groupCount: 1,
   verifiedGroupCount: 0,
+  coveredCandidatePdfCount: 0,
   groups: [{
     groupKey: GROUP_KEY,
+    rootRelativePath: "9-Literature-253",
     label: "9-Literature-253",
     pdfCount: 252,
     mode: "recursive" as const,
@@ -39,11 +59,83 @@ const actions = (overrides: Partial<VerificationPageActions> = {}): Verification
   onResume: async () => undefined,
   onCancel: () => undefined,
   onBrowseRoot: async () => null,
+  onDirectorySelection: () => undefined,
   ...overrides,
 });
 
+describe("verification category editor", () => {
+  it("defaults to one category and saves an exact advanced selection without launching", () => {
+    const groups = Array.from({ length: 6 }, (_, index) => ({
+      groupKey: `group:${String(index + 1).repeat(64)}`,
+      rootRelativePath: `Category-${index + 1}`,
+      label: `Category ${index + 1}`,
+      pdfCount: index + 1,
+      mode: "recursive" as const,
+      verificationStatus: "unverified" as const,
+    }));
+    const root = testRoot();
+    const onSave = vi.fn();
+    renderVerificationCategoryEditor(root, {
+      i18n: createWorkbenchI18n("zh-CN"),
+      groups,
+      selectedGroupKeys: [],
+      rootPath: "/Synthetic",
+      expectedRootPath: "/Synthetic",
+    }, { onSave, onCancel: vi.fn() });
+
+    expect(root.querySelectorAll<HTMLInputElement>(
+      "[data-task-category-radio]:checked",
+    )).toHaveLength(1);
+    expect(root.querySelector<HTMLButtonElement>(
+      '[data-focus-key="task-category-cancel"]',
+    )).not.toBeNull();
+    expect(root.querySelector<HTMLButtonElement>(
+      '[data-focus-key="task-category-save"]',
+    )).not.toBeNull();
+    const checks = Array.from(root.querySelectorAll<HTMLInputElement>(
+      "[data-task-category-check]",
+    ));
+    for (const check of checks.slice(0, 5)) {
+      check.checked = true;
+      check.dispatchEvent(new Event("change", { bubbles: true }));
+    }
+    expect(checks[5]?.disabled).toBe(true);
+    root.querySelector<HTMLButtonElement>("[data-task-category-save]")!.click();
+    expect(onSave).toHaveBeenCalledWith({
+      rootPath: "/Synthetic",
+      groupKeys: groups.slice(0, 5).map((group) => group.groupKey),
+    });
+    expect(root.querySelector('[data-action="start-verification"]')).toBeNull();
+    expect(root.querySelector('[data-action="resume-verification"]')).toBeNull();
+  });
+
+  it("rejects a manually entered child directory locally", () => {
+    const root = testRoot();
+    const onSave = vi.fn();
+    renderVerificationCategoryEditor(root, {
+      i18n: createWorkbenchI18n("zh-CN"),
+      groups: active.groups,
+      selectedGroupKeys: [GROUP_KEY],
+      rootPath: "/Synthetic",
+      expectedRootPath: "/Synthetic",
+    }, { onSave, onCancel: vi.fn() });
+
+    const input = root.querySelector<HTMLInputElement>("[data-task-category-root]")!;
+    input.value = "/Synthetic/9-Literature-253";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    root.querySelector<HTMLButtonElement>("[data-task-category-save]")!.click();
+
+    expect(onSave).not.toHaveBeenCalled();
+    expect(root.querySelector(".knowledge-workbench__category-error")?.textContent)
+      .toBe("请使用已绑定书库的 API 父目录；子目录不能启动本次检查。");
+  });
+});
+
+type HybridCatalogFixture = Omit<HybridCatalogViewModel, "executionActive"> &
+  Partial<Pick<HybridCatalogViewModel, "executionActive">>;
+
 const model = (
-  hybrid: HybridCatalogViewModel = { status: "ready", active },
+  hybrid: HybridCatalogFixture = { status: "ready", active },
   connection: CloudCatalogConnectionViewModel = { status: "authorized" },
 ): VerificationPageModel => ({
   i18n: createWorkbenchI18n("zh-CN"),
@@ -51,7 +143,7 @@ const model = (
   rootLocked: false,
   selectedGroupKeys: [GROUP_KEY],
   connection,
-  hybrid,
+  hybrid: { ...TEST_INACTIVE_HYBRID_EXECUTION, ...hybrid },
   actions: actions(),
 });
 
@@ -69,11 +161,17 @@ describe("verification page", () => {
   it("fills the controller-owned verification root after an explicit directory choice", async () => {
     const root = testRoot();
     const onRootChange = vi.fn();
-    const onBrowseRoot = vi.fn(async () => "/Synthetic/9-文学253册");
+    const selection: CloudDirectorySelection = {
+      kind: "directory",
+      selectedPath: "/Synthetic/9-文学253册",
+      effectiveRoot: "/Synthetic/9-文学253册",
+    };
+    const onDirectorySelection = vi.fn();
+    const onBrowseRoot = vi.fn(async () => selection);
     renderVerificationPage(root, {
       ...model(),
       rootPath: "",
-      actions: actions({ onRootChange, onBrowseRoot }),
+      actions: actions({ onRootChange, onBrowseRoot, onDirectorySelection }),
     });
 
     const browse = root.querySelector<HTMLButtonElement>(
@@ -91,7 +189,8 @@ describe("verification page", () => {
     await Promise.resolve();
 
     expect(onBrowseRoot).toHaveBeenCalledOnce();
-    expect(onRootChange).toHaveBeenCalledWith("/Synthetic/9-文学253册");
+    expect(onDirectorySelection).toHaveBeenCalledWith(selection);
+    expect(onRootChange).not.toHaveBeenCalled();
     expect(root.querySelector<HTMLInputElement>('[data-verification-root="true"]')?.value)
       .toBe("/Synthetic/9-文学253册");
     expect(root.querySelector<HTMLButtonElement>('[data-action="start-verification"]')?.disabled)
@@ -123,6 +222,8 @@ describe("verification page", () => {
         status: "paused",
         active,
         batch: {
+          ...TEST_LARGE_BATCH_AUTHORITY,
+          ...INACTIVE_AUTO_RESUME,
           batchId: "batch-local-root-gate",
           status: "paused",
           stopReason: "time-limit",
@@ -134,6 +235,14 @@ describe("verification page", () => {
           ignoredFileCount: 0,
           listRequestCount: 1,
           cumulativeListRequestCount: 1,
+          selectedGroupCount: 1,
+          completedGroupCount: 0,
+          currentGroupIndex: 0,
+          currentGroupKey: null,
+          committedPdfCount: 0,
+          committedPageCount: 0,
+          completedDirectoryCount: 0,
+          pendingDirectoryCount: 0,
         },
       }),
       rootPath: "",
@@ -170,6 +279,8 @@ describe("verification page", () => {
         status: "paused",
         active,
         batch: {
+          ...TEST_LARGE_BATCH_AUTHORITY,
+          ...INACTIVE_AUTO_RESUME,
           batchId: "batch-pending-action-gate",
           status: "paused",
           stopReason: "time-limit",
@@ -181,6 +292,14 @@ describe("verification page", () => {
           ignoredFileCount: 0,
           listRequestCount: 1,
           cumulativeListRequestCount: 1,
+          selectedGroupCount: 1,
+          completedGroupCount: 0,
+          currentGroupIndex: 0,
+          currentGroupKey: null,
+          committedPdfCount: 0,
+          committedPageCount: 0,
+          completedDirectoryCount: 0,
+          pendingDirectoryCount: 0,
         },
       }),
       rootPath: "/Synthetic",
@@ -215,6 +334,8 @@ describe("verification page", () => {
         status: "scanning",
         active,
         batch: {
+          ...TEST_LARGE_BATCH_AUTHORITY,
+          ...INACTIVE_AUTO_RESUME,
           batchId: "batch-scanning",
           status: "paused",
           stopReason: "user-canceled",
@@ -226,6 +347,14 @@ describe("verification page", () => {
           ignoredFileCount: 0,
           listRequestCount: 3,
           cumulativeListRequestCount: 3,
+          selectedGroupCount: 1,
+          completedGroupCount: 0,
+          currentGroupIndex: 0,
+          currentGroupKey: null,
+          committedPdfCount: 0,
+          committedPageCount: 0,
+          completedDirectoryCount: 0,
+          pendingDirectoryCount: 0,
         },
       }),
       actions: actions({ onCancel: cancel }),
@@ -241,6 +370,55 @@ describe("verification page", () => {
     expect(root.querySelector('[data-action="start-verification"]')).toBeNull();
   });
 
+  it("shows only pause while the automatic chain is running and resume after its limit", () => {
+    const runningBatch: LargeCatalogBatchSummary = {
+      ...TEST_LARGE_BATCH_AUTHORITY,
+      batchId: "batch-actions",
+      status: "scanning",
+      stopReason: null,
+      resumeAvailable: false,
+      runOrdinal: 2,
+      selectedGroupCount: 1,
+      completedGroupCount: 0,
+      remainingGroupCount: 1,
+      currentGroupIndex: 0,
+      currentGroupKey: GROUP_KEY,
+      pdfCount: 200,
+      directoryCount: 2,
+      ignoredFileCount: 0,
+      listRequestCount: 1,
+      cumulativeListRequestCount: 428,
+      committedPdfCount: 12_070,
+      committedPageCount: 15,
+      completedDirectoryCount: 113,
+      pendingDirectoryCount: 7,
+      autoResumeState: "running",
+      autoSegmentIndex: 2,
+      autoSegmentLimit: LARGE_CATALOG_AUTO_CHAIN_MAX_SEGMENTS,
+    };
+    const root = testRoot();
+    renderVerificationPage(root, model({ status: "scanning", active, batch: runningBatch }));
+    expect(root.querySelector('[data-action="resume-verification"]')).toBeNull();
+    expect(root.querySelector('[data-action="cancel-verification"]')?.textContent)
+      .toBe("暂停核验");
+
+    renderVerificationPage(root, model({
+      status: "paused",
+      active,
+      batch: {
+        ...TEST_LARGE_BATCH_AUTHORITY,
+        ...runningBatch,
+        status: "paused",
+        stopReason: "pdf-limit",
+        resumeAvailable: true,
+        autoResumeState: "stopped-limit",
+        autoSegmentIndex: LARGE_CATALOG_AUTO_CHAIN_MAX_SEGMENTS,
+      },
+    }));
+    expect(root.querySelector('[data-action="resume-verification"]')).not.toBeNull();
+    expect(root.textContent).toContain("已达到 12 次自动继续安全上限。");
+  });
+
   it.each(["authorized", "scanning", "paused", "partial"] as const)(
     "treats %s as an authorization-capable connection lifecycle state",
     (status) => {
@@ -254,6 +432,8 @@ describe("verification page", () => {
         status: "paused",
         active,
         batch: {
+          ...TEST_LARGE_BATCH_AUTHORITY,
+          ...INACTIVE_AUTO_RESUME,
           batchId: `batch-lifecycle-${status}`,
           status: "paused",
           stopReason: "time-limit",
@@ -265,6 +445,14 @@ describe("verification page", () => {
           ignoredFileCount: 0,
           listRequestCount: 1,
           cumulativeListRequestCount: 1,
+          selectedGroupCount: 1,
+          completedGroupCount: 0,
+          currentGroupIndex: 0,
+          currentGroupKey: null,
+          committedPdfCount: 0,
+          committedPageCount: 0,
+          completedDirectoryCount: 0,
+          pendingDirectoryCount: 0,
         },
       }, { status }));
       expect(resumeRoot.querySelector<HTMLButtonElement>('[data-action="resume-verification"]')?.disabled)
@@ -281,6 +469,8 @@ describe("verification page", () => {
         active,
         messageCode: "baidu-not-found",
         batch: {
+          ...TEST_LARGE_BATCH_AUTHORITY,
+          ...INACTIVE_AUTO_RESUME,
           batchId: "batch-auth-priority",
           status: "paused",
           stopReason: "baidu-not-found",
@@ -292,6 +482,14 @@ describe("verification page", () => {
           ignoredFileCount: 0,
           listRequestCount: 1,
           cumulativeListRequestCount: 1,
+          selectedGroupCount: 1,
+          completedGroupCount: 0,
+          currentGroupIndex: 0,
+          currentGroupKey: null,
+          committedPdfCount: 0,
+          committedPageCount: 0,
+          completedDirectoryCount: 0,
+          pendingDirectoryCount: 0,
         },
       }, {
         status: "configured",
@@ -318,10 +516,13 @@ describe("verification page", () => {
   ) => {
     const root = testRoot();
     const staleHybrid: HybridCatalogViewModel = {
+      ...TEST_INACTIVE_HYBRID_EXECUTION,
       status: "paused",
       active,
       messageCode: "baidu-not-found",
       batch: {
+        ...TEST_LARGE_BATCH_AUTHORITY,
+        ...INACTIVE_AUTO_RESUME,
         batchId: "batch-stale-fault",
         status: "paused",
         stopReason: "baidu-not-found",
@@ -333,6 +534,14 @@ describe("verification page", () => {
         ignoredFileCount: 0,
         listRequestCount: 1,
         cumulativeListRequestCount: 1,
+        selectedGroupCount: 1,
+        completedGroupCount: 0,
+        currentGroupIndex: 0,
+        currentGroupKey: null,
+        committedPdfCount: 0,
+        committedPageCount: 0,
+        completedDirectoryCount: 0,
+        pendingDirectoryCount: 0,
       },
     };
     renderVerificationPage(root, {
@@ -357,6 +566,8 @@ describe("verification page", () => {
         status: "paused",
         active,
         batch: {
+          ...TEST_LARGE_BATCH_AUTHORITY,
+          ...INACTIVE_AUTO_RESUME,
           batchId: "batch-root-mismatch",
           status: "paused",
           stopReason: "time-limit",
@@ -368,6 +579,14 @@ describe("verification page", () => {
           ignoredFileCount: 0,
           listRequestCount: 1,
           cumulativeListRequestCount: 1,
+          selectedGroupCount: 1,
+          completedGroupCount: 0,
+          currentGroupIndex: 0,
+          currentGroupKey: null,
+          committedPdfCount: 0,
+          committedPageCount: 0,
+          completedDirectoryCount: 0,
+          pendingDirectoryCount: 0,
         },
       }),
       actionMessageCode: "hybrid-cloud-root-mismatch",
@@ -414,6 +633,8 @@ describe("verification page", () => {
         status: "paused",
         active,
         batch: {
+          ...TEST_LARGE_BATCH_AUTHORITY,
+          ...INACTIVE_AUTO_RESUME,
           batchId: "batch-root-locked",
           status: "paused",
           stopReason: "time-limit",
@@ -425,6 +646,14 @@ describe("verification page", () => {
           ignoredFileCount: 0,
           listRequestCount: 1,
           cumulativeListRequestCount: 1,
+          selectedGroupCount: 1,
+          completedGroupCount: 0,
+          currentGroupIndex: 0,
+          currentGroupKey: null,
+          committedPdfCount: 0,
+          committedPageCount: 0,
+          completedDirectoryCount: 0,
+          pendingDirectoryCount: 0,
         },
       }),
       rootLocked: true,
@@ -446,6 +675,8 @@ describe("verification page", () => {
       status: "paused",
       active,
       batch: {
+        ...TEST_LARGE_BATCH_AUTHORITY,
+        ...INACTIVE_AUTO_RESUME,
         batchId: "batch-progress",
         status: "paused",
         stopReason: "list-request-limit",
@@ -457,6 +688,14 @@ describe("verification page", () => {
         ignoredFileCount: 3,
         listRequestCount: 300,
         cumulativeListRequestCount: 427,
+        selectedGroupCount: 1,
+        completedGroupCount: 0,
+        currentGroupIndex: 0,
+        currentGroupKey: null,
+        committedPdfCount: 0,
+        committedPageCount: 0,
+        completedDirectoryCount: 0,
+        pendingDirectoryCount: 0,
       },
     }));
 
@@ -474,6 +713,8 @@ describe("verification page", () => {
       active,
       messageCode: "baidu-not-found",
       batch: {
+        ...TEST_LARGE_BATCH_AUTHORITY,
+        ...INACTIVE_AUTO_RESUME,
         batchId: "batch-not-found",
         status: "partial",
         stopReason: "baidu-not-found",
@@ -485,6 +726,14 @@ describe("verification page", () => {
         ignoredFileCount: 0,
         listRequestCount: 1,
         cumulativeListRequestCount: 1,
+        selectedGroupCount: 1,
+        completedGroupCount: 0,
+        currentGroupIndex: 0,
+        currentGroupKey: null,
+        committedPdfCount: 0,
+        committedPageCount: 0,
+        completedDirectoryCount: 0,
+        pendingDirectoryCount: 0,
       },
     }));
 
@@ -534,6 +783,8 @@ describe("verification page", () => {
       status: "paused",
       active,
       batch: {
+        ...TEST_LARGE_BATCH_AUTHORITY,
+        ...INACTIVE_AUTO_RESUME,
         batchId: "batch-canceled",
         status: "paused",
         stopReason: "user-canceled",
@@ -545,6 +796,14 @@ describe("verification page", () => {
         ignoredFileCount: 0,
         listRequestCount: 5,
         cumulativeListRequestCount: 5,
+        selectedGroupCount: 1,
+        completedGroupCount: 0,
+        currentGroupIndex: 0,
+        currentGroupKey: null,
+        committedPdfCount: 0,
+        committedPageCount: 0,
+        completedDirectoryCount: 0,
+        pendingDirectoryCount: 0,
       },
     }));
 

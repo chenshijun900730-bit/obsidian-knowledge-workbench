@@ -8,16 +8,24 @@ import {
   type CloudCatalogRecord,
 } from "./catalog-types";
 import type { HybridCatalogRuntime } from "./hybrid-catalog-runtime";
-import type { UnifiedCatalogStorePort } from "./hybrid-catalog-ports";
+import type {
+  ActiveUnifiedCatalogQueryResult,
+  UnifiedCatalogStorePort,
+} from "./hybrid-catalog-ports";
 import {
   HybridCatalogError,
   type CatalogDifferenceKind,
   type CatalogVerificationStatus,
   type UnifiedCatalogRecordV1,
 } from "./hybrid-catalog-types";
-import { UnifiedCatalogSearchService } from "./unified-catalog-search-service";
+import type { UnifiedCatalogSearchQuery } from "./unified-catalog-search-service";
 import type { CloudDirectoryDiscoveryRuntime } from "./cloud-directory-discovery-service";
+import type { CloudDirectoryBrowserRuntime } from "./cloud-directory-browser";
 import type { CloudDirectoryLocatorRuntime } from "./cloud-directory-locator";
+import {
+  decodeCloudVerificationAuthority,
+  type CloudVerificationAuthority,
+} from "./cloud-verification-scope";
 
 const PAGE_SIZE = 50 as const;
 const STATUS_VALUES: readonly CatalogVerificationStatus[] = ["unverified", "verified", "difference"];
@@ -128,7 +136,10 @@ export interface CloudCatalogRuntime {
   readonly connection?: CloudCatalogConnectionRuntime;
   readonly hybrid?: HybridCatalogRuntime;
   readonly directoryDiscovery?: CloudDirectoryDiscoveryRuntime;
+  readonly directoryBrowser?: CloudDirectoryBrowserRuntime;
   readonly directoryLocator?: CloudDirectoryLocatorRuntime;
+  /** Installs detached query authority before initialization or projection refresh. */
+  setVerificationAuthority?(authority: CloudVerificationAuthority | null): void;
   initialize(): Promise<void>;
   snapshot(): CloudCatalogViewModel;
   subscribe(listener: () => void): () => void;
@@ -228,13 +239,6 @@ const checkedEnumValues = <T extends string>(
   return decoded;
 };
 
-const groupLabel = (record: UnifiedCatalogRecordV1): string => {
-  if (record.topLevelGroupId === "txt-root-items") return "Root items";
-  const topTag = record.hierarchyTags[0];
-  if (topTag?.startsWith("folder/") === true) return topTag.slice("folder/".length);
-  return record.relativePath.split("/")[0] ?? record.topLevelGroupId;
-};
-
 const fixedOptionCompare = <T extends CatalogFilterOption>(left: T, right: T): number => {
   if (left.label < right.label) return -1;
   if (left.label > right.label) return 1;
@@ -245,13 +249,16 @@ export class CloudCatalogRuntimeService implements CloudCatalogRuntime {
   readonly connection?: CloudCatalogConnectionRuntime;
   readonly hybrid?: HybridCatalogRuntime;
   readonly directoryDiscovery?: CloudDirectoryDiscoveryRuntime;
+  readonly directoryBrowser?: CloudDirectoryBrowserRuntime;
   readonly directoryLocator?: CloudDirectoryLocatorRuntime;
   private viewModel: CloudCatalogViewModel = initialViewModel();
   private legacySearch: CatalogSearchService | undefined;
-  private unifiedSearch: UnifiedCatalogSearchService | undefined;
+  private unifiedQueryController: AbortController | undefined;
+  private unifiedQueryGeneration = 0;
   private recordsById = new Map<string, ActionRecord>();
   private readonly listeners = new Set<() => void>();
   private unsubscribeConnection: (() => void) | undefined;
+  private verificationAuthority: CloudVerificationAuthority | null = null;
   private disposed = false;
 
   constructor(
@@ -259,19 +266,41 @@ export class CloudCatalogRuntimeService implements CloudCatalogRuntime {
     private readonly actions: CloudCatalogActionPort,
     connection?: CloudCatalogConnectionRuntime,
     hybrid?: HybridCatalogRuntime,
-    private readonly unified?: Pick<UnifiedCatalogStorePort, "loadActiveUnified">,
+    private readonly unified?: Pick<UnifiedCatalogStorePort, "queryActiveUnified">,
     directoryDiscovery?: CloudDirectoryDiscoveryRuntime,
+    directoryBrowser?: CloudDirectoryBrowserRuntime,
     directoryLocator?: CloudDirectoryLocatorRuntime,
   ) {
     this.connection = connection;
     this.hybrid = hybrid;
     this.directoryDiscovery = directoryDiscovery;
+    this.directoryBrowser = directoryBrowser;
     this.directoryLocator = directoryLocator;
     this.unsubscribeConnection = connection?.subscribe(() => this.emit());
   }
 
+  setVerificationAuthority(authority: CloudVerificationAuthority | null): void {
+    this.assertAvailable();
+    const detached = authority === null
+      ? null
+      : decodeCloudVerificationAuthority(structuredClone(authority));
+    this.hybrid?.setVerificationAuthority(
+      detached === null
+        ? null
+        : decodeCloudVerificationAuthority(structuredClone(detached)),
+    );
+    this.verificationAuthority = detached;
+    this.clearSearch();
+    this.viewModel = initialViewModel();
+    this.emit();
+  }
+
   async initialize(): Promise<void> {
     this.assertAvailable();
+    this.clearSearch();
+    const controller = new AbortController();
+    this.unifiedQueryController = controller;
+    const generation = ++this.unifiedQueryGeneration;
     this.viewModel = {
       ...this.viewModel,
       status: "loading",
@@ -283,10 +312,21 @@ export class CloudCatalogRuntimeService implements CloudCatalogRuntime {
     try {
       await this.hybrid?.initialize();
       await this.connection?.initialize();
-      const activeUnified = await this.unified?.loadActiveUnified() ?? null;
-      if (this.disposed) return;
+      const activeUnified = await this.unified?.queryActiveUnified({
+        text: "",
+        includeCloudMissing: false,
+        offset: 0,
+        limit: PAGE_SIZE,
+      }, this.detachedVerificationAuthority(), controller.signal) ?? null;
+      if (this.disposed || controller.signal.aborted || generation !== this.unifiedQueryGeneration) return;
       if (activeUnified !== null) {
-        this.initializeUnified(activeUnified.descriptor.completedAt, activeUnified.records);
+        this.initializeUnified(activeUnified);
+        return;
+      }
+      if (this.verificationAuthority !== null) {
+        this.clearSearch();
+        this.viewModel = initialViewModel();
+        this.emit();
         return;
       }
       const active = await this.snapshots.loadActive();
@@ -299,7 +339,12 @@ export class CloudCatalogRuntimeService implements CloudCatalogRuntime {
       }
       this.initializeLegacy(active.descriptor.completedAt, active.descriptor.pdfCount, active.records);
     } catch (error) {
-      if (this.disposed) return;
+      if (
+        this.disposed
+        || controller.signal.aborted
+        || generation !== this.unifiedQueryGeneration
+        || (error instanceof Error && error.name === "AbortError")
+      ) return;
       this.clearSearch();
       const corrupt = (
         error instanceof CatalogError && error.code === "snapshot-corrupt"
@@ -412,6 +457,7 @@ export class CloudCatalogRuntimeService implements CloudCatalogRuntime {
     this.unsubscribeConnection?.();
     this.unsubscribeConnection = undefined;
     this.directoryLocator?.dispose();
+    this.directoryBrowser?.dispose();
     this.directoryDiscovery?.dispose();
     this.hybrid?.dispose();
     this.connection?.dispose();
@@ -433,7 +479,9 @@ export class CloudCatalogRuntimeService implements CloudCatalogRuntime {
       .filter((record): record is CloudCatalogRecord => record.kind === "file")
       .map((record) => ({ ...record, isbnCandidates: [...record.isbnCandidates] }));
     this.legacySearch = new CatalogSearchService(files);
-    this.unifiedSearch = undefined;
+    this.unifiedQueryController?.abort();
+    this.unifiedQueryController = undefined;
+    this.unifiedQueryGeneration += 1;
     this.recordsById = new Map(files.map((record) => [record.fsId, {
       filename: record.filename,
       cloudPath: record.path,
@@ -449,52 +497,26 @@ export class CloudCatalogRuntimeService implements CloudCatalogRuntime {
     this.recompute();
   }
 
-  private initializeUnified(
-    completedAt: number,
-    records: readonly UnifiedCatalogRecordV1[],
-  ): void {
-    this.unifiedSearch = new UnifiedCatalogSearchService(records);
+  private initializeUnified(result: ActiveUnifiedCatalogQueryResult): void {
+    const { descriptor, aggregate, page } = result;
     this.legacySearch = undefined;
-    this.recordsById = new Map(records.map((record) => [record.catalogId, {
+    this.recordsById = new Map(page.items.map((record) => [record.catalogId, {
       filename: record.filename,
       cloudPath: record.cloudPath,
     }]));
-    if (this.recordsById.size !== records.length) throw new HybridCatalogError("hybrid-snapshot-corrupt");
-    const verificationCounts: CatalogVerificationCounts = {
-      unverified: records.filter((record) => record.verificationStatus === "unverified").length,
-      verified: records.filter((record) => record.verificationStatus === "verified").length,
-      difference: records.filter((record) => record.verificationStatus === "difference").length,
-      cloudMissing: records.filter((record) => record.differenceKinds.includes("cloud-missing")).length,
-    };
-    const groupsByKey = new Map<string, CatalogGroupFilterOption>();
-    const tagsByValue = new Map<string, CatalogTagFilterOption>();
-    for (const record of records) {
-      const group = groupsByKey.get(record.topLevelGroupId);
-      groupsByKey.set(record.topLevelGroupId, {
-        groupKey: record.topLevelGroupId,
-        label: group?.label ?? groupLabel(record),
-        count: (group?.count ?? 0) + 1,
-      });
-      for (const tag of record.hierarchyTags) {
-        const existing = tagsByValue.get(tag);
-        tagsByValue.set(tag, {
-          tag,
-          label: tag.startsWith("folder/") ? tag.slice("folder/".length) : tag,
-          count: (existing?.count ?? 0) + 1,
-        });
-      }
-    }
     this.viewModel = {
       ...initialViewModel(),
       status: "ready",
       source: "unified",
-      snapshotCompletedAt: completedAt,
-      pdfCount: records.length,
-      verificationCounts,
-      groups: [...groupsByKey.values()].sort(fixedOptionCompare),
-      hierarchyTags: [...tagsByValue.values()].sort(fixedOptionCompare),
+      snapshotCompletedAt: descriptor.completedAt,
+      pdfCount: descriptor.recordCount,
+      verificationCounts: { ...aggregate.verificationCounts },
+      groups: aggregate.groups.map((group) => ({ ...group })).sort(fixedOptionCompare),
+      hierarchyTags: aggregate.hierarchyTags.map((tag) => ({ ...tag })).sort(fixedOptionCompare),
+      total: page.total,
+      items: page.items.map(displayUnified),
     };
-    this.recompute();
+    this.emit();
   }
 
   private recompute(): void {
@@ -502,7 +524,7 @@ export class CloudCatalogRuntimeService implements CloudCatalogRuntime {
       this.emit();
       return;
     }
-    if (this.viewModel.source === "unified" && this.unifiedSearch !== undefined) {
+    if (this.viewModel.source === "unified" && this.unified !== undefined) {
       this.recomputeUnified();
       return;
     }
@@ -514,7 +536,7 @@ export class CloudCatalogRuntimeService implements CloudCatalogRuntime {
   }
 
   private recomputeUnified(): void {
-    const query = {
+    const query: UnifiedCatalogSearchQuery = {
       text: this.viewModel.query,
       ...(this.viewModel.verificationStatuses.length === 0
         ? {}
@@ -532,18 +554,68 @@ export class CloudCatalogRuntimeService implements CloudCatalogRuntime {
       offset: this.viewModel.page * PAGE_SIZE,
       limit: PAGE_SIZE,
     };
-    let result = this.unifiedSearch!.query(query);
-    const maximum = result.total === 0 ? 0 : Math.floor((result.total - 1) / PAGE_SIZE);
-    if (this.viewModel.page > maximum) {
-      this.viewModel = { ...this.viewModel, page: maximum };
-      result = this.unifiedSearch!.query({ ...query, offset: maximum * PAGE_SIZE });
+    this.unifiedQueryController?.abort();
+    const controller = new AbortController();
+    this.unifiedQueryController = controller;
+    const generation = ++this.unifiedQueryGeneration;
+    void this.runUnifiedQuery(query, generation, controller);
+  }
+
+  private async runUnifiedQuery(
+    query: UnifiedCatalogSearchQuery,
+    generation: number,
+    controller: AbortController,
+  ): Promise<void> {
+    try {
+      let result = await this.unified!.queryActiveUnified(
+        query,
+        this.detachedVerificationAuthority(),
+        controller.signal,
+      );
+      if (result === null) throw new HybridCatalogError("hybrid-snapshot-corrupt");
+      if (this.disposed || controller.signal.aborted || generation !== this.unifiedQueryGeneration) return;
+      const maximum = result.page.total === 0 ? 0 : Math.floor((result.page.total - 1) / PAGE_SIZE);
+      if (this.viewModel.page > maximum) {
+        this.viewModel = { ...this.viewModel, page: maximum };
+        result = await this.unified!.queryActiveUnified({
+          ...query,
+          offset: maximum * PAGE_SIZE,
+        }, this.detachedVerificationAuthority(), controller.signal);
+        if (result === null) throw new HybridCatalogError("hybrid-snapshot-corrupt");
+      }
+      if (this.disposed || controller.signal.aborted || generation !== this.unifiedQueryGeneration) return;
+      this.recordsById = new Map(result.page.items.map((record) => [record.catalogId, {
+        filename: record.filename,
+        cloudPath: record.cloudPath,
+      }]));
+      this.viewModel = {
+        ...this.viewModel,
+        snapshotCompletedAt: result.descriptor.completedAt,
+        pdfCount: result.descriptor.recordCount,
+        verificationCounts: { ...result.aggregate.verificationCounts },
+        groups: result.aggregate.groups.map((group) => ({ ...group })).sort(fixedOptionCompare),
+        hierarchyTags: result.aggregate.hierarchyTags.map((tag) => ({ ...tag })).sort(fixedOptionCompare),
+        total: result.page.total,
+        items: result.page.items.map(displayUnified),
+      };
+      this.emit();
+    } catch (error) {
+      if (
+        this.disposed
+        || controller.signal.aborted
+        || generation !== this.unifiedQueryGeneration
+        || (error instanceof Error && error.name === "AbortError")
+      ) return;
+      this.recordsById.clear();
+      this.viewModel = {
+        ...this.viewModel,
+        status: "error",
+        total: 0,
+        items: [],
+        messageCode: "snapshot-corrupt",
+      };
+      this.emit();
     }
-    this.viewModel = {
-      ...this.viewModel,
-      total: result.total,
-      items: result.items.map(displayUnified),
-    };
-    this.emit();
   }
 
   private recomputeLegacy(): void {
@@ -577,7 +649,15 @@ export class CloudCatalogRuntimeService implements CloudCatalogRuntime {
   private clearSearch(): void {
     this.recordsById.clear();
     this.legacySearch = undefined;
-    this.unifiedSearch = undefined;
+    this.unifiedQueryController?.abort();
+    this.unifiedQueryController = undefined;
+    this.unifiedQueryGeneration += 1;
+  }
+
+  private detachedVerificationAuthority(): CloudVerificationAuthority | null {
+    return this.verificationAuthority === null
+      ? null
+      : decodeCloudVerificationAuthority(structuredClone(this.verificationAuthority));
   }
 
   private assertAvailable(): void {

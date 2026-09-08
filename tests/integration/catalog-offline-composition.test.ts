@@ -312,4 +312,24 @@ describe("normal cloud catalog composition", () => {
 
     await expect(refreshCatalogProjection(failing)).rejects.toThrow("catalog-unavailable");
   });
+
+  it("uses the controller authority bootstrap instead of bypassing it", async () => {
+    const initializeCatalog = vi.fn(async () => undefined);
+    const report = vi.fn();
+
+    startCatalogInitialization({ initializeCatalog }, report);
+    await Promise.resolve();
+
+    expect(initializeCatalog).toHaveBeenCalledTimes(1);
+    expect(report).not.toHaveBeenCalled();
+
+    const failingReport = vi.fn();
+    startCatalogInitialization({
+      initializeCatalog: async () => { throw new Error("private local fingerprint detail"); },
+    }, failingReport);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(failingReport).toHaveBeenCalledWith("catalog-unavailable");
+    expect(JSON.stringify(failingReport.mock.calls)).not.toContain("fingerprint");
+  });
 });

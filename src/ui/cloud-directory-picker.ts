@@ -1,39 +1,47 @@
 import type { App, Modal } from "obsidian";
 import {
-  rankCloudDirectoryCandidates,
-  type CloudDirectoryCandidate,
   type CloudDirectoryCandidateRuntime,
   type CloudDirectoryCandidateSource,
   type RankedCloudDirectoryCandidate,
 } from "../catalog/cloud-directory-candidates";
+import type { CloudDirectoryBrowserRuntime } from "../catalog/cloud-directory-browser";
 import {
   CLOUD_DIRECTORY_LOCATOR_BUDGET,
   type CloudDirectoryLocatorRuntime,
-  type CloudDirectoryLocatorSummary,
   type CloudDirectoryLocatorStopReason,
 } from "../catalog/cloud-directory-locator";
-import { normalizeCatalogScanRoot } from "../catalog/catalog-path";
+import type {
+  CloudDirectoryPickerPurpose,
+  CloudDirectorySelection,
+} from "../catalog/cloud-directory-selection";
 import type {
   DirectoryPickerI18n,
   DirectoryPickerMessageKey,
 } from "../i18n/workbench-directory-picker-i18n";
+import {
+  createCloudDirectoryBrowserView,
+  type CloudDirectoryBrowserViewSurface,
+} from "./cloud-directory-browser-view";
+import {
+  createCloudDirectoryPickerSession,
+  type CloudDirectoryPickerSession,
+} from "./cloud-directory-picker-session";
+import type { CloudDirectoryPickerSessionState } from "./folder-selection-host";
 
 export interface CloudDirectoryPickerRequest {
   readonly initialPath: string | null;
+  readonly purpose: CloudDirectoryPickerPurpose;
   readonly candidates: CloudDirectoryCandidateRuntime;
+  readonly browser?: CloudDirectoryBrowserRuntime;
   readonly locator?: CloudDirectoryLocatorRuntime;
 }
 
 export interface CloudDirectoryPickerPresenter {
-  request(input: CloudDirectoryPickerRequest): Promise<string | null>;
+  request(input: CloudDirectoryPickerRequest): Promise<CloudDirectorySelection | null>;
 }
 
 export type CloudDirectoryPickerModalConstructor = abstract new (app: App) => Modal;
 export type CloudDirectoryPickerNotice = (message: string) => void;
-
-let pickerInstanceSequence = 0;
-
-type PickerPhase = "closed" | "local" | "confirm" | "running" | "settling";
 
 interface PickerUi {
   readonly i18n: DirectoryPickerI18n;
@@ -45,15 +53,22 @@ interface PickerUi {
   readonly confirmation: HTMLElement;
   readonly confirmationQuery: HTMLElement;
   readonly locate: HTMLButtonElement;
+  readonly browseRoot: HTMLButtonElement;
+  readonly rootDisclosure: HTMLElement;
+  readonly rootDisclosureCancel: HTMLButtonElement;
+  readonly rootDisclosureConfirm: HTMLButtonElement;
+  readonly browserHost: HTMLElement;
   readonly clearRecent: HTMLButtonElement;
   readonly cancel: HTMLButtonElement;
   readonly use: HTMLButtonElement;
   readonly confirmLocate: HTMLButtonElement;
 }
 
-type ExactCandidate = Extract<CloudDirectoryCandidate, { readonly kind: "exact" }>;
 type RankedExactCandidate = RankedCloudDirectoryCandidate & Readonly<{
-  candidate: ExactCandidate;
+  candidate: Extract<
+    RankedCloudDirectoryCandidate["candidate"],
+    { readonly kind: "exact" }
+  >;
 }>;
 
 const SOURCE_KEYS = {
@@ -69,136 +84,90 @@ const LOOKUP_REASON_KEYS = {
   "time-limit": "directoryPicker.lookup.reason.timeLimit",
 } as const satisfies Partial<Record<CloudDirectoryLocatorStopReason, DirectoryPickerMessageKey>>;
 
-const ALL_SOURCES: readonly CloudDirectoryCandidateSource[] = [
+const ALL_SOURCES = Object.freeze([
   "recent",
   "session-cache",
   "txt-group",
   "cloud-locator",
-];
+] as const satisfies readonly CloudDirectoryCandidateSource[]);
 
-const leafName = (path: string): string => path.slice(path.lastIndexOf("/") + 1);
-
-const safeCandidate = (input: CloudDirectoryCandidate): CloudDirectoryCandidate | null => {
-  try {
-    if (input.kind === "name-hint") {
-      const filename = input.filename.normalize("NFC");
-      if (filename.length === 0 || /\p{Cc}/u.test(filename) || input.catalogGroupKey.length === 0) {
-        return null;
-      }
-      return {
-        kind: "name-hint",
-        filename,
-        source: "txt-group",
-        catalogGroupKey: input.catalogGroupKey,
-      };
-    }
-    const path = normalizeCatalogScanRoot(input.path);
-    const filename = input.filename.normalize("NFC");
-    if (filename !== leafName(path)) return null;
-    if (input.kind === "conflict") {
-      return {
-        kind: "conflict",
-        filename,
-        path,
-        source: "cloud-locator",
-        reason: "same-path-different-identity",
-      };
-    }
-    if (
-      (input.source !== "recent"
-        && input.source !== "session-cache"
-        && input.source !== "cloud-locator")
-      || (input.pathState !== "previously-used" && input.pathState !== "session-verified")
-    ) return null;
-    return {
-      kind: "exact",
-      path,
-      filename,
-      source: input.source,
-      pathState: input.pathState,
-      ...(typeof input.cloudFsId === "string" ? { cloudFsId: input.cloudFsId } : {}),
-    };
-  } catch {
-    return null;
-  }
+const parentPath = (path: string): string => {
+  const separator = path.lastIndexOf("/");
+  return separator <= 0 ? "/" : path.slice(0, separator);
 };
 
-const detachedCandidates = (
-  values: readonly CloudDirectoryCandidate[],
-): readonly CloudDirectoryCandidate[] => {
-  const output: CloudDirectoryCandidate[] = [];
-  try {
-    for (const value of values) {
-      const candidate = safeCandidate(value);
-      if (candidate !== null) output.push(candidate);
-    }
-  } catch {
-    return [];
+const browserAncestors = (
+  path: string,
+  i18n: DirectoryPickerI18n,
+): readonly Readonly<{ path: string; label: string }>[] => {
+  const output: Array<Readonly<{ path: string; label: string }>> = [{
+    path: "/",
+    label: i18n.t("directoryPicker.browser.breadcrumbRoot"),
+  }];
+  if (path === "/") return output;
+  let current = "";
+  for (const segment of path.slice(1).split("/")) {
+    current += `/${segment}`;
+    output.push({ path: current, label: segment });
   }
   return output;
 };
 
-const detachedLocatorCandidates = (
-  values: readonly CloudDirectoryCandidate[],
-): readonly CloudDirectoryCandidate[] => detachedCandidates(values).filter((candidate) => (
-  candidate.kind === "conflict"
-  || (candidate.kind === "exact"
-    && candidate.source === "cloud-locator"
-    && candidate.pathState === "session-verified")
-));
-
-const fixedStatus = (
+const lookupStatus = (
   i18n: DirectoryPickerI18n,
-  summary: CloudDirectoryLocatorSummary,
+  state: CloudDirectoryPickerSessionState,
 ): string => {
-  if (summary.status === "complete") {
+  const detail = state.lookupDetail;
+  if (state.statusCode === "lookup-running") {
+    return i18n.t("directoryPicker.lookup.running");
+  }
+  if (state.statusCode !== "lookup-complete" && state.statusCode !== "lookup-incomplete") {
+    return "";
+  }
+  if (detail === null) return i18n.t("directoryPicker.lookup.error");
+  if (detail.status === "complete") {
     return i18n.t("directoryPicker.lookup.complete", {
-      matches: summary.matchCount,
-      directories: summary.directoryCount,
-      requests: summary.listRequestCount,
+      matches: detail.matchCount,
+      directories: detail.directoryCount,
+      requests: detail.listRequestCount,
     });
   }
-  if (summary.status === "canceled") return i18n.t("directoryPicker.lookup.canceled");
-  const reasonKey = summary.stopReason === "directory-limit"
-    || summary.stopReason === "list-request-limit"
-    || summary.stopReason === "time-limit"
-    ? LOOKUP_REASON_KEYS[summary.stopReason]
+  if (detail.status === "canceled") return i18n.t("directoryPicker.lookup.canceled");
+  const reasonKey = detail.stopReason === "directory-limit"
+    || detail.stopReason === "list-request-limit"
+    || detail.stopReason === "time-limit"
+    ? LOOKUP_REASON_KEYS[detail.stopReason]
     : undefined;
   if (reasonKey === undefined) return i18n.t("directoryPicker.lookup.error");
   return i18n.t("directoryPicker.lookup.partial", {
     reason: i18n.t(reasonKey),
-    matches: summary.matchCount,
-    directories: summary.directoryCount,
-    requests: summary.listRequestCount,
+    matches: detail.matchCount,
+    directories: detail.directoryCount,
+    requests: detail.listRequestCount,
   });
 };
+
+let pickerInstanceSequence = 0;
 
 export function createCloudDirectoryPickerModalClass(
   ModalBase: CloudDirectoryPickerModalConstructor,
 ) {
   return class CloudDirectoryPickerModal extends ModalBase
     implements CloudDirectoryPickerPresenter {
-    private phase: PickerPhase = "closed";
-    private query = "";
-    private readonly enabledSources = new Set<CloudDirectoryCandidateSource>(ALL_SOURCES);
-    private locatedCandidates: readonly CloudDirectoryCandidate[] = [];
-    private initialCandidate: CloudDirectoryCandidate | null = null;
-    private selectedPath: string | null = null;
-    private activeExactIndex = -1;
-    private renderGeneration = 0;
-    private lookupGeneration = 0;
-    private frozenLookupQuery: string | null = null;
+    private session: CloudDirectoryPickerSession | null = null;
+    private unsubscribeSession: (() => void) | null = null;
+    private browserSurface: CloudDirectoryBrowserViewSurface | null = null;
     private lifecycleController: AbortController | null = null;
-    private lookupController: AbortController | null = null;
-    private runtime: CloudDirectoryCandidateRuntime | null = null;
-    private locator: CloudDirectoryLocatorRuntime | undefined;
     private ui: PickerUi | null = null;
-    private result: Promise<string | null> | null = null;
-    private settleResult: ((value: string | null) => void) | null = null;
+    private result: Promise<CloudDirectorySelection | null> | null = null;
+    private settleResult: ((value: CloudDirectorySelection | null) => void) | null = null;
     private settled = false;
+    private cleaned = false;
     private disposed = false;
-    private disposeAfterSettling = false;
-    private hostClosedWhileSettling = false;
+    private hasBrowser = false;
+    private hasLocator = false;
+    private hostGeneration = 0;
+    private activeExactIndex = -1;
     private opener: HTMLElement | null = null;
     private readonly optionIdPrefix = `knowledge-workbench-directory-${++pickerInstanceSequence}`;
 
@@ -210,54 +179,46 @@ export function createCloudDirectoryPickerModalClass(
       super(app);
     }
 
-    request(input: CloudDirectoryPickerRequest): Promise<string | null> {
+    request(input: CloudDirectoryPickerRequest): Promise<CloudDirectorySelection | null> {
       if (this.disposed) throw new Error("directory-picker-unavailable");
       if (this.result !== null) return this.result;
-      const initialPath = input.initialPath === null
-        ? null
-        : normalizeCatalogScanRoot(input.initialPath);
-      this.runtime = input.candidates;
-      this.locator = input.locator;
-      this.initialCandidate = initialPath === null ? null : {
-        kind: "exact",
-        path: initialPath,
-        filename: leafName(initialPath),
-        source: "recent",
-        pathState: "previously-used",
-      };
-      this.selectedPath = initialPath;
+      this.hasBrowser = input.browser !== undefined;
+      this.hasLocator = input.locator !== undefined;
       this.opener = this.contentEl.ownerDocument.activeElement as HTMLElement | null;
       this.lifecycleController = new AbortController();
-      this.renderGeneration += 1;
-      this.phase = "local";
+      this.hostGeneration += 1;
+      this.session = createCloudDirectoryPickerSession({
+        candidates: input.candidates,
+        purpose: input.purpose,
+        initialPath: input.initialPath,
+        ...(input.browser === undefined ? {} : { browser: input.browser }),
+        ...(input.locator === undefined ? {} : { locator: input.locator }),
+      });
       this.result = new Promise((resolve) => { this.settleResult = resolve; });
       this.open();
       return this.result;
     }
 
     onOpen(): void {
-      const runtime = this.runtime;
+      const session = this.session;
       const lifecycle = this.lifecycleController;
-      if (runtime === null || lifecycle === null || this.phase !== "local") {
+      if (session === null || lifecycle === null || this.cleaned) {
         throw new Error("directory-picker-unavailable");
       }
-      const generation = this.renderGeneration;
+      const generation = this.hostGeneration;
       const { signal } = lifecycle;
       const i18n = this.getI18n();
       const doc = this.contentEl.ownerDocument;
       this.setTitle(i18n.t("directoryPicker.title"));
       this.contentEl.replaceChildren();
       this.contentEl.classList.add("knowledge-workbench__directory-picker");
-      this.contentEl.addEventListener("keydown", (event) => {
-        if (event.key !== "Escape") return;
-        event.preventDefault();
-        if (this.phase === "settling") return;
-        this.finish(null);
-      }, { signal });
 
       const safety = doc.createElement("p");
       safety.className = "knowledge-workbench__directory-picker-safety";
       safety.textContent = i18n.t("directoryPicker.safety");
+
+      const localTitle = doc.createElement("h3");
+      localTitle.textContent = i18n.t("directoryPicker.browser.recent.title");
 
       const queryLabel = doc.createElement("label");
       queryLabel.className = "knowledge-workbench__directory-picker-query";
@@ -267,7 +228,7 @@ export function createCloudDirectoryPickerModalClass(
       query.autocomplete = "off";
       query.dataset.directoryQuery = "true";
       query.placeholder = i18n.t("directoryPicker.query.placeholder");
-      query.value = this.query;
+      query.value = session.snapshot().query;
       queryLabel.append(query);
 
       const filters = doc.createElement("div");
@@ -297,6 +258,11 @@ export function createCloudDirectoryPickerModalClass(
       locate.type = "button";
       locate.dataset.action = "locate-directory";
       locate.textContent = i18n.t("directoryPicker.lookup.action");
+
+      const browseRoot = doc.createElement("button");
+      browseRoot.type = "button";
+      browseRoot.dataset.action = "browse-directory-root";
+      browseRoot.textContent = i18n.t("directoryPicker.browser.browseRoot");
 
       const clearRecent = doc.createElement("button");
       clearRecent.type = "button";
@@ -341,7 +307,31 @@ export function createCloudDirectoryPickerModalClass(
 
       const tools = doc.createElement("div");
       tools.className = "knowledge-workbench__directory-picker-tools";
-      tools.append(locate, clearRecent);
+      tools.append(browseRoot, locate, clearRecent);
+
+      const rootDisclosure = doc.createElement("section");
+      rootDisclosure.className = "knowledge-workbench__directory-picker-confirmation";
+      rootDisclosure.dataset.directoryRootDisclosure = "true";
+      rootDisclosure.hidden = true;
+      const rootDisclosureTitle = doc.createElement("h3");
+      rootDisclosureTitle.textContent = i18n.t("directoryPicker.browser.rootDisclosure.title");
+      const rootDisclosureBody = doc.createElement("p");
+      rootDisclosureBody.textContent = i18n.t("directoryPicker.browser.rootDisclosure.body");
+      const rootDisclosureActions = doc.createElement("div");
+      rootDisclosureActions.className = "knowledge-workbench__directory-picker-actions";
+      const rootDisclosureCancel = doc.createElement("button");
+      rootDisclosureCancel.type = "button";
+      rootDisclosureCancel.dataset.action = "cancel-directory-root-disclosure";
+      rootDisclosureCancel.textContent = i18n.t("directoryPicker.browser.rootDisclosure.cancel");
+      const rootDisclosureConfirm = doc.createElement("button");
+      rootDisclosureConfirm.type = "button";
+      rootDisclosureConfirm.dataset.action = "confirm-directory-root-disclosure";
+      rootDisclosureConfirm.textContent = i18n.t("directoryPicker.browser.rootDisclosure.confirm");
+      rootDisclosureActions.append(rootDisclosureCancel, rootDisclosureConfirm);
+      rootDisclosure.append(rootDisclosureTitle, rootDisclosureBody, rootDisclosureActions);
+
+      const browserHost = doc.createElement("div");
+      browserHost.dataset.directoryBrowserHost = "true";
 
       const actions = doc.createElement("div");
       actions.className = "knowledge-workbench__directory-picker-actions";
@@ -365,6 +355,11 @@ export function createCloudDirectoryPickerModalClass(
         confirmation,
         confirmationQuery,
         locate,
+        browseRoot,
+        rootDisclosure,
+        rootDisclosureCancel,
+        rootDisclosureConfirm,
+        browserHost,
         clearRecent,
         cancel,
         use,
@@ -372,160 +367,119 @@ export function createCloudDirectoryPickerModalClass(
       };
       this.contentEl.append(
         safety,
+        localTitle,
         queryLabel,
         filters,
         results,
         selected,
         status,
         tools,
+        rootDisclosure,
+        browserHost,
         confirmation,
         actions,
       );
 
       query.addEventListener("input", () => {
         if (!this.isCurrent(generation)) return;
-        this.query = query.value;
-        if (this.phase === "confirm" || this.phase === "running") {
-          this.invalidateLookup(this.phase === "running");
-        }
         this.activeExactIndex = -1;
-        this.renderLocal(generation);
+        this.session?.setQuery(query.value);
       }, { signal });
-      const keyboard = (event: KeyboardEvent): void => {
-        if (!this.isCurrent(generation) || this.phase === "settling") return;
-        const exacts = this.currentExactCandidates();
-        if (event.key === "ArrowDown" || event.key === "ArrowUp") {
-          event.preventDefault();
-          if (exacts.length === 0) return;
-          const delta = event.key === "ArrowDown" ? 1 : -1;
-          const origin = this.activeExactIndex < 0
-            ? (delta > 0 ? -1 : 0)
-            : this.activeExactIndex;
-          this.activeExactIndex = (origin + delta + exacts.length) % exacts.length;
-          this.renderLocal(generation);
-          this.ui?.results.querySelector<HTMLElement>(
-            `[data-exact-index="${this.activeExactIndex}"]`,
-          )?.focus({ preventScroll: true });
-          return;
-        }
-        if (event.key === "Enter" && this.activeExactIndex >= 0) {
-          event.preventDefault();
-          const candidate = exacts[this.activeExactIndex];
-          if (candidate !== undefined) this.selectExact(candidate.candidate.path, generation);
-        }
-      };
-      query.addEventListener("keydown", keyboard, { signal });
-      results.addEventListener("keydown", keyboard, { signal });
-      locate.addEventListener("click", () => this.revealLookup(generation), { signal });
+      locate.addEventListener("click", () => {
+        if (!this.isCurrent(generation)) return;
+        this.session?.requestLookupConsent();
+      }, { signal });
+      browseRoot.addEventListener("click", () => {
+        if (!this.isCurrent(generation)) return;
+        this.session?.revealRootBrowser();
+      }, { signal });
+      rootDisclosureCancel.addEventListener("click", () => {
+        if (!this.isCurrent(generation)) return;
+        this.session?.cancelRootBrowser();
+      }, { signal });
+      rootDisclosureConfirm.addEventListener("click", () => {
+        if (!this.isCurrent(generation)) return;
+        this.session?.confirmRootBrowser();
+      }, { signal });
       cancelLocate.addEventListener("click", () => {
         if (!this.isCurrent(generation)) return;
-        this.invalidateLookup(this.phase === "running");
-        this.renderLocal(generation);
+        this.session?.cancelLookup();
       }, { signal });
       confirmLocate.addEventListener("click", () => {
-        void this.confirmLookup(generation);
+        if (!this.isCurrent(generation)) return;
+        void this.session?.confirmLookup();
       }, { signal });
       clearRecent.addEventListener("click", () => {
-        void this.clearRecent(generation);
+        void this.handleClearRecent(generation);
       }, { signal });
       cancel.addEventListener("click", () => {
-        if (this.phase !== "settling") this.finish(null);
+        if (!this.isCurrent(generation)) return;
+        this.cancelAndClose();
       }, { signal });
       use.addEventListener("click", () => {
-        void this.useSelected(generation);
+        void this.handleUse(generation);
+      }, { signal });
+      this.contentEl.addEventListener("keydown", (event) => {
+        this.handleKeyboard(event, generation);
       }, { signal });
 
-      this.renderLocal(generation);
+      let previousPhase = session.snapshot().phase;
+      this.unsubscribeSession = session.subscribe(() => {
+        if (!this.isCurrent(generation)) return;
+        const next = session.snapshot();
+        this.render(next, generation);
+        if (next.phase === "lookup-consent" && previousPhase !== "lookup-consent") {
+          this.ui?.confirmLocate.focus({ preventScroll: true });
+        } else if (next.phase === "root-consent" && previousPhase !== "root-consent") {
+          this.ui?.rootDisclosureConfirm.focus({ preventScroll: true });
+        }
+        previousPhase = next.phase;
+      });
+      this.render(session.snapshot(), generation);
       query.focus();
     }
 
     onClose(): void {
-      if (this.phase === "settling") {
-        this.hostClosedWhileSettling = true;
-        this.hideSettlingSurface();
-        return;
-      }
       this.cleanup();
     }
 
     dispose(): void {
       if (this.disposed) return;
-      if (this.phase === "settling") {
-        this.disposeAfterSettling = true;
-        if (!this.hostClosedWhileSettling) this.close();
-        return;
-      }
       this.disposed = true;
-      if (this.phase !== "closed") this.finish(null);
+      if (this.cleaned) return;
+      if (this.contentEl.isConnected) this.close();
       else this.cleanup();
     }
 
-    private currentRanked(): readonly RankedCloudDirectoryCandidate[] {
-      const runtime = this.runtime;
-      if (runtime === null) return [];
-      let local: readonly CloudDirectoryCandidate[] = [];
-      try {
-        local = detachedCandidates(runtime.snapshot());
-      } catch {
-        local = [];
-      }
-      const candidates = [
-        ...(this.initialCandidate === null ? [] : [this.initialCandidate]),
-        ...local,
-        ...detachedCandidates(this.locatedCandidates),
-      ];
-      try {
-        return rankCloudDirectoryCandidates({
-          candidates,
-          query: this.query,
-          enabledSources: this.enabledSources,
-          selectedPath: this.selectedPath,
-        });
-      } catch {
-        return [];
-      }
-    }
-
-    private currentExactCandidates(): readonly RankedExactCandidate[] {
-      return this.currentRanked().filter((ranked): ranked is RankedExactCandidate => (
-        ranked.candidate.kind === "exact"
-      ));
-    }
-
-    private renderLocal(generation: number): void {
+    private render(state: CloudDirectoryPickerSessionState, generation: number): void {
       if (!this.isCurrent(generation)) return;
       const ui = this.ui;
       if (ui === null) return;
-      const ranked = this.currentRanked();
-      const exacts = ranked.filter((item) => item.candidate.kind === "exact");
-      if (
-        this.selectedPath !== null
-        && !exacts.some((item) => item.candidate.kind === "exact"
-          && item.candidate.path === this.selectedPath)
-      ) this.selectedPath = null;
+      const exacts = state.rankedCandidates.filter(
+        (item): item is RankedExactCandidate => item.candidate.kind === "exact",
+      );
       if (this.activeExactIndex >= exacts.length) this.activeExactIndex = exacts.length - 1;
+      if (ui.query.value !== state.query) ui.query.value = state.query;
 
       ui.filters.replaceChildren();
       for (const source of ALL_SOURCES) {
         const button = ui.filters.ownerDocument.createElement("button");
         button.type = "button";
         button.dataset.directorySource = source;
-        button.setAttribute("aria-pressed", String(this.enabledSources.has(source)));
+        button.setAttribute("aria-pressed", String(state.enabledSources.includes(source)));
         button.textContent = ui.i18n.t(SOURCE_KEYS[source]);
-        button.disabled = this.phase === "settling";
+        button.disabled = state.phase === "settling";
         button.addEventListener("click", () => {
-          if (!this.isCurrent(generation) || this.phase === "settling") return;
-          if (this.enabledSources.has(source)) this.enabledSources.delete(source);
-          else this.enabledSources.add(source);
+          if (!this.isCurrent(generation)) return;
           this.activeExactIndex = -1;
-          this.renderLocal(generation);
+          this.session?.toggleSource(source);
         }, { signal: this.lifecycleController?.signal });
         ui.filters.append(button);
       }
 
       ui.results.replaceChildren();
       let exactIndex = 0;
-      for (const item of ranked) {
+      for (const item of state.rankedCandidates) {
         const candidate = item.candidate;
         if (candidate.kind === "exact") {
           const option = ui.results.ownerDocument.createElement("button");
@@ -536,26 +490,46 @@ export function createCloudDirectoryPickerModalClass(
           option.dataset.directoryPath = candidate.path;
           option.dataset.exactIndex = String(exactIndex);
           option.setAttribute("role", "option");
-          option.setAttribute("aria-selected", String(candidate.path === this.selectedPath));
+          option.setAttribute("aria-selected", String(candidate.path === state.selectedPath));
           option.tabIndex = exactIndex === this.activeExactIndex ? 0 : -1;
-          option.disabled = this.phase === "settling";
+          option.disabled = state.phase === "settling";
           this.appendIdentity(option, candidate.filename, candidate.path, item.sources, ui.i18n);
-          const state = option.ownerDocument.createElement("span");
-          state.className = "knowledge-workbench__directory-picker-state";
-          state.textContent = item.sources.some((source) => (
+          const pathState = option.ownerDocument.createElement("span");
+          pathState.className = "knowledge-workbench__directory-picker-state";
+          pathState.textContent = item.sources.some((source) => (
             source === "session-cache" || source === "cloud-locator"
           )) || candidate.pathState === "session-verified"
             ? ui.i18n.t("directoryPicker.result.state.sessionVerified")
             : ui.i18n.t("directoryPicker.result.state.previouslyUsed");
-          option.append(state);
+          option.append(pathState);
           const path = candidate.path;
-          option.addEventListener("click", () => this.selectExact(path, generation), {
-            signal: this.lifecycleController?.signal,
-          });
-          ui.results.append(option);
+          const index = exactIndex;
+          option.addEventListener("click", () => {
+            if (!this.isCurrent(generation)) return;
+            this.activeExactIndex = index;
+            this.session?.selectCandidate(path);
+          }, { signal: this.lifecycleController?.signal });
+
+          const enter = ui.results.ownerDocument.createElement("button");
+          enter.type = "button";
+          enter.dataset.action = "browse-candidate-directory";
+          enter.dataset.directoryPath = path;
+          enter.textContent = ui.i18n.t("directoryPicker.browser.enter");
+          enter.disabled = !this.hasBrowser
+            || state.browserActivity === "running"
+            || state.phase === "settling";
+          enter.addEventListener("click", () => {
+            if (!this.isCurrent(generation)) return;
+            const currentSession = this.session;
+            const current = currentSession?.snapshot();
+            if (current?.browserActivity === "running" || current?.phase === "settling") return;
+            currentSession?.enterBrowserPath(path);
+          }, { signal: this.lifecycleController?.signal });
+          ui.results.append(option, enter);
           exactIndex += 1;
           continue;
         }
+
         const explanation = ui.results.ownerDocument.createElement("article");
         explanation.className = candidate.kind === "conflict"
           ? "knowledge-workbench__directory-picker-result knowledge-workbench__directory-picker-result--conflict"
@@ -579,7 +553,7 @@ export function createCloudDirectoryPickerModalClass(
         explanation.append(detail);
         ui.results.append(explanation);
       }
-      if (ranked.length === 0) {
+      if (state.rankedCandidates.length === 0) {
         const empty = ui.results.ownerDocument.createElement("p");
         empty.className = "knowledge-workbench__empty";
         empty.setAttribute("role", "presentation");
@@ -587,10 +561,7 @@ export function createCloudDirectoryPickerModalClass(
         ui.results.append(empty);
       }
       if (this.activeExactIndex >= 0) {
-        ui.results.setAttribute(
-          "aria-activedescendant",
-          this.optionId(this.activeExactIndex),
-        );
+        ui.results.setAttribute("aria-activedescendant", this.optionId(this.activeExactIndex));
       } else ui.results.removeAttribute("aria-activedescendant");
 
       ui.selected.replaceChildren();
@@ -598,28 +569,94 @@ export function createCloudDirectoryPickerModalClass(
       selectedTitle.textContent = ui.i18n.t("directoryPicker.selected.title");
       const selectedValue = ui.selected.ownerDocument.createElement("p");
       selectedValue.className = "knowledge-workbench__directory-picker-path";
-      selectedValue.textContent = this.selectedPath === null
+      selectedValue.textContent = state.selectedPath === null
         ? ui.i18n.t("directoryPicker.selected.none")
-        : ui.i18n.t("directoryPicker.selected.path", { path: this.selectedPath });
+        : ui.i18n.t("directoryPicker.selected.path", { path: state.selectedPath });
       ui.selected.append(selectedTitle, selectedValue);
 
-      ui.confirmation.hidden = this.phase !== "confirm" && this.phase !== "running";
-      ui.confirmationQuery.textContent = this.frozenLookupQuery === null
-        ? ""
-        : ui.i18n.t("directoryPicker.lookup.confirmation.query", {
-          query: this.frozenLookupQuery,
-        });
-      ui.locate.disabled = this.locator === undefined
-        || this.query.trim().length === 0
-        || this.phase === "running"
-        || this.phase === "settling";
-      ui.clearRecent.disabled = this.phase === "running" || this.phase === "settling";
-      ui.cancel.disabled = this.phase === "settling";
-      ui.use.disabled = this.selectedPath === null || this.phase !== "local";
-      ui.confirmLocate.disabled = this.phase !== "confirm";
-      if (this.locator === undefined && (ui.status.textContent ?? "").length === 0) {
-        ui.status.textContent = ui.i18n.t("directoryPicker.lookup.unavailable");
+      ui.confirmation.hidden = state.phase !== "lookup-consent" && state.phase !== "locating";
+      ui.confirmationQuery.textContent = state.phase === "lookup-consent" || state.phase === "locating"
+        ? ui.i18n.t("directoryPicker.lookup.confirmation.query", { query: state.query })
+        : "";
+      ui.rootDisclosure.hidden = state.phase !== "root-consent";
+      ui.locate.disabled = !this.hasLocator
+        || state.query.trim().length === 0
+        || state.phase === "locating"
+        || state.phase === "settling";
+      ui.browseRoot.disabled = !this.hasBrowser
+        || state.browserActivity === "running"
+        || state.phase === "locating"
+        || state.phase === "settling";
+      ui.rootDisclosureCancel.disabled = state.phase !== "root-consent";
+      ui.rootDisclosureConfirm.disabled = !this.hasBrowser || state.phase !== "root-consent";
+      ui.clearRecent.disabled = state.phase === "locating" || state.phase === "settling";
+      ui.cancel.disabled = state.phase === "settling";
+      ui.use.disabled = state.draftSelection === null
+        || (state.phase !== "local" && state.phase !== "browsing");
+      ui.confirmLocate.disabled = state.phase !== "lookup-consent";
+      ui.status.textContent = this.renderStatus(state, ui.i18n);
+
+      this.renderBrowser(state, generation);
+    }
+
+    private renderBrowser(state: CloudDirectoryPickerSessionState, generation: number): void {
+      const ui = this.ui;
+      if (!this.isCurrent(generation) || ui === null) return;
+      if (state.browserPath === null) {
+        this.browserSurface?.dispose();
+        this.browserSurface = null;
+        ui.browserHost.replaceChildren();
+        return;
       }
+      const viewState = {
+        currentPath: state.browserPath,
+        ancestors: browserAncestors(state.browserPath, ui.i18n),
+        purpose: state.purpose,
+        layer: state.browserLayer,
+        visibleDirectories: state.visibleBrowserDirectories,
+        highlightedPath: state.browserHighlightedPath,
+        activity: state.browserActivity,
+        round: state.browserDetail.round,
+        fixedError: state.browserDetail.fixedError,
+      } as const;
+      const actions = {
+        onEnter: (path: string) => this.session?.enterBrowserPath(path),
+        onHighlight: (path: string) => this.session?.highlightBrowserPath(path),
+        onSelectCurrent: () => { void this.session?.selectCurrentDirectory(); },
+        onSelectHighlighted: () => { void this.session?.selectHighlightedDirectory(); },
+        onSelectCategory: (path: string) => { void this.session?.selectCategory(path); },
+        onBreadcrumb: (path: string) => this.session?.navigateBreadcrumb(path),
+        onContinue: () => { void this.session?.continueBrowser(); },
+        onRetry: () => { void this.session?.retryBrowser(); },
+        onCancel: () => this.session?.cancelBrowser(),
+      };
+      if (this.browserSurface === null) {
+        this.browserSurface = createCloudDirectoryBrowserView(
+          ui.browserHost,
+          ui.i18n,
+          viewState,
+          actions,
+        );
+      } else this.browserSurface.update(viewState);
+    }
+
+    private renderStatus(
+      state: CloudDirectoryPickerSessionState,
+      i18n: DirectoryPickerI18n,
+    ): string {
+      const lookup = lookupStatus(i18n, state);
+      if (lookup.length > 0) return lookup;
+      if (state.browserPath === null && state.statusCode === "browser-error") {
+        return i18n.t(
+          state.browserDetail.fixedError === "browser-unavailable"
+            ? "directoryPicker.browser.unavailable"
+            : "directoryPicker.browser.error.fixed",
+        );
+      }
+      if (state.browserPath === null && !this.hasLocator) {
+        return i18n.t("directoryPicker.lookup.unavailable");
+      }
+      return "";
     }
 
     private appendIdentity(
@@ -646,229 +683,171 @@ export function createCloudDirectoryPickerModalClass(
       target.append(name, fullPath, chips);
     }
 
-    private selectExact(path: string, generation: number): void {
-      if (!this.isCurrent(generation) || this.phase !== "local") return;
-      const exacts = this.currentExactCandidates();
-      const index = exacts.findIndex((item) => item.candidate.path === path);
-      if (index < 0) return;
-      this.selectedPath = exacts[index]!.candidate.path;
-      this.activeExactIndex = index;
-      this.renderLocal(generation);
-    }
-
-    private revealLookup(generation: number): void {
-      if (!this.isCurrent(generation) || this.phase !== "local" || this.locator === undefined) {
-        return;
-      }
-      const query = this.query.normalize("NFC").trim();
-      if (query.length === 0) return;
-      this.frozenLookupQuery = query;
-      this.phase = "confirm";
+    private handleKeyboard(event: KeyboardEvent, generation: number): void {
+      if (!this.isCurrent(generation) || event.isComposing) return;
+      const session = this.session;
       const ui = this.ui;
-      if (ui !== null) ui.status.textContent = "";
-      this.renderLocal(generation);
-      ui?.confirmLocate.focus({ preventScroll: true });
-    }
-
-    private async confirmLookup(generation: number): Promise<void> {
-      if (!this.isCurrent(generation) || this.phase !== "confirm") return;
-      const locator = this.locator;
-      const query = this.frozenLookupQuery;
-      const ui = this.ui;
-      if (locator === undefined || query === null || ui === null) return;
-      this.lookupController?.abort();
-      const controller = new AbortController();
-      this.lookupController = controller;
-      const lookupGeneration = ++this.lookupGeneration;
-      this.phase = "running";
-      ui.status.textContent = ui.i18n.t("directoryPicker.lookup.running");
-      this.renderLocal(generation);
-      try {
-        const value = await locator.locateByName(query, controller.signal);
-        if (!this.isLookupCurrent(generation, lookupGeneration, controller.signal)) return;
-        if (value.query.normalize("NFC").trim() !== query) {
-          ui.status.textContent = ui.i18n.t("directoryPicker.lookup.error");
-          this.phase = "local";
+      if (session === null || ui === null) return;
+      const state = session.snapshot();
+      if (event.key === "Escape") {
+        if (state.phase === "settling") return;
+        event.preventDefault();
+        if (state.phase === "locating") {
+          session.cancelLookup();
           return;
         }
-        this.locatedCandidates = [
-          ...this.locatedCandidates,
-          ...detachedLocatorCandidates(value.candidates),
-        ];
-        ui.status.textContent = fixedStatus(ui.i18n, value);
-        this.phase = "local";
-        this.frozenLookupQuery = null;
-        this.renderLocal(generation);
-      } catch {
-        if (!this.isLookupCurrent(generation, lookupGeneration, controller.signal)) return;
-        ui.status.textContent = ui.i18n.t("directoryPicker.lookup.error");
-        this.phase = "local";
-        this.frozenLookupQuery = null;
-        this.renderLocal(generation);
-      } finally {
-        if (this.ownsLookup(generation, lookupGeneration, controller)) {
-          this.lookupController = null;
+        if (state.phase === "browsing" && state.browserActivity === "running") {
+          session.cancelBrowser();
+          return;
         }
-      }
-    }
-
-    private invalidateLookup(showCanceled: boolean): void {
-      this.lookupController?.abort();
-      this.lookupController = null;
-      this.lookupGeneration += 1;
-      this.phase = "local";
-      this.frozenLookupQuery = null;
-      if (showCanceled && this.ui !== null) {
-        this.ui.status.textContent = this.ui.i18n.t("directoryPicker.lookup.canceled");
-      }
-    }
-
-    private async clearRecent(generation: number): Promise<void> {
-      if (!this.isCurrent(generation) || this.phase !== "local") return;
-      const runtime = this.runtime;
-      const ui = this.ui;
-      if (runtime === null || ui === null) return;
-      ui.clearRecent.disabled = true;
-      try {
-        await runtime.clearRecent();
-        if (!this.isCurrent(generation) || this.phase !== "local") return;
-        this.showNotice(ui.i18n.t("directoryPicker.notice.recentCleared"));
-        this.renderLocal(generation);
-      } catch {
-        if (!this.isCurrent(generation) || this.phase !== "local") return;
-        this.showNotice(ui.i18n.t("directoryPicker.notice.recentClearFailed"));
-      } finally {
-        if (this.isCurrent(generation) && this.phase === "local" && this.ui !== null) {
-          this.ui.clearRecent.disabled = false;
-        }
-      }
-    }
-
-    private async useSelected(generation: number): Promise<void> {
-      if (!this.isCurrent(generation) || this.phase !== "local") return;
-      const selectedPath = this.selectedPath;
-      const runtime = this.runtime;
-      const ui = this.ui;
-      if (selectedPath === null || runtime === null || ui === null) return;
-      const currentExact = this.currentExactCandidates()
-        .find((item) => item.candidate.path === selectedPath);
-      if (currentExact === undefined) {
-        this.selectedPath = null;
-        this.renderLocal(generation);
+        this.cancelAndClose();
         return;
       }
-      const path = normalizeCatalogScanRoot(currentExact.candidate.path);
-      this.phase = "settling";
-      this.renderLocal(generation);
-      let saveFailed = false;
-      try {
-        await runtime.remember(path);
-      } catch {
-        saveFailed = true;
+      if (event.altKey || event.ctrlKey || event.metaKey || state.phase === "settling") return;
+      const target = event.target as Element | null;
+      const browserList = target?.closest('[data-directory-browser-list="true"]') ?? null;
+      const browserButton = target?.closest("button") ?? null;
+      const browserNavigationTarget = target === ui.query
+        || (browserList !== null && browserButton === null);
+      if (state.browserPath !== null && browserNavigationTarget) {
+        if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+          event.preventDefault();
+          const directories = state.visibleBrowserDirectories;
+          if (directories.length === 0) return;
+          const current = state.browserHighlightedPath === null
+            ? -1
+            : directories.findIndex((directory) => directory.path === state.browserHighlightedPath);
+          const delta = event.key === "ArrowDown" ? 1 : -1;
+          const origin = current < 0 ? (delta > 0 ? -1 : 0) : current;
+          session.highlightBrowserPath(
+            directories[(origin + delta + directories.length) % directories.length]!.path,
+          );
+          return;
+        }
+        if (event.key === "Enter" && state.browserHighlightedPath !== null) {
+          event.preventDefault();
+          session.enterBrowserPath(state.browserHighlightedPath);
+          return;
+        }
+        if (
+          event.key === "Backspace"
+          && target === ui.query
+          && ui.query.value.length === 0
+          && state.browserPath !== "/"
+        ) {
+          event.preventDefault();
+          session.navigateBreadcrumb(parentPath(state.browserPath));
+        }
+        return;
       }
-      if (!this.isCurrent(generation) || this.phase !== "settling") return;
-      if (saveFailed) this.showNotice(ui.i18n.t("directoryPicker.notice.persistenceFailure"));
-      const disposeAfterSettling = this.disposeAfterSettling;
-      const hostClosedWhileSettling = this.hostClosedWhileSettling;
-      this.disposeAfterSettling = false;
-      this.hostClosedWhileSettling = false;
-      this.phase = "local";
-      this.resolve(path);
-      if (hostClosedWhileSettling) this.cleanup();
-      else this.close();
-      if (disposeAfterSettling) this.disposed = true;
+
+      if (target !== ui.query && target !== ui.results) return;
+      const exacts = state.rankedCandidates.filter(
+        (item): item is RankedExactCandidate => item.candidate.kind === "exact",
+      );
+      if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+        event.preventDefault();
+        if (exacts.length === 0) return;
+        const delta = event.key === "ArrowDown" ? 1 : -1;
+        const origin = this.activeExactIndex < 0
+          ? (delta > 0 ? -1 : 0)
+          : this.activeExactIndex;
+        this.activeExactIndex = (origin + delta + exacts.length) % exacts.length;
+        this.render(state, generation);
+        this.ui?.results.querySelector<HTMLElement>(
+          `[data-exact-index="${this.activeExactIndex}"]`,
+        )?.focus({ preventScroll: true });
+        return;
+      }
+      if (event.key === "Enter" && this.activeExactIndex >= 0) {
+        event.preventDefault();
+        const candidate = exacts[this.activeExactIndex];
+        if (candidate !== undefined) session.selectCandidate(candidate.candidate.path);
+      }
     }
 
-    private isCurrent(generation: number): boolean {
-      return !this.disposed
-        && this.phase !== "closed"
-        && generation === this.renderGeneration
-        && this.lifecycleController?.signal.aborted === false;
+    private async handleClearRecent(generation: number): Promise<void> {
+      if (!this.isCurrent(generation)) return;
+      const session = this.session;
+      const ui = this.ui;
+      if (session === null || ui === null) return;
+      await session.clearRecent();
+      if (!this.isCurrent(generation) || this.session !== session) return;
+      this.showNotice(ui.i18n.t(
+        session.snapshot().statusCode === "save-failed"
+          ? "directoryPicker.notice.recentClearFailed"
+          : "directoryPicker.notice.recentCleared",
+      ));
     }
 
-    private isLookupCurrent(
-      generation: number,
-      lookupGeneration: number,
-      signal: AbortSignal,
-    ): boolean {
-      return this.isCurrent(generation)
-        && this.phase === "running"
-        && lookupGeneration === this.lookupGeneration
-        && !signal.aborted;
+    private async handleUse(generation: number): Promise<void> {
+      if (!this.isCurrent(generation)) return;
+      const session = this.session;
+      const i18n = this.ui?.i18n;
+      if (session === null || i18n === undefined) return;
+      const value = await session.useSelection();
+      if (!this.isCurrent(generation) || this.session !== session) return;
+      if (value === null) {
+        if (session.snapshot().statusCode === "save-failed") {
+          this.showNotice(i18n.t("directoryPicker.notice.persistenceFailure"));
+        }
+        return;
+      }
+      this.resolve(value);
+      this.close();
     }
 
-    private ownsLookup(
-      generation: number,
-      lookupGeneration: number,
-      controller: AbortController,
-    ): boolean {
-      return !this.disposed
-        && generation === this.renderGeneration
-        && lookupGeneration === this.lookupGeneration
-        && this.lookupController === controller;
+    private cancelAndClose(): void {
+      if (this.cleaned) return;
+      this.session?.cancel();
+      this.resolve(null);
+      this.close();
+    }
+
+    private optionId(index: number): string {
+      return `${this.optionIdPrefix}-${this.hostGeneration}-${index}`;
     }
 
     private showNotice(message: string): void {
       try {
         this.notify(message);
       } catch {
-        // Notice delivery is best effort and never changes the committed selection.
+        // Notice delivery is best effort and never changes session state.
       }
     }
 
-    private optionId(index: number): string {
-      return `${this.optionIdPrefix}-${this.renderGeneration}-${index}`;
-    }
-
-    private finish(value: string | null): void {
-      this.resolve(value);
-      this.close();
-    }
-
-    private resolve(value: string | null): void {
+    private resolve(value: CloudDirectorySelection | null): void {
       if (this.settled) return;
       this.settled = true;
       this.settleResult?.(value);
       this.settleResult = null;
     }
 
-    private hideSettlingSurface(): void {
-      for (const input of Array.from(
-        this.contentEl.querySelectorAll<HTMLInputElement>("input"),
-      )) input.value = "";
-      this.contentEl.replaceChildren();
-      this.ui = null;
-      this.opener?.focus({ preventScroll: true });
-      this.opener = null;
+    private isCurrent(generation: number): boolean {
+      return !this.cleaned
+        && generation === this.hostGeneration
+        && this.lifecycleController?.signal.aborted === false;
     }
 
     private cleanup(): void {
-      if (this.phase === "closed" && this.lifecycleController === null) return;
-      this.renderGeneration += 1;
-      this.lookupGeneration += 1;
-      this.lookupController?.abort();
-      this.lookupController = null;
+      if (this.cleaned) return;
+      this.cleaned = true;
+      this.hostGeneration += 1;
+      this.unsubscribeSession?.();
+      this.unsubscribeSession = null;
       this.lifecycleController?.abort();
       this.lifecycleController = null;
+      this.browserSurface?.dispose();
+      this.browserSurface = null;
+      this.session?.cancel();
+      this.session?.dispose();
+      this.session = null;
       for (const input of Array.from(
         this.contentEl.querySelectorAll<HTMLInputElement>("input"),
       )) input.value = "";
-      if (!this.settled) this.resolve(null);
-      this.phase = "closed";
-      this.query = "";
-      this.enabledSources.clear();
-      for (const source of ALL_SOURCES) this.enabledSources.add(source);
-      this.locatedCandidates = [];
-      this.initialCandidate = null;
-      this.selectedPath = null;
-      this.activeExactIndex = -1;
-      this.frozenLookupQuery = null;
-      this.disposeAfterSettling = false;
-      this.hostClosedWhileSettling = false;
-      this.runtime = null;
-      this.locator = undefined;
-      this.ui = null;
       this.contentEl.replaceChildren();
+      this.ui = null;
+      if (!this.settled) this.resolve(null);
       this.opener?.focus({ preventScroll: true });
       this.opener = null;
     }

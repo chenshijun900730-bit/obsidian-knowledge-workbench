@@ -1,7 +1,7 @@
 {
   "id": "knowledge-workbench",
   "name": "Knowledge Workbench",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "minAppVersion": "1.12.7",
   "description": "Start with one clear next step and understand how personal notes connect to reference material.",
   "author": "Xiaowanzi",

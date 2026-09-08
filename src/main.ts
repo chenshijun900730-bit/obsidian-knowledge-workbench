@@ -19,6 +19,7 @@ import { createSettingsTabClass } from "./ui/settings-tab";
 import { createSettingsSectionsSurface } from "./ui/settings-sections";
 import {
   createNormalCloudCatalogRuntime,
+  hashNormalCloudVerificationRoot,
   resolveCatalogRoot,
 } from "./runtime/normal-cloud-catalog-composition";
 import { createCatalogScanConfirmationModalClass } from "./ui/catalog-scan-confirmation-modal";
@@ -27,6 +28,8 @@ import { createCatalogTxtImportConfirmationModalClass } from "./ui/catalog-txt-i
 import { createCatalogLargeScanConfirmationModalClass } from "./ui/catalog-large-scan-confirmation-modal";
 import { createCloudDirectoryPickerModalClass } from "./ui/cloud-directory-picker";
 import { createDirectoryPickerI18n } from "./i18n/workbench-directory-picker-i18n";
+import { validateCloudDirectorySelection } from "./catalog/cloud-directory-selection";
+import { createNormalFolderSelectionComposition } from "./runtime/normal-folder-selection-composition";
 
 if (
   __KNOWLEDGE_WORKBENCH_BUILD_MODE__ !== "normal"
@@ -77,12 +80,13 @@ const runtime = Object.freeze({
       request: () => new ConcreteHistoryConfirmationModal(app).request(),
     };
   },
-  createSettingsTab: (app, plugin, controller, getLocale) => {
+  createSettingsTab: (app, plugin, controller, getLocale, openTaskOverview) => {
     void getLocale;
     return new ConcreteSettingsTab(
       app,
       plugin,
       controller,
+      openTaskOverview,
     );
   },
   createWorkbenchSettingsSurface: (app, controller, getLocale) => {
@@ -94,6 +98,7 @@ const runtime = Object.freeze({
       createSecretComponent: (hostApp, root) => new SecretComponent(hostApp, root),
     }, presentCatalogProgress);
   },
+  cloudVerificationRootHasher: hashNormalCloudVerificationRoot,
   createCatalog: (app) => createNormalCloudCatalogRuntime({
     catalogRoot: resolveCatalogRoot(),
     host: {
@@ -111,6 +116,7 @@ const runtime = Object.freeze({
       openBaidu: async () => { openExternalPage("https://pan.baidu.com/disk/main"); },
     },
   }),
+  createFolderSelection: createNormalFolderSelectionComposition,
   createCatalogConfirmation: (app, getLocale) => {
     const ConcreteCatalogScanConfirmationModal = createCatalogScanConfirmationModalClass(
       Modal,
@@ -133,6 +139,7 @@ const runtime = Object.freeze({
     const ConcreteCatalogLargeScanConfirmationModal = createCatalogLargeScanConfirmationModalClass(
       Modal,
       getLocale,
+      validateCloudDirectorySelection,
     );
     return {
       request: (input) => new ConcreteCatalogLargeScanConfirmationModal(app).request(input),
@@ -145,6 +152,7 @@ const runtime = Object.freeze({
       (message) => { new Notice(message); },
     ).request(input),
   }),
+  catalogDirectorySelectionValidator: validateCloudDirectorySelection,
   createAi: (app, getLocale) => {
     const ConcreteAiPayloadPreviewModal = createAiPayloadPreviewModalClass(Modal, getLocale);
     return {

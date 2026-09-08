@@ -24,6 +24,7 @@ export interface CloudCatalogTabActions {
   readonly onCopyCatalogFilename: (catalogId: string) => void;
   readonly onCopyCatalogPath: (catalogId: string) => void;
   readonly onOpenBaidu: () => void;
+  readonly onOpenCatalogDetail: (catalogId: string) => void;
   readonly onSelectCatalogRecord?: (catalogId: string) => void;
   readonly onSetCatalogFiltersExpanded?: (expanded: boolean) => void;
 }
@@ -321,15 +322,7 @@ const appendResults = (
     item.dataset.catalogResult = record.catalogId;
     item.classList.toggle("is-selected", options.selectedCatalogId === record.catalogId);
     appendIdentity(item, record, options.i18n);
-    const select = parent.ownerDocument.createElement("button");
-    select.type = "button";
-    select.dataset.action = "select-catalog-record";
-    select.dataset.focusKey = `catalog-select-${record.catalogId}`;
-    select.textContent = options.i18n.t("catalog.select.record");
-    select.setAttribute("aria-pressed", String(options.selectedCatalogId === record.catalogId));
-    select.addEventListener("click", () => actions.onSelectCatalogRecord?.(record.catalogId));
-    item.append(select);
-    appendCopyActions(item, record, actions, options.i18n);
+    appendDetails(item, record, actions, options);
     list.append(item);
   }
   parent.append(list);
@@ -337,25 +330,26 @@ const appendResults = (
 
 const appendDetails = (
   parent: HTMLElement,
-  model: CloudCatalogViewModel,
+  record: CatalogDisplayItem,
   actions: CloudCatalogTabActions,
   options: CloudCatalogTabOptions,
 ): void => {
-  const record = model.items.find((item) => item.catalogId === options.selectedCatalogId);
-  const details = parent.ownerDocument.createElement("aside");
-  details.className = "knowledge-workbench__catalog-details";
+  const details = parent.ownerDocument.createElement("details");
+  details.className = "knowledge-workbench__catalog-disclosure";
+  details.dataset.catalogDisclosure = record.catalogId;
+  details.dataset.catalogDetails = record.catalogId;
+  details.open = options.selectedCatalogId === record.catalogId;
+  const summary = parent.ownerDocument.createElement("summary");
+  summary.dataset.action = "open-catalog-detail";
+  summary.dataset.focusKey = `catalog-select-${record.catalogId}`;
+  summary.textContent = options.i18n.t("catalog.select.record");
+  summary.addEventListener("click", () => {
+    if (!details.open) actions.onOpenCatalogDetail(record.catalogId);
+  });
+  const content = parent.ownerDocument.createElement("div");
+  content.className = "knowledge-workbench__catalog-disclosure-content";
   const heading = parent.ownerDocument.createElement("h3");
   heading.textContent = options.i18n.t("catalog.details.title");
-  details.append(heading);
-  if (record === undefined) {
-    details.dataset.catalogDetailsEmpty = "true";
-    const empty = parent.ownerDocument.createElement("p");
-    empty.textContent = options.i18n.t("catalog.details.empty");
-    details.append(empty);
-    parent.append(details);
-    return;
-  }
-  details.dataset.catalogDetails = record.catalogId;
   const filename = parent.ownerDocument.createElement("strong");
   filename.textContent = record.filename;
   const description = parent.ownerDocument.createElement("dl");
@@ -376,8 +370,9 @@ const appendDetails = (
     dd.textContent = value;
     description.append(dt, dd);
   }
-  details.append(filename, description);
-  appendCopyActions(details, record, actions, options.i18n);
+  content.append(heading, filename, description);
+  appendCopyActions(content, record, actions, options.i18n);
+  details.append(summary, content);
   parent.append(details);
 };
 
@@ -412,7 +407,7 @@ export function renderCloudCatalogTab(
   open.dataset.action = "open-baidu";
   open.textContent = i18n.t("catalog.openCloud");
   open.addEventListener("click", actions.onOpenBaidu);
-  header.append(heading, summary, open);
+  header.append(heading, summary);
 
   const searchRegion = doc.createElement("div");
   searchRegion.className = "knowledge-workbench__catalog-search";
@@ -428,7 +423,7 @@ export function renderCloudCatalogTab(
   const notice = doc.createElement("p");
   notice.className = "knowledge-workbench__catalog-notice";
   notice.textContent = i18n.t("catalog.indexNotice");
-  searchRegion.append(notice);
+  searchRegion.append(notice, open);
 
   const filters = doc.createElement("div");
   filters.className = "knowledge-workbench__catalog-filters";
@@ -450,11 +445,10 @@ export function renderCloudCatalogTab(
     empty.textContent = stateMessage;
     section.append(empty);
   } else {
-    const body = doc.createElement("div");
-    body.className = "knowledge-workbench__catalog-body";
-    appendResults(body, model, actions, options);
-    appendDetails(body, model, actions, options);
-    section.append(body);
+    const flow = doc.createElement("div");
+    flow.className = "knowledge-workbench__catalog-flow";
+    appendResults(flow, model, actions, options);
+    section.append(flow);
   }
 
   const pageCount = model.total === 0 ? 1 : Math.ceil(model.total / model.pageSize);

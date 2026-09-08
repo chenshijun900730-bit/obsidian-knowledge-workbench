@@ -3,6 +3,10 @@ import { CatalogError, type CatalogErrorCode } from "../catalog/catalog-types";
 
 export type CatalogInitializationErrorCode = CatalogErrorCode | "catalog-unavailable";
 
+export interface CatalogAuthorityBootstrap {
+  initializeCatalog(): Promise<void>;
+}
+
 const fixedErrorCode = (error: unknown): CatalogInitializationErrorCode =>
   error instanceof CatalogError ? error.code : "catalog-unavailable";
 
@@ -15,11 +19,14 @@ export async function refreshCatalogProjection(catalog: CloudCatalogRuntime): Pr
 }
 
 export function startCatalogInitialization(
-  catalog: CloudCatalogRuntime,
+  target: CloudCatalogRuntime | CatalogAuthorityBootstrap,
   report: (code: CatalogInitializationErrorCode) => void,
 ): void {
   try {
-    void catalog.initialize().catch((error: unknown) => report(fixedErrorCode(error)));
+    const initialize = "initializeCatalog" in target
+      ? target.initializeCatalog.bind(target)
+      : target.initialize.bind(target);
+    void initialize().catch((error: unknown) => report(fixedErrorCode(error)));
   } catch (error) {
     report(fixedErrorCode(error));
   }

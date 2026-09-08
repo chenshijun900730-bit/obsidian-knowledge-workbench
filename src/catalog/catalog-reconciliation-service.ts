@@ -1,9 +1,15 @@
+import { createHash } from "node:crypto";
 import { normalizeCloudAbsolutePath } from "./catalog-path";
 import type { CloudCatalogRecord } from "./catalog-types";
+import {
+  decodeCloudVerificationAuthority,
+  type CloudVerificationAuthority,
+} from "./cloud-verification-scope";
 import {
   decodeCatalogDifferenceRecord,
   decodeTxtCandidateRecord,
   decodeUnifiedCatalogRecord,
+  encodeCatalogOverlayDescriptor,
   encodeCatalogDifferenceRecordLine,
   encodeTxtCandidateRecordLine,
   encodeUnifiedCatalogRecordLine,
@@ -19,6 +25,7 @@ import {
 } from "./hybrid-catalog-types";
 
 export interface CatalogReconciliationInput {
+  readonly authority: CloudVerificationAuthority;
   readonly sourceImportSha256: string;
   readonly topLevelGroupId: string;
   readonly cloudRoot: string;
@@ -84,6 +91,7 @@ const validatedDifference = (record: CatalogDifferenceRecordV1): CatalogDifferen
 
 const cloneResult = (result: CatalogReconciliationResult): CatalogReconciliationResult => ({
   ...result,
+  verificationScope: { ...result.verificationScope },
   records: result.records.map((record) => ({
     ...record,
     isbnCandidates: [...record.isbnCandidates],
@@ -93,6 +101,72 @@ const cloneResult = (result: CatalogReconciliationResult): CatalogReconciliation
   differences: result.differences.map((difference) => ({ ...difference })),
   supersededCatalogIds: [...result.supersededCatalogIds],
 });
+
+const descriptorSha256 = (overlay: ActiveCatalogOverlay): string => createHash("sha256")
+  .update(`${encodeCatalogOverlayDescriptor(overlay.descriptor)}\n`)
+  .digest("hex");
+
+const trustedOverlayTier = (
+  overlay: ActiveCatalogOverlay,
+  authority: Extract<CloudVerificationAuthority, Readonly<{ kind: "scoped" }>>,
+): 1 | 2 | null => {
+  const descriptor = overlay.descriptor;
+  if (descriptor.sourceImportSha256 !== authority.scope.sourceImportSha256) return null;
+  if (descriptor.schemaVersion === 2) {
+    if (
+      descriptor.verificationGeneration !== authority.scope.generation
+      || descriptor.cloudRootSha256 !== authority.scope.cloudRootSha256
+    ) return null;
+    descriptorSha256(overlay);
+    return 2;
+  }
+  const allowlisted = authority.legacyAllowlist?.overlays.find((value) => (
+    value.overlayId === descriptor.overlayId
+    && value.groupKey === descriptor.topLevelGroupId
+  ));
+  if (allowlisted === undefined || allowlisted.descriptorSha256 !== descriptorSha256(overlay)) {
+    return null;
+  }
+  return 1;
+};
+
+const trustedOverlays = (
+  values: readonly ActiveCatalogOverlay[],
+  authority: Extract<CloudVerificationAuthority, Readonly<{ kind: "scoped" }>>,
+): readonly ActiveCatalogOverlay[] => {
+  const winners = new Map<string, Readonly<{
+    overlay: ActiveCatalogOverlay;
+    tier: 1 | 2;
+  }>>();
+  for (const overlay of values) {
+    const tier = trustedOverlayTier(overlay, authority);
+    if (tier === null) continue;
+    const prior = winners.get(overlay.descriptor.topLevelGroupId);
+    if (
+      prior === undefined
+      || tier > prior.tier
+      || (
+        tier === prior.tier
+        && (
+          overlay.descriptor.completedAt > prior.overlay.descriptor.completedAt
+          || (
+            overlay.descriptor.completedAt === prior.overlay.descriptor.completedAt
+            && fixedCompare(
+              overlay.descriptor.overlayId,
+              prior.overlay.descriptor.overlayId,
+            ) > 0
+          )
+        )
+      )
+    ) winners.set(overlay.descriptor.topLevelGroupId, { overlay, tier });
+  }
+  return [...winners.values()]
+    .map((value) => value.overlay)
+    .sort((left, right) => (
+      left.descriptor.completedAt - right.descriptor.completedAt
+      || fixedCompare(left.descriptor.overlayId, right.descriptor.overlayId)
+    ));
+};
 
 const cloudRelativePath = (
   root: string,
@@ -195,6 +269,16 @@ const differenceFor = (
 export class CatalogReconciliationService {
   reconcile(input: CatalogReconciliationInput): CatalogReconciliationResult {
     if (!input.complete) return invalidBatch();
+    let authority: CloudVerificationAuthority;
+    try {
+      authority = decodeCloudVerificationAuthority(input.authority);
+    } catch {
+      return invalidBatch();
+    }
+    if (
+      authority.kind !== "scoped"
+      || authority.scope.sourceImportSha256 !== input.sourceImportSha256
+    ) return invalidBatch();
     if (
       !HASH_PATTERN.test(input.sourceImportSha256)
       || !GROUP_PATTERN.test(input.topLevelGroupId)
@@ -225,12 +309,7 @@ export class CatalogReconciliationService {
       candidateById.set(value.candidateId, value);
     }
 
-    const overlays = input.activeOverlays
-      .filter((value) => value.descriptor.sourceImportSha256 === input.sourceImportSha256)
-      .sort((left, right) => (
-        left.descriptor.completedAt - right.descriptor.completedAt
-        || fixedCompare(left.descriptor.overlayId, right.descriptor.overlayId)
-      ));
+    const overlays = trustedOverlays(input.activeOverlays, authority);
     const globalPriorByFsId = new Map<string, UnifiedCatalogRecordV1>();
     const currentPriorByCandidateId = new Map<string, UnifiedCatalogRecordV1>();
     const globalCompletedAt = new Map<string, number>();
@@ -342,6 +421,7 @@ export class CatalogReconciliationService {
     records.sort(recordCompare);
     differences.sort(differenceCompare);
     return cloneResult({
+      verificationScope: { ...authority.scope },
       sourceImportSha256: input.sourceImportSha256,
       topLevelGroupId: input.topLevelGroupId,
       completedAt: input.completedAt,

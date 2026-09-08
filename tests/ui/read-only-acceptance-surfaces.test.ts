@@ -20,9 +20,13 @@ import {
 import {
   renderWorkbench,
   type WorkbenchActions,
-  type WorkbenchTab,
+  type WorkbenchRoute,
   type WorkbenchViewModel,
 } from "../../src/ui/workbench-view";
+import { TEST_NEEDS_TXT_WORKFLOW } from "../helpers/ui-fixtures";
+import { UnifiedCatalogSearchService } from "../../src/catalog/unified-catalog-search-service";
+import type { UnifiedCatalogRecordV1 } from "../../src/catalog/hybrid-catalog-types";
+import { NORMAL_RUNTIME_POLICY } from "../../src/runtime/safety-policy";
 
 const ACCEPTANCE_BANNER = "Read-only acceptance build. Quick Capture, organization writes, Undo, and AI are unavailable. Derived index data is stored in the plugin's data file.";
 const ZH_ACCEPTANCE_BANNER = "只读验收版本。快速记录、整理写入、撤销和 AI 均不可用。派生索引数据保存在插件数据文件中。";
@@ -59,10 +63,10 @@ const previewOperation = {
   targetPath: "Generated/B.md",
 };
 
-const modelFor = (activeTab: WorkbenchTab): WorkbenchViewModel => ({
+const modelFor = (route: WorkbenchRoute): WorkbenchViewModel => ({
   locale: "zh-CN",
   status: "ready",
-  activeTab,
+  route,
   startSection: "overview",
   catalog: {
     status: "unavailable",
@@ -84,6 +88,12 @@ const modelFor = (activeTab: WorkbenchTab): WorkbenchViewModel => ({
     items: [],
     messageCode: "catalog-unavailable",
   },
+  pendingCatalogTxt: null,
+  taskActionPending: false,
+  taskActionRevision: 1,
+  taskPauseRequested: false,
+  boundLibraryPath: null,
+  workflow: TEST_NEEDS_TXT_WORKFLOW,
   verificationRoot: "",
   verificationRootLocked: false,
   selectedVerificationGroupKeys: [],
@@ -137,7 +147,7 @@ const modelFor = (activeTab: WorkbenchTab): WorkbenchViewModel => ({
 const workbenchActions = (
   overrides: Partial<WorkbenchActions> = {},
 ): WorkbenchActions => ({
-  onSelectTab: vi.fn(),
+  onSelectRoute: vi.fn(),
   onSelectStartSection: vi.fn(),
   onSelectTodayFilter: vi.fn(),
   onSelectMapFilter: vi.fn(),
@@ -179,6 +189,11 @@ const workbenchActions = (
   onStartSelectedVerification: vi.fn(async () => undefined),
   onResumeSelectedVerification: vi.fn(async () => undefined),
   onCancelSelectedVerification: vi.fn(),
+  onTaskPrimary: vi.fn(),
+  onTaskChooseDifferentCategory: vi.fn(),
+  onTaskSaveCategorySelection: vi.fn(),
+  onTaskCancelCategorySelection: vi.fn(),
+  onTaskOpenDetails: vi.fn(),
   ...overrides,
 });
 
@@ -240,6 +255,10 @@ const acceptanceSettings = (): PluginSettings => Object.defineProperties({
   folderRules: [],
   excludedPrefixes: ["Generated/Archive"],
   recentCloudDirectories: EMPTY_RECENT_CLOUD_DIRECTORIES,
+  boundCloudLibrary: null,
+  cloudVerificationGeneration: 0,
+  verificationBatchTombstones: { schemaVersion: 1, state: "valid", batchIds: [] } as const,
+  legacyVerificationAdoption: { schemaVersion: 1, state: "none" } as const,
 }, {
   writeEnabled: { get: () => { throw new Error("must not inspect writeEnabled"); } },
   writePreviewAcknowledged: {
@@ -257,6 +276,66 @@ afterEach(() => {
 });
 
 describe("read-only acceptance surfaces", () => {
+  it("bounds a 100,000-candidate synthetic index to 50 DOM rows without a timing benchmark", () => {
+    const candidates: UnifiedCatalogRecordV1[] = Array.from({ length: 100_000 }, (_, index) => ({
+      schemaVersion: 1,
+      catalogId: `txt:${index}`,
+      candidateId: `txt:${index}`,
+      fsId: null,
+      relativePath: `Synthetic/Book-${String(index).padStart(6, "0")}.pdf`,
+      cloudPath: null,
+      filename: `Book-${String(index).padStart(6, "0")}.pdf`,
+      title: `Book-${index}`,
+      isbnCandidates: [],
+      sizeBytes: null,
+      serverModifiedAt: null,
+      topLevelGroupId: `group:${"1".repeat(64)}`,
+      hierarchyTags: ["folder/Synthetic"],
+      verificationStatus: "unverified",
+      differenceKinds: [],
+      visibleByDefault: true,
+    }));
+    const search = new UnifiedCatalogSearchService(candidates);
+    const root = testDiv();
+    const actions = workbenchActions();
+    for (const policy of [NORMAL_RUNTIME_POLICY, READ_ONLY_ACCEPTANCE_POLICY]) {
+      for (const offset of [0, 50_000, 99_950]) {
+        const page = search.query({ text: "Synthetic", offset, limit: 50 });
+        expect(page.total).toBe(100_000);
+        expect(page.items).toHaveLength(50);
+        const model = modelFor({ tab: "library" });
+        renderWorkbench(root, {
+          ...model,
+          catalog: {
+            ...model.catalog,
+            status: "ready",
+            source: "unified",
+            pdfCount: page.total,
+            total: page.total,
+            page: offset / 50,
+            items: page.items.map((record) => ({
+              catalogId: record.catalogId,
+              filename: record.filename,
+              pathLabel: record.relativePath,
+              cloudPathAvailable: false,
+              verificationStatus: record.verificationStatus,
+              differenceKinds: record.differenceKinds,
+              hierarchyTags: record.hierarchyTags,
+            })),
+          },
+        }, actions, policy);
+        const rows = root.querySelectorAll<HTMLElement>("[data-catalog-result]");
+        expect(rows).toHaveLength(50);
+        expect(Array.from(rows, (row) => row.dataset.catalogResult))
+          .toEqual(page.items.map((record) => record.catalogId));
+        expect(root.querySelector('[data-catalog-search="true"]')).not.toBeNull();
+      }
+    }
+    expect(actions.onOpenBaidu).not.toHaveBeenCalled();
+    expect(actions.onStartSelectedVerification).not.toHaveBeenCalled();
+    expect(actions.onQuickCapture).not.toHaveBeenCalled();
+  });
+
   it.each([
     [
       "zh-CN",
@@ -277,7 +356,10 @@ describe("read-only acceptance surfaces", () => {
     settingsNotice,
   ) => {
     const root = testDiv();
-    renderWorkbench(root, { ...modelFor("settings"), locale }, workbenchActions(), READ_ONLY_ACCEPTANCE_POLICY);
+    renderWorkbench(root, {
+      ...modelFor({ tab: "more", page: "privacy-ai" }),
+      locale,
+    }, workbenchActions(), READ_ONLY_ACCEPTANCE_POLICY);
     const banner = root.querySelector<HTMLElement>('[data-acceptance-banner="true"]')!;
     expect(banner.textContent).toBe(bannerText);
     expect(banner.getAttribute("aria-label")).toBe(ariaLabel);
@@ -290,7 +372,9 @@ describe("read-only acceptance surfaces", () => {
     const quickCapture = vi.fn();
     const ai = vi.fn();
     const previewSelected = vi.fn();
+    const selectRoute = vi.fn();
     const actions = workbenchActions({
+      onSelectRoute: selectRoute,
       onQuickCapture: quickCapture,
       onPreviewSuggestionIds: previewSelected,
       onSummarize: ai,
@@ -299,8 +383,14 @@ describe("read-only acceptance surfaces", () => {
       onSuggestLabels: ai,
     });
 
-    for (const tab of ["workbench", "verification", "history", "settings"] as const) {
-      renderWorkbench(root, modelFor(tab), actions, READ_ONLY_ACCEPTANCE_POLICY);
+    for (const route of [
+      { tab: "library" },
+      { tab: "more", page: "knowledge-tools" },
+      { tab: "task", page: "overview" },
+      { tab: "more", page: "history" },
+      { tab: "more", page: "overview" },
+    ] as const satisfies readonly WorkbenchRoute[]) {
+      renderWorkbench(root, modelFor(route), actions, READ_ONLY_ACCEPTANCE_POLICY);
       const banners = root.querySelectorAll<HTMLElement>('[data-acceptance-banner="true"]');
       expect(banners).toHaveLength(1);
       expect(banners[0]?.textContent).toBe(ZH_ACCEPTANCE_BANNER);
@@ -309,7 +399,21 @@ describe("read-only acceptance surfaces", () => {
         "只读验收模式已启用",
       );
       expect(root.querySelector(".knowledge-workbench__shell")).not.toBeNull();
+      if (route.tab === "library") {
+        expect(root.querySelector('[data-library-recent="true"]')).toBeNull();
+        expect(root.querySelector('[data-catalog-search="true"]')).not.toBeNull();
+        expect(selectRoute).not.toHaveBeenCalled();
+        root.querySelector<HTMLButtonElement>('[data-action="open-library-task"]')?.click();
+        expect(selectRoute).toHaveBeenCalledWith({ tab: "task", page: "overview" });
+      } else if (route.tab === "task") {
+        expect(root.querySelectorAll("[data-task-primary]")).toHaveLength(1);
+        expect(root.querySelector("[data-task-primary]")?.textContent).toBe("去文库搜索");
+        expect(root.textContent).not.toContain("选择目录 TXT");
+      }
     }
+
+    expect(actions.onSearchCatalog).not.toHaveBeenCalled();
+    expect(actions.onOpenBaidu).not.toHaveBeenCalled();
 
     const css = readFileSync(resolve(process.cwd(), "styles.css"), "utf8");
     expect(css).toMatch(/\.knowledge-workbench__acceptance-banner\s*\{[^}]*border:\s*2px solid/su);
@@ -317,7 +421,10 @@ describe("read-only acceptance surfaces", () => {
     expect(css).toMatch(/\.knowledge-workbench__acceptance-banner\s*\{[^}]*font-weight:\s*600/su);
     expect(css).toMatch(/\.knowledge-workbench--read-only-acceptance button:disabled/u);
 
-    renderWorkbench(root, modelFor("workbench"), actions, READ_ONLY_ACCEPTANCE_POLICY);
+    renderWorkbench(root, modelFor({
+      tab: "more",
+      page: "knowledge-tools",
+    }), actions, READ_ONLY_ACCEPTANCE_POLICY);
     const capture = root.querySelector<HTMLButtonElement>('[data-action="quick-capture"]');
     expect(capture).toBeNull();
     expect(quickCapture).not.toHaveBeenCalled();
@@ -326,7 +433,7 @@ describe("read-only acceptance surfaces", () => {
     expect(ai).not.toHaveBeenCalled();
 
     renderWorkbench(root, {
-      ...modelFor("workbench"),
+      ...modelFor({ tab: "more", page: "knowledge-tools" }),
       startSection: "suggestions",
     }, actions, READ_ONLY_ACCEPTANCE_POLICY);
     const checkbox = root.querySelector<HTMLInputElement>(

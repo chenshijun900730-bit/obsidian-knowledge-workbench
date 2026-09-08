@@ -18,6 +18,10 @@ const KNOWN_SETTING_KEYS = new Set([
   "aiEndpoint",
   "aiModel",
   "secretId",
+  "boundCloudLibrary",
+  "cloudVerificationGeneration",
+  "verificationBatchTombstones",
+  "legacyVerificationAdoption",
 ]);
 const TOP_LEVEL_KEYS = ["schemaVersion", "settings", "activeIndex", "staging", "operational"];
 const ACTIVE_INDEX_KEYS = ["builtAt", "records"];

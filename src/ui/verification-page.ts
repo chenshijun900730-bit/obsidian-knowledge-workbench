@@ -8,12 +8,13 @@ import {
   type CatalogMessageCode,
   type VerificationActionMessageCode,
 } from "./catalog-message-presenter";
-import { presentCatalogStopReason } from "./catalog-stop-reason-presenter";
 import { connectionCanVerify } from "./verification-connection-semantics";
 import { normalizeCatalogScanRoot } from "../catalog/catalog-path";
 import {
   createCloudDirectoryField,
 } from "./cloud-directory-field";
+import { renderVerificationProgress } from "./verification-progress";
+import type { CloudDirectorySelection } from "../catalog/cloud-directory-selection";
 
 export { connectionCanVerify } from "./verification-connection-semantics";
 
@@ -23,15 +24,18 @@ export interface VerificationPageActions {
   readonly onStart: () => Promise<void>;
   readonly onResume: () => Promise<void>;
   readonly onCancel: () => void;
-  readonly onBrowseRoot?: () => Promise<string | null>;
+  readonly onBrowseRoot?: () => Promise<CloudDirectorySelection | null>;
+  readonly onDirectorySelection: (selection: CloudDirectorySelection) => void;
 }
 
 export interface VerificationPageModel {
   readonly i18n: WorkbenchI18n;
   readonly rootPath: string;
+  readonly directorySelection?: CloudDirectorySelection;
   readonly rootLocked: boolean;
   readonly selectedGroupKeys: readonly string[];
   readonly actionMessageCode?: VerificationActionMessageCode;
+  readonly runDetailsOpen?: boolean;
   readonly connection?: CloudCatalogConnectionViewModel;
   readonly hybrid?: HybridCatalogViewModel;
   readonly actions: VerificationPageActions;
@@ -39,6 +43,23 @@ export interface VerificationPageModel {
 
 export interface VerificationPageSurface {
   dispose(): void;
+}
+
+export interface VerificationCategoryEditorModel {
+  readonly i18n: WorkbenchI18n;
+  readonly groups: NonNullable<HybridCatalogViewModel["active"]>["groups"];
+  readonly selectedGroupKeys: readonly string[];
+  readonly rootPath: string;
+  /** The bound library API parent. A manual child path must never become actionable. */
+  readonly expectedRootPath: string;
+}
+
+export interface VerificationCategoryEditorActions {
+  readonly onSave: (input: Readonly<{
+    rootPath: string;
+    groupKeys: readonly string[];
+  }>) => void;
+  readonly onCancel: () => void;
 }
 
 const stateKey = (hybrid: HybridCatalogViewModel | undefined): WorkbenchMessageKey => {
@@ -107,6 +128,161 @@ const renderMessage = (
   nextAction.textContent = presentation.nextAction;
   article.append(title, preservation, nextAction);
   return article;
+};
+
+export const renderVerificationCategoryEditor = (
+  root: HTMLElement,
+  model: VerificationCategoryEditorModel,
+  actions: VerificationCategoryEditorActions,
+): VerificationPageSurface => {
+  const doc = root.ownerDocument;
+  const maximum = LARGE_CATALOG_RUN_BUDGET.maxSelectedTopLevelGroups;
+  const available = new Set(model.groups.map((group) => group.groupKey));
+  const initial = model.selectedGroupKeys.filter((key) => available.has(key)).slice(0, maximum);
+  const selected = new Set(initial.length > 0
+    ? initial
+    : model.groups.length > 0 ? [model.groups[0]!.groupKey] : []);
+  let disposed = false;
+  let rootPath = model.rootPath;
+
+  root.replaceChildren();
+  root.className = "knowledge-workbench__category-page";
+  const heading = doc.createElement("h2");
+  heading.textContent = model.i18n.t("task.category.title");
+  const hint = doc.createElement("p");
+  hint.className = "knowledge-workbench__category-hint";
+  hint.textContent = model.i18n.t("task.category.hint");
+  root.append(heading, hint);
+
+  const single = doc.createElement("fieldset");
+  single.className = "knowledge-workbench__category-single";
+  const legend = doc.createElement("legend");
+  legend.textContent = model.i18n.t("task.category.single");
+  single.append(legend);
+
+  const radios = new Map<string, HTMLInputElement>();
+  const checks = new Map<string, HTMLInputElement>();
+  const sync = (): void => {
+    const one = selected.size === 1 ? [...selected][0] : undefined;
+    for (const [key, radio] of radios) radio.checked = key === one;
+    for (const [key, check] of checks) {
+      check.checked = selected.has(key);
+      check.disabled = !check.checked && selected.size >= maximum;
+    }
+  };
+  for (const group of model.groups) {
+    const label = doc.createElement("label");
+    const radio = doc.createElement("input");
+    radio.type = "radio";
+    radio.name = "knowledge-workbench-task-category";
+    radio.value = group.groupKey;
+    radio.dataset.taskCategoryRadio = group.groupKey;
+    radio.addEventListener("change", () => {
+      if (!radio.checked || disposed) return;
+      selected.clear();
+      selected.add(group.groupKey);
+      sync();
+    });
+    const text = doc.createElement("span");
+    text.textContent = model.i18n.t("verification.group.item", {
+      label: group.label,
+      count: model.i18n.number(group.pdfCount),
+      status: model.i18n.t(`settings.status.${group.verificationStatus}`),
+    });
+    label.append(radio, text);
+    single.append(label);
+    radios.set(group.groupKey, radio);
+  }
+  root.append(single);
+
+  const advanced = doc.createElement("details");
+  advanced.className = "knowledge-workbench__category-advanced";
+  advanced.dataset.taskCategoryAdvanced = "true";
+  advanced.open = selected.size > 1;
+  const advancedSummary = doc.createElement("summary");
+  advancedSummary.textContent = model.i18n.t("task.category.advanced");
+  const advancedHint = doc.createElement("p");
+  advancedHint.textContent = model.i18n.t("task.category.advancedHint", { maximum });
+  const pathLabel = doc.createElement("label");
+  pathLabel.textContent = model.i18n.t("task.category.parent");
+  const pathInput = doc.createElement("input");
+  pathInput.type = "text";
+  pathInput.value = rootPath;
+  pathInput.dataset.taskCategoryRoot = "true";
+  pathInput.addEventListener("input", () => { rootPath = pathInput.value; });
+  pathLabel.append(pathInput);
+  const multi = doc.createElement("div");
+  multi.className = "knowledge-workbench__category-multiple";
+  for (const group of model.groups) {
+    const label = doc.createElement("label");
+    const check = doc.createElement("input");
+    check.type = "checkbox";
+    check.dataset.taskCategoryCheck = group.groupKey;
+    check.addEventListener("change", () => {
+      if (disposed) return;
+      if (check.checked) {
+        if (selected.size < maximum) selected.add(group.groupKey);
+      } else {
+        selected.delete(group.groupKey);
+      }
+      sync();
+    });
+    const text = doc.createElement("span");
+    text.textContent = model.i18n.t("verification.group.item", {
+      label: group.label,
+      count: model.i18n.number(group.pdfCount),
+      status: model.i18n.t(`settings.status.${group.verificationStatus}`),
+    });
+    label.append(check, text);
+    multi.append(label);
+    checks.set(group.groupKey, check);
+  }
+  advanced.append(advancedSummary, advancedHint, pathLabel, multi);
+  root.append(advanced);
+
+  const error = doc.createElement("p");
+  error.className = "knowledge-workbench__category-error";
+  error.setAttribute("role", "status");
+  const actionsRow = doc.createElement("div");
+  actionsRow.className = "knowledge-workbench__category-actions";
+  const back = doc.createElement("button");
+  back.type = "button";
+  back.dataset.focusKey = "task-category-cancel";
+  back.textContent = model.i18n.t("task.category.cancel");
+  back.addEventListener("click", actions.onCancel);
+  const save = doc.createElement("button");
+  save.type = "button";
+  save.className = "mod-cta";
+  save.dataset.taskCategorySave = "true";
+  save.dataset.focusKey = "task-category-save";
+  save.textContent = model.i18n.t("task.category.save");
+  save.addEventListener("click", () => {
+    if (disposed) return;
+    if (selected.size === 0) {
+      error.textContent = model.i18n.t("task.category.required");
+      return;
+    }
+    try {
+      if (
+        normalizeCatalogScanRoot(rootPath)
+        !== normalizeCatalogScanRoot(model.expectedRootPath)
+      ) {
+        error.textContent = model.i18n.t("task.category.parentInvalid");
+        return;
+      }
+    } catch {
+      error.textContent = model.i18n.t("task.category.parentInvalid");
+      return;
+    }
+    actions.onSave({ rootPath, groupKeys: [...selected] });
+  });
+  actionsRow.append(back, save);
+  root.append(error, actionsRow);
+  sync();
+
+  return {
+    dispose(): void { disposed = true; },
+  };
 };
 
 export function renderVerificationPage(
@@ -207,10 +383,18 @@ export function renderVerificationPage(
   };
   const directoryField = createCloudDirectoryField(doc, i18n, {
     path: rootPathDraft,
+    selection: model.directorySelection,
     disabled: busy,
     locked: model.rootLocked,
   }, {
     onChoose: actions.onBrowseRoot ?? (async () => null),
+    onSelection: (selection) => {
+      rootPathDraft = selection.effectiveRoot;
+      actions.onDirectorySelection(selection);
+      queueMicrotask(() => {
+        if (!disposed) recomputeActions();
+      });
+    },
     onManualChange: (value) => {
       rootPathDraft = value;
       actions.onRootChange(value);
@@ -268,38 +452,21 @@ export function renderVerificationPage(
   scopeEditor.append(groupTitle, choices);
   root.append(scopeEditor);
 
-  if (batch !== undefined) {
-    const progress = doc.createElement("section");
-    progress.className = "knowledge-workbench__verification-progress";
-    const counts = doc.createElement("p");
-    counts.textContent = i18n.t("verification.batch.counts", {
-      pdf: i18n.number(batch.pdfCount),
-      directory: i18n.number(batch.directoryCount),
-      remaining: i18n.number(batch.remainingGroupCount),
-    });
-    const requests = doc.createElement("p");
-    requests.textContent = i18n.t("verification.batch.requests", {
-      current: i18n.number(batch.listRequestCount),
-      cumulative: i18n.number(batch.cumulativeListRequestCount),
-    });
-    progress.append(counts, requests);
-    if (batch.stopReason !== null && !busy && !currentConnectionFault) {
-      const stop = doc.createElement("p");
-      stop.textContent = i18n.t("verification.batch.stop", {
-        reason: presentCatalogStopReason(batch.stopReason, i18n),
-      });
-      progress.append(stop);
-    }
-    if (
-      batch.resumeAvailable
-      && (model.hybrid?.status === "paused" || model.hybrid?.status === "partial")
-      && !currentConnectionFault
-    ) {
-      const preserved = doc.createElement("p");
-      preserved.textContent = i18n.t("verification.checkpoint.preserved");
-      progress.append(preserved);
-    }
-    root.append(progress);
+  if (active !== undefined && batch !== undefined) {
+    const currentGroupLabel = active.groups.find(
+      (group) => group.groupKey === batch.currentGroupKey,
+    )?.label ?? null;
+    const progressBatch = busy || currentConnectionFault
+      ? { ...batch, stopReason: null }
+      : batch;
+    root.append(renderVerificationProgress(doc, {
+      active,
+      batch: progressBatch,
+      busy,
+      currentGroupLabel,
+      detailsOpen: model.runDetailsOpen ?? false,
+      i18n,
+    }));
   }
 
   const actionRow = doc.createElement("div");
@@ -308,7 +475,7 @@ export function renderVerificationPage(
     const cancel = doc.createElement("button");
     cancel.type = "button";
     cancel.dataset.action = "cancel-verification";
-    cancel.textContent = i18n.t("verification.action.cancel");
+    cancel.textContent = i18n.t("verification.action.pause");
     cancel.addEventListener("click", () => {
       actions.onCancel();
       const requested = doc.createElement("p");

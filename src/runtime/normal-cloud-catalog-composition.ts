@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { isAbsolute, join, parse, resolve } from "node:path";
 import { BaiduCatalogSourceAdapter } from "../adapters/baidu-catalog-source-adapter";
@@ -17,6 +17,7 @@ import { CatalogTxtParser } from "../catalog/catalog-txt-parser";
 import { SMALL_ACCEPTANCE_CATALOG_SCAN_BUDGET } from "../catalog/catalog-types";
 import { CloudCatalogConnectionRuntimeService } from "../catalog/cloud-catalog-connection-runtime";
 import { CloudDirectoryDiscoveryService } from "../catalog/cloud-directory-discovery-service";
+import { CloudDirectoryBrowserService } from "../catalog/cloud-directory-browser";
 import { CloudDirectoryLocatorService } from "../catalog/cloud-directory-locator";
 import {
   CloudCatalogRuntimeService,
@@ -33,6 +34,11 @@ import type {
 import { HybridCatalogRuntimeService } from "../catalog/hybrid-catalog-runtime";
 import { LargeCatalogVerificationService } from "../catalog/large-catalog-verification-service";
 import { UnifiedCatalogProjectionService } from "../catalog/unified-catalog-projection-service";
+import type { CloudVerificationRootHasher } from "../catalog/cloud-verification-scope";
+
+export const hashNormalCloudVerificationRoot: CloudVerificationRootHasher = (
+  normalizedRoot,
+) => createHash("sha256").update(normalizedRoot, "utf8").digest("hex");
 
 export interface NormalCatalogEnvironment {
   readonly platform: string;
@@ -131,12 +137,12 @@ export const createNormalCloudCatalogRuntime = (
     budget: SMALL_ACCEPTANCE_CATALOG_SCAN_BUDGET,
   });
   const directoryDiscovery = new CloudDirectoryDiscoveryService(baiduSource, { now });
+  const directoryBrowser = new CloudDirectoryBrowserService(baiduSource, { now });
   const directoryLocator = new CloudDirectoryLocatorService(baiduSource, { now });
   const verification = new LargeCatalogVerificationService({
     source: baiduSource,
     store: hybridStore,
     reconcile: reconciliation,
-    project: projection,
     now,
   });
   const hybrid = new HybridCatalogRuntimeService({
@@ -162,6 +168,7 @@ export const createNormalCloudCatalogRuntime = (
     hybrid,
     hybridStore,
     directoryDiscovery,
+    directoryBrowser,
     directoryLocator,
   );
   return runtime;

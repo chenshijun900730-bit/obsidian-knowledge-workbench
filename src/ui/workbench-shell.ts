@@ -1,25 +1,32 @@
 import type { CloudCatalogConnectionViewModel } from "../catalog/cloud-catalog-runtime";
-import type { WorkbenchI18n, WorkbenchLocale } from "../i18n/workbench-i18n";
+import type { WorkbenchI18n, WorkbenchLocale, WorkbenchMessageKey } from "../i18n/workbench-i18n";
+import type { WorkbenchTab } from "./workbench-route";
 
-export type WorkbenchTab =
-  | "workbench"
-  | "cloud-catalog"
-  | "verification"
-  | "history"
-  | "settings";
+export type { WorkbenchTab } from "./workbench-route";
+
+type ConnectionStatus = CloudCatalogConnectionViewModel["status"] | "unavailable";
+
+const CONNECTION_STATUS_KEYS = {
+  unconfigured: "settings.status.unconfigured",
+  configured: "settings.status.configured",
+  authorizing: "settings.status.authorizing",
+  authorized: "settings.status.authorized",
+  scanning: "settings.status.scanning",
+  paused: "settings.status.paused",
+  partial: "settings.status.partial",
+  unavailable: "settings.status.unavailable",
+} as const satisfies Record<ConnectionStatus, WorkbenchMessageKey>;
 
 const NAVIGATION = [
-  { page: "workbench", key: "nav.start", icon: "⌂" },
-  { page: "cloud-catalog", key: "nav.catalog", icon: "▤" },
-  { page: "verification", key: "nav.verification", icon: "✓" },
-  { page: "history", key: "nav.history", icon: "↻" },
-  { page: "settings", key: "nav.settings", icon: "⚙" },
+  { page: "library", key: "nav.library", icon: "⌕" },
+  { page: "task", key: "nav.task", icon: "✓" },
+  { page: "more", key: "nav.more", icon: "•••" },
 ] as const;
 
 export interface WorkbenchShellOptions {
   readonly activePage: WorkbenchTab;
   readonly i18n: WorkbenchI18n;
-  readonly connectionStatus: CloudCatalogConnectionViewModel["status"] | "unavailable";
+  readonly connectionStatus: ConnectionStatus;
   readonly onSelectPage: (page: WorkbenchTab) => void;
   readonly onSetLocale: (locale: WorkbenchLocale) => void;
 }
@@ -61,9 +68,11 @@ export function renderWorkbenchShell(root: HTMLElement, options: WorkbenchShellO
     button.dataset.workbenchIcon = destination.icon;
     button.dataset.focusKey = `page-${destination.page}`;
     if (destination.page === options.activePage) button.setAttribute("aria-current", "page");
+    const navigationLabel = options.i18n.t(destination.key);
+    button.setAttribute("aria-label", navigationLabel);
     const label = doc.createElement("span");
     label.className = "knowledge-workbench__nav-label";
-    label.textContent = options.i18n.t(destination.key);
+    label.textContent = navigationLabel;
     button.append(label);
     button.addEventListener("click", () => options.onSelectPage(destination.page));
     sidebar.append(button);
@@ -106,7 +115,7 @@ export function renderWorkbenchShell(root: HTMLElement, options: WorkbenchShellO
   locale.addEventListener("change", () => options.onSetLocale(locale.value as WorkbenchLocale));
   const connection = doc.createElement("span");
   connection.className = "knowledge-workbench__connection";
-  connection.textContent = options.connectionStatus;
+  connection.textContent = options.i18n.t(CONNECTION_STATUS_KEYS[options.connectionStatus]);
   header.append(localeLabel, locale, connection);
 
   const status = doc.createElement("div");

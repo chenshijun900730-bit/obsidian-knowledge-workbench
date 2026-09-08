@@ -19,6 +19,10 @@ import {
   createWorkbenchI18n,
   type WorkbenchLocaleProvider,
 } from "./i18n/workbench-i18n";
+import type {
+  FolderSelectionHostCapability,
+  FolderSelectionSessionFactoryPort,
+} from "./ui/folder-selection-host";
 
 if (
   __KNOWLEDGE_WORKBENCH_BUILD_MODE__ !== "read-only-acceptance"
@@ -65,6 +69,17 @@ class ReadOnlyAcceptanceSettingsTab extends PluginSettingTab {
   }
 }
 
+const UNAVAILABLE_FOLDER_SELECTION_SESSION_FACTORY: FolderSelectionSessionFactoryPort =
+  Object.freeze({
+    available: false,
+    create: () => { throw new Error("catalog-unavailable"); },
+  });
+
+const UNAVAILABLE_FOLDER_SELECTION_HOST: FolderSelectionHostCapability = Object.freeze({
+  available: false,
+  render: () => ({ dispose: () => undefined }),
+});
+
 // The acceptance composition intentionally omits the normal-only directory picker factory.
 const runtime = Object.freeze({
   policy,
@@ -93,7 +108,12 @@ const runtime = Object.freeze({
     plugin,
     getLocale,
   ),
+  cloudVerificationRootHasher: () => null,
   createCatalog: () => DISABLED_CLOUD_CATALOG_RUNTIME,
+  createFolderSelection: () => Object.freeze({
+    sessionFactory: UNAVAILABLE_FOLDER_SELECTION_SESSION_FACTORY,
+    hostCapability: UNAVAILABLE_FOLDER_SELECTION_HOST,
+  }),
   createCatalogConfirmation: (_app, getLocale) => {
     void getLocale;
     return { request: async () => false };

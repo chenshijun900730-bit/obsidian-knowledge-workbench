@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type { WorkbenchActions, WorkbenchViewModel } from "../../src/ui/workbench-view";
 import type { CloudCatalogRuntime } from "../../src/catalog/cloud-catalog-runtime";
 import { FakeCloudCatalogRuntime } from "../fakes/fake-cloud-catalog-runtime";
@@ -13,7 +14,12 @@ import type { IncrementalIndexQueue } from "../../src/indexing/incremental-index
 import type { IndexService, ScanProgress } from "../../src/indexing/index-service";
 import type { FocusMapInput, FocusedMap, MapSearchResult, MapService } from "../../src/map/map-service";
 import type { PluginDataStore } from "../../src/storage/plugin-data-store";
-import type { OperationalState, PluginSettings } from "../../src/storage/plugin-data";
+import type {
+  CloudVerificationSettings,
+  CloudVerificationTransitionIntent,
+  OperationalState,
+  PluginSettings,
+} from "../../src/storage/plugin-data";
 import { EMPTY_RECENT_CLOUD_DIRECTORIES } from "../../src/storage/recent-cloud-directories";
 import { TodayService } from "../../src/today/today-service";
 import { SuggestionService, type RationaleEnhancer } from "../../src/suggestions/suggestion-service";
@@ -27,6 +33,48 @@ import { ObsidianQuickCaptureAdapter } from "../../src/adapters/obsidian-quick-c
 import type { VaultEvent } from "../../src/core/ports";
 import { FakeVault } from "../fakes/fake-vault";
 import { NORMAL_RUNTIME_POLICY, type RuntimeSafetyPolicy } from "../../src/runtime/safety-policy";
+import { validateCloudDirectorySelection } from "../../src/catalog/cloud-directory-selection";
+import type {
+  HybridCatalogActiveSummary,
+  LargeCatalogBatchSummary,
+} from "../../src/catalog/hybrid-catalog-runtime";
+import type { LibraryWorkflowState } from "../../src/ui/library-workflow-state";
+import type { FolderSelectionSessionFactoryPort } from "../../src/ui/folder-selection-host";
+
+export const TEST_SOURCE_IMPORT_SHA256 = "a".repeat(64);
+export const TEST_CLOUD_VERIFICATION_ROOT_HASHER = (normalizedRoot: string): string => (
+  createHash("sha256").update(normalizedRoot, "utf8").digest("hex")
+);
+
+export const TEST_HYBRID_ACTIVE_AUTHORITY = {
+  sourceImportSha256: TEST_SOURCE_IMPORT_SHA256,
+  legacyArtifactSetSha256: null,
+} as const satisfies Pick<
+  HybridCatalogActiveSummary,
+  "sourceImportSha256" | "legacyArtifactSetSha256"
+>;
+
+export const TEST_LARGE_BATCH_AUTHORITY = {
+  verificationScope: null,
+  legacyPromotionRequired: false,
+  selectedGroupKeys: [`group:${"1".repeat(64)}`],
+} as const satisfies Pick<
+  LargeCatalogBatchSummary,
+  "verificationScope" | "legacyPromotionRequired" | "selectedGroupKeys"
+>;
+
+export const TEST_INACTIVE_HYBRID_EXECUTION = {
+  executionActive: false,
+} as const;
+
+export const TEST_NEEDS_TXT_WORKFLOW = {
+  kind: "needs-txt",
+  primaryAction: "choose-txt",
+  titleKey: "workflow.needsTxt.title",
+  descriptionKey: "workflow.needsTxt.description",
+  recommendedGroup: null,
+  canShowTechnicalDetails: false,
+} as const satisfies LibraryWorkflowState;
 
 /** Structural contract for the production dependency that Task 2 will expose. */
 export interface ProjectionSchedulerDependency {
@@ -110,7 +158,7 @@ export function populatedWorkbenchModel(): WorkbenchViewModel {
   return {
     locale: "zh-CN",
     status: "ready",
-    activeTab: "workbench",
+    route: { tab: "library" },
     startSection: "overview",
     catalog: {
       status: "no-snapshot",
@@ -131,6 +179,12 @@ export function populatedWorkbenchModel(): WorkbenchViewModel {
       total: 0,
       items: [],
     },
+    pendingCatalogTxt: null,
+    taskActionPending: false,
+    taskActionRevision: 1,
+    taskPauseRequested: false,
+    boundLibraryPath: null,
+    workflow: TEST_NEEDS_TXT_WORKFLOW,
     verificationRoot: "",
     verificationRootLocked: false,
     selectedVerificationGroupKeys: [],
@@ -195,7 +249,7 @@ export function populatedWorkbenchModel(): WorkbenchViewModel {
 
 export function noOpWorkbenchActions(overrides: Partial<WorkbenchActions> = {}): WorkbenchActions {
   return {
-    onSelectTab: () => undefined,
+    onSelectRoute: () => undefined,
     onSelectStartSection: () => undefined,
     onSelectTodayFilter: () => undefined,
     onSelectMapFilter: () => undefined,
@@ -237,6 +291,11 @@ export function noOpWorkbenchActions(overrides: Partial<WorkbenchActions> = {}):
     onStartSelectedVerification: async () => undefined,
     onResumeSelectedVerification: async () => undefined,
     onCancelSelectedVerification: () => undefined,
+    onTaskPrimary: () => undefined,
+    onTaskChooseDifferentCategory: () => undefined,
+    onTaskSaveCategorySelection: () => undefined,
+    onTaskCancelCategorySelection: () => undefined,
+    onTaskOpenDetails: () => undefined,
     ...overrides,
   };
 }
@@ -276,6 +335,10 @@ const defaultSettings = (): PluginSettings => ({
   aiModel: "",
   secretId: "",
   recentCloudDirectories: EMPTY_RECENT_CLOUD_DIRECTORIES,
+  boundCloudLibrary: null,
+  cloudVerificationGeneration: 0,
+  verificationBatchTombstones: { schemaVersion: 1, state: "valid", batchIds: [] } as const,
+  legacyVerificationAdoption: { schemaVersion: 1, state: "none" } as const,
 });
 
 const defaultOperational = (): OperationalState => ({ pins: {}, dismissals: {}, lastOpened: {}, journals: [] });
@@ -284,9 +347,15 @@ const detached = <T>(value: T): T => structuredClone(value);
 class FixtureStore {
   failNext: Error | null = null;
   readonly saveSettingsCalls: PluginSettings[] = [];
+  readonly cloudVerificationSettingsCalls: Array<Readonly<{
+    settings: CloudVerificationSettings;
+    transition: CloudVerificationTransitionIntent;
+  }>> = [];
   private settingsValue = defaultSettings();
   private operationalValue = defaultOperational();
   private active: { builtAt: number; records: readonly DocumentRecord[] } | null;
+  private nextCloudVerificationUpdateGate: Promise<void> | null = null;
+  private resumeCloudVerificationUpdateGate: (() => void) | null = null;
 
   constructor(active: boolean, private readonly records: readonly DocumentRecord[] = RECORDS) {
     this.active = active ? { builtAt: 1, records: detached(records) } : null;
@@ -296,16 +365,58 @@ class FixtureStore {
   setSettingsForTest(settings: PluginSettings): void { this.settingsValue = detached(settings); }
   operational(): OperationalState { return detached(this.operationalValue); }
   activeIndex(): { builtAt: number; records: readonly DocumentRecord[] } | null { return detached(this.active); }
+  hasActiveIndex(): boolean { return this.active !== null; }
   promoteForTest(): void { this.active = { builtAt: 100, records: detached(this.records) }; }
 
   async saveSettings(settings: PluginSettings): Promise<void> {
     this.saveSettingsCalls.push(detached(settings));
     this.throwIfFailing();
-    this.settingsValue = detached(settings);
+    this.settingsValue = detached({
+      ...settings,
+      ...this.cloudVerificationSettings(),
+    });
   }
 
   async updateSettings(change: (settings: PluginSettings) => PluginSettings): Promise<void> {
     await this.saveSettings(change(this.settings()));
+  }
+
+  pauseNextCloudVerificationUpdate(): void {
+    if (this.nextCloudVerificationUpdateGate !== null) {
+      throw new Error("A cloud verification settings update is already paused");
+    }
+    this.nextCloudVerificationUpdateGate = new Promise<void>((resolve) => {
+      this.resumeCloudVerificationUpdateGate = resolve;
+    });
+  }
+
+  resumeCloudVerificationUpdate(): void {
+    this.resumeCloudVerificationUpdateGate?.();
+    this.resumeCloudVerificationUpdateGate = null;
+  }
+
+  async updateCloudVerificationSettings(
+    settings: CloudVerificationSettings,
+    transition: CloudVerificationTransitionIntent,
+  ): Promise<void> {
+    const expectedCurrent = this.cloudVerificationSettings();
+    const requestedSettings = detached(settings);
+    const requestedTransition = detached(transition);
+    this.cloudVerificationSettingsCalls.push({
+      settings: requestedSettings,
+      transition: requestedTransition,
+    });
+    const gate = this.nextCloudVerificationUpdateGate;
+    this.nextCloudVerificationUpdateGate = null;
+    if (gate !== null) await gate;
+    this.throwIfFailing();
+    if (JSON.stringify(this.cloudVerificationSettings()) !== JSON.stringify(expectedCurrent)) {
+      throw new RangeError("Cloud verification authority changed before the transaction committed");
+    }
+    this.settingsValue = detached({
+      ...this.settingsValue,
+      ...requestedSettings,
+    });
   }
 
   async setPin(id: string, pinnedAt: number | null): Promise<void> {
@@ -337,6 +448,15 @@ class FixtureStore {
     const error = this.failNext;
     this.failNext = null;
     throw error;
+  }
+
+  private cloudVerificationSettings(): CloudVerificationSettings {
+    return detached({
+      boundCloudLibrary: this.settingsValue.boundCloudLibrary,
+      cloudVerificationGeneration: this.settingsValue.cloudVerificationGeneration,
+      verificationBatchTombstones: this.settingsValue.verificationBatchTombstones,
+      legacyVerificationAdoption: this.settingsValue.legacyVerificationAdoption,
+    });
   }
 }
 
@@ -532,11 +652,14 @@ export interface ControllerFixtureOptions {
   readonly catalogConfirmation?: CatalogScanConfirmationPresenter;
   readonly catalogTxtImportConfirmation?: CatalogTxtImportConfirmationPresenter;
   readonly catalogLargeScanConfirmation?: CatalogLargeScanConfirmationPresenter;
+  readonly folderSelectionSessionFactory?: FolderSelectionSessionFactoryPort;
+  readonly pauseCloudVerificationUpdate?: boolean;
 }
 
 export function controllerFixture(options: ControllerFixtureOptions = {}) {
   const records = options.records ?? RECORDS;
   const store = new FixtureStore(options.activeIndex ?? false, records);
+  if (options.pauseCloudVerificationUpdate === true) store.pauseNextCloudVerificationUpdate();
   if (options.historicalWriteEnabled !== undefined || options.historicalAiEnabled !== undefined) {
     store.setSettingsForTest({
       ...store.settings(),
@@ -779,7 +902,12 @@ export function controllerFixture(options: ControllerFixtureOptions = {}) {
     clock,
     ai,
     catalog,
+    cloudVerificationRootHasher: TEST_CLOUD_VERIFICATION_ROOT_HASHER,
     catalogConfirmation,
+    catalogDirectorySelectionValidator: validateCloudDirectorySelection,
+    ...(options.folderSelectionSessionFactory === undefined
+      ? {}
+      : { folderSelectionSessionFactory: options.folderSelectionSessionFactory }),
     ...(options.catalogTxtImportConfirmation === undefined
       ? {}
       : { catalogTxtImportConfirmation: options.catalogTxtImportConfirmation }),

@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import {
   chmod,
   lstat,
@@ -19,6 +20,7 @@ import {
   type HybridAtomicRenamePort,
 } from "../../../src/adapters/local-hybrid-catalog-adapter";
 import type { CandidateImportWriter } from "../../../src/catalog/hybrid-catalog-ports";
+import type { CloudVerificationAuthority } from "../../../src/catalog/cloud-verification-scope";
 import {
   HybridCatalogError,
   type CatalogDifferenceRecordV1,
@@ -30,6 +32,17 @@ import {
 
 const roots: string[] = [];
 const HASH_A = "a".repeat(64);
+const HASH_B = "b".repeat(64);
+const SCOPE = {
+  generation: 1,
+  sourceImportSha256: HASH_A,
+  cloudRootSha256: HASH_B,
+} as const;
+const AUTHORITY: Extract<CloudVerificationAuthority, { kind: "scoped" }> = {
+  kind: "scoped",
+  scope: SCOPE,
+  legacyAllowlist: null,
+};
 
 const temporaryRoot = async (): Promise<string> => {
   const root = await realpath(await mkdtemp(join(tmpdir(), "knowledge-workbench-hybrid-")));
@@ -85,6 +98,7 @@ const overlayInput = (
   differences: readonly CatalogDifferenceRecordV1[] = [],
   completedAt = 200,
 ): CatalogReconciliationResult => ({
+  verificationScope: SCOPE,
   sourceImportSha256: HASH_A,
   topLevelGroupId: candidate().topLevelGroupId,
   completedAt,
@@ -134,6 +148,118 @@ afterEach(async () => {
 });
 
 describe("LocalHybridCatalogAdapter", () => {
+  it("derives local-only authority from the validated active candidate manifest", async () => {
+    const root = await temporaryRoot();
+    const adapter = new LocalHybridCatalogAdapter(root);
+    await expect(adapter.loadLegacyLocalAuthority()).resolves.toBeNull();
+
+    await commit(adapter, "import-authority");
+    const activeManifest = await readFile(
+      join(root, "hybrid", "candidate-active.json"),
+      "utf8",
+    );
+    await expect(adapter.loadLegacyLocalAuthority()).resolves.toEqual({
+      kind: "legacy-local-only",
+      sourceImportSha256: HASH_A,
+      activeManifestSha256: createHash("sha256")
+        .update(activeManifest, "utf8")
+        .digest("hex"),
+    });
+  });
+
+  it("prepares and revalidates an exact detached legacy adoption fingerprint", async () => {
+    const root = await temporaryRoot();
+    const adapter = new LocalHybridCatalogAdapter(root);
+    await commit(adapter, "import-adoption");
+    const activeRaw = await readFile(join(root, "hybrid", "candidate-active.json"), "utf8");
+    const descriptorRaw = await readFile(
+      join(root, "hybrid", "imports", "import-adoption", "receipt.json"),
+      "utf8",
+    );
+
+    const prepared = await adapter.prepareLegacyVerificationAdoption(SCOPE);
+    expect(prepared).toEqual({
+      schemaVersion: 1,
+      state: "adopted",
+      verificationGeneration: 1,
+      sourceImportSha256: HASH_A,
+      cloudRootSha256: HASH_B,
+      candidate: {
+        importId: "import-adoption",
+        manifestSha256: createHash("sha256").update(activeRaw, "utf8").digest("hex"),
+        descriptorSha256: createHash("sha256").update(descriptorRaw, "utf8").digest("hex"),
+      },
+      overlays: [],
+      unified: null,
+      resumableBatch: null,
+    });
+    await expect(adapter.revalidatePreparedLegacyAdoption(prepared)).resolves.toBeUndefined();
+
+    await writeFile(join(root, "hybrid", "candidate-active.json"), "{}\n", "utf8");
+    await expect(adapter.revalidatePreparedLegacyAdoption(prepared))
+      .rejects.toEqual(new HybridCatalogError("hybrid-snapshot-corrupt"));
+  });
+
+  it("hashes the bounded legacy artifact inventory without granting authority", async () => {
+    const root = await temporaryRoot();
+    const adapter = new LocalHybridCatalogAdapter(root);
+    await expect(adapter.loadLegacyArtifactSetSha256()).resolves.toBeNull();
+    await commit(adapter, "import-artifact-set");
+    const first = await adapter.loadLegacyArtifactSetSha256();
+    expect(first).toMatch(/^[a-f0-9]{64}$/u);
+    await expect(adapter.loadLegacyArtifactSetSha256()).resolves.toBe(first);
+  });
+
+  it("writes schema-2 cloud artifacts and filters every read by explicit authority", async () => {
+    const root = await temporaryRoot();
+    let snapshotOrdinal = 0;
+    const adapter = new LocalHybridCatalogAdapter(
+      root,
+      undefined,
+      () => `unified-scoped-${++snapshotOrdinal}`,
+      () => "overlay-scoped-1",
+    );
+    await commit(adapter, "import-scoped");
+    const record = verifiedRecord();
+    const overlay = await adapter.writeCatalogOverlay(overlayInput([record]));
+    expect(overlay).toMatchObject({
+      schemaVersion: 2,
+      verificationGeneration: 1,
+      cloudRootSha256: HASH_B,
+    });
+    await expect(adapter.loadActiveOverlays(null)).resolves.toEqual([]);
+    await expect(adapter.loadActiveOverlays(AUTHORITY)).resolves.toHaveLength(1);
+    await expect(adapter.loadActiveOverlays({
+      ...AUTHORITY,
+      scope: { ...SCOPE, generation: 2 },
+    })).resolves.toEqual([]);
+
+    const candidateOnly = await adapter.writeUnifiedSnapshot({
+      sourceImportSha256: HASH_A,
+      verificationScope: null,
+      records: [record],
+      differences: [],
+      completedAt: 300,
+    });
+    expect(candidateOnly).toMatchObject({ schemaVersion: 2, verificationScope: null });
+    await expect(adapter.loadActiveUnified(null)).resolves.toMatchObject({
+      descriptor: { snapshotId: "unified-scoped-1", verificationScope: null },
+    });
+    await expect(adapter.loadActiveUnified(AUTHORITY)).resolves.toBeNull();
+
+    const scoped = await adapter.writeUnifiedSnapshot({
+      sourceImportSha256: HASH_A,
+      verificationScope: SCOPE,
+      records: [record],
+      differences: [],
+      completedAt: 301,
+    });
+    expect(scoped).toMatchObject({ schemaVersion: 2, verificationScope: SCOPE });
+    await expect(adapter.loadActiveUnified(AUTHORITY)).resolves.toMatchObject({
+      descriptor: { snapshotId: "unified-scoped-2", verificationScope: SCOPE },
+    });
+    await expect(adapter.loadActiveUnified(null)).resolves.toBeNull();
+  });
   it("persists one complete import with private permissions and no source path", async () => {
     const root = await temporaryRoot();
     const adapter = new LocalHybridCatalogAdapter(root);
@@ -158,6 +284,49 @@ describe("LocalHybridCatalogAdapter", () => {
     ].join("\n");
     expect(persisted).not.toContain("sourcePath");
     expect(persisted).not.toContain("/private/");
+  });
+
+  it("loads only selected candidate groups while preserving full-file integrity", async () => {
+    const root = await temporaryRoot();
+    const adapter = new LocalHybridCatalogAdapter(root);
+    const first = candidate();
+    const second: TxtCandidateRecordV1 = {
+      ...candidate("B.pdf"),
+      relativePath: "Other/B.pdf",
+      parentRelativePath: "Other",
+      topLevelGroupId: `group:${"d".repeat(64)}`,
+      hierarchyTags: ["folder/Other"],
+    };
+    const descriptor = await commit(adapter, "import-selected", [first, second]);
+
+    await expect(adapter.loadActiveCandidateDescriptor()).resolves.toEqual(descriptor);
+    await expect(adapter.loadActiveCandidateGroups([first.topLevelGroupId])).resolves.toEqual({
+      descriptor,
+      records: [first],
+    });
+    await expect(adapter.loadActiveCandidateGroups([second.topLevelGroupId])).resolves.toEqual({
+      descriptor,
+      records: [second],
+    });
+    await expect(adapter.loadActiveCandidateSummary()).resolves.toEqual({
+      descriptor,
+      groups: [
+        {
+          groupKey: second.topLevelGroupId,
+          label: "Other",
+          rootRelativePath: "Other",
+          pdfCount: 1,
+          mode: "recursive",
+        },
+        {
+          groupKey: first.topLevelGroupId,
+          label: "Synthetic",
+          rootRelativePath: "Synthetic",
+          pdfCount: 1,
+          mode: "recursive",
+        },
+      ],
+    });
   });
 
   it("makes commit idempotent and rejects append after completion", async () => {
@@ -376,6 +545,63 @@ describe("LocalHybridCatalogAdapter", () => {
     expect((await stat(join(directory, "catalog.ndjson"))).mode & 0o777).toBe(0o600);
     expect((await stat(join(directory, "differences.ndjson"))).mode & 0o777).toBe(0o600);
     expect((await stat(join(directory, "descriptor.json"))).mode & 0o777).toBe(0o600);
+  });
+
+  it("streams unified summaries, bounded queries, and one-group replacement", async () => {
+    const root = await temporaryRoot();
+    let ordinal = 0;
+    const adapter = new LocalHybridCatalogAdapter(root, undefined, () => `unified-${++ordinal}`);
+    const first = candidate();
+    const second: TxtCandidateRecordV1 = {
+      ...candidate("B.pdf"),
+      relativePath: "Other/B.pdf",
+      parentRelativePath: "Other",
+      topLevelGroupId: `group:${"d".repeat(64)}`,
+      hierarchyTags: ["folder/Other"],
+    };
+    await commit(adapter, "import-stream", [first, second]);
+    const firstUnified = verifiedRecord(first, "1");
+    const secondUnified = verifiedRecord(second, "2");
+    await adapter.writeUnifiedSnapshot({
+      sourceImportSha256: HASH_A,
+      verificationScope: SCOPE,
+      records: [secondUnified, firstUnified],
+      differences: [],
+      completedAt: 200,
+    });
+
+    await expect(adapter.queryActiveUnified({
+      text: "B.pdf",
+      offset: 0,
+      limit: 50,
+    })).resolves.toMatchObject({
+      aggregate: {
+        verificationCounts: { verified: 2, unverified: 0, difference: 0, cloudMissing: 0 },
+      },
+      page: { total: 1, items: [secondUnified] },
+    });
+
+    const replacement: UnifiedCatalogRecordV1 = {
+      ...firstUnified,
+      catalogId: "baidu:7",
+      fsId: "7",
+      cloudPath: "/Library/Synthetic/A.pdf",
+    };
+    await adapter.writeUnifiedGroupSnapshot({
+      verificationScope: SCOPE,
+      sourceImportSha256: HASH_A,
+      topLevelGroupId: first.topLevelGroupId,
+      completedAt: 300,
+      records: [replacement],
+      differences: [],
+      supersededCatalogIds: [firstUnified.catalogId],
+    });
+
+    expect(await adapter.loadActiveUnified()).toMatchObject({
+      descriptor: { snapshotId: "unified-2", recordCount: 2 },
+      records: [secondUnified, replacement],
+      differences: [],
+    });
   });
 
   it("keeps the prior unified snapshot active when final manifest replacement fails", async () => {

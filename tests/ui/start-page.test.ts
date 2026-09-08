@@ -2,6 +2,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { NORMAL_RUNTIME_POLICY, READ_ONLY_ACCEPTANCE_POLICY } from "../../src/runtime/safety-policy";
 import { renderStartPage } from "../../src/ui/start-page";
+import type { WorkbenchRoute } from "../../src/ui/workbench-route";
 import { noOpWorkbenchActions, populatedWorkbenchModel } from "../helpers/ui-fixtures";
 
 const createTestDiv = (): HTMLDivElement => document.createElementNS(
@@ -42,14 +43,15 @@ describe("start page", () => {
     expect(root.querySelector('[aria-label="知识地图"]')).not.toBeNull();
     expect(root.querySelector('[data-start-section="suggestions"]')).not.toBeNull();
     expect(root.querySelector('[data-action="quick-capture"]')).not.toBeNull();
+    expect(root.textContent).not.toContain("笔记改动");
   });
 
   it("routes catalog search and verification recommendations through shell navigation", () => {
     const root = createTestDiv();
-    const selected: string[] = [];
+    const selected: WorkbenchRoute[] = [];
     renderStartPage(root, {
       model: populatedWorkbenchModel(),
-      actions: noOpWorkbenchActions({ onSelectTab: (tab) => selected.push(tab) }),
+      actions: noOpWorkbenchActions({ onSelectRoute: (route) => selected.push(route) }),
       policy: NORMAL_RUNTIME_POLICY,
     });
 
@@ -57,7 +59,10 @@ describe("start page", () => {
       .find((button) => button.textContent === "搜索检查")?.click();
     Array.from(root.querySelectorAll<HTMLButtonElement>("button"))
       .find((button) => button.textContent === "云端核验")?.click();
-    expect(selected).toEqual(["cloud-catalog", "verification"]);
+    expect(selected).toEqual([
+      { tab: "library" },
+      { tab: "task", page: "overview" },
+    ]);
   });
 
   it("keeps suggestion preview callbacks and read-only guards when switching sections", () => {

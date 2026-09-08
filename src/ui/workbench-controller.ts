@@ -11,7 +11,12 @@ import type { FocusedMap, MapFilter, MapSearchResult, MapService } from "../map/
 import { buildConfirmedRelationCandidates, type OperationRationale, type SuggestedOperation, type SuggestionService } from "../suggestions/suggestion-service";
 import type { ChangePlanService, ConfirmedPlan } from "../plans/change-plan-service";
 import type { PluginDataStore } from "../storage/plugin-data-store";
-import type { FolderRule, FolderRuleProposal, PluginSettings } from "../storage/plugin-data";
+import type {
+  CloudVerificationSettings,
+  FolderRule,
+  FolderRuleProposal,
+  PluginSettings,
+} from "../storage/plugin-data";
 import type { WorkbenchLocale } from "../i18n/workbench-i18n";
 import type { TodayService } from "../today/today-service";
 import type { ExecutionResult, TransactionService } from "../transactions/transaction-service";
@@ -20,7 +25,14 @@ import type { UndoService } from "../transactions/undo-service";
 import type { ChangePreviewPresenter } from "./change-preview-modal";
 import { exportJournalJson, type HistoryConfirmationPresenter } from "./history-tab";
 import type { TodayFilter } from "./today-pane";
-import type { StartSection, WorkbenchProgress, WorkbenchTab, WorkbenchViewModel } from "./workbench-view";
+import type { StartSection, WorkbenchProgress, WorkbenchViewModel } from "./workbench-view";
+import {
+  defaultWorkbenchRoute,
+  routeForTab,
+  sameWorkbenchRoute,
+  type WorkbenchRoute,
+  type WorkbenchTab,
+} from "./workbench-route";
 import type { AiPayloadPreviewPresenter } from "./ai-payload-preview-modal";
 import { effectiveSettings, type RuntimeSafetyPolicy } from "../runtime/safety-policy";
 import { catalogPageContains, type CloudCatalogRuntime } from "../catalog/cloud-catalog-runtime";
@@ -41,6 +53,10 @@ import type { CatalogTxtImportConfirmationPresenter } from "./catalog-txt-import
 import type { CatalogLargeScanConfirmationPresenter } from "./catalog-large-scan-confirmation-modal";
 import type { CloudDirectoryPickerPresenter } from "./cloud-directory-picker";
 import type {
+  CloudDirectoryPickerPurpose,
+  CloudDirectorySelection,
+} from "../catalog/cloud-directory-selection";
+import type {
   CatalogDifferenceKind,
   CatalogVerificationStatus,
 } from "../catalog/hybrid-catalog-types";
@@ -53,6 +69,31 @@ import {
   EMPTY_RECENT_CLOUD_DIRECTORIES,
   rememberRecentCloudDirectory,
 } from "../storage/recent-cloud-directories";
+import {
+  cloudVerificationScopesEqual,
+  deriveCloudVerificationScope,
+  type CloudVerificationAuthority,
+  type CloudVerificationRootHasher,
+  type CloudVerificationScope,
+  type LegacyVerificationAllowlist,
+} from "../catalog/cloud-verification-scope";
+import type { LegacyVerificationAdoptionV1 } from "../storage/legacy-verification-adoption";
+import { repairVerificationBatchTombstones } from "../storage/verification-batch-tombstones";
+import {
+  deriveLibraryWorkflowState,
+  type PendingCatalogTxtDraft,
+} from "./library-workflow-state";
+import {
+  validateVerificationLaunchRequest,
+  type VerificationLaunchGroup,
+  type VerificationLaunchRequest,
+} from "../catalog/verification-launch-request";
+import type {
+  FolderSelectionHostActions,
+  FolderSelectionRenderState,
+  FolderSelectionSessionDriver,
+  FolderSelectionSessionFactoryPort,
+} from "./folder-selection-host";
 
 export interface AiSettingsInput {
   readonly enabled: boolean;
@@ -73,6 +114,10 @@ export interface WorkbenchProjectionScheduler {
   schedule(callback: () => void, delayMs: number): unknown;
   cancel(handle: unknown): void;
 }
+
+export type CloudDirectorySelectionValidator = typeof import(
+  "../catalog/cloud-directory-selection"
+).validateCloudDirectorySelection;
 
 export interface WorkbenchDependencies {
   readonly policy: RuntimeSafetyPolicy;
@@ -96,13 +141,61 @@ export interface WorkbenchDependencies {
   readonly ai?: WorkbenchAiDependencies;
   readonly projectionScheduler?: WorkbenchProjectionScheduler;
   readonly catalog: CloudCatalogRuntime;
+  readonly cloudVerificationRootHasher: CloudVerificationRootHasher;
   readonly catalogConfirmation: CatalogScanConfirmationPresenter;
   readonly catalogTxtImportConfirmation?: CatalogTxtImportConfirmationPresenter;
   readonly catalogLargeScanConfirmation?: CatalogLargeScanConfirmationPresenter;
   readonly catalogDirectoryPicker?: CloudDirectoryPickerPresenter;
+  readonly catalogDirectorySelectionValidator?: CloudDirectorySelectionValidator;
+  readonly folderSelectionSessionFactory?: FolderSelectionSessionFactoryPort;
 }
 
 export type MapCenter = Readonly<{ kind: "document" | "topic"; id: string }>;
+
+export type CatalogAuthorizationIntent = "repair-same-account" | "replace-identity";
+
+type CloudAuthorityOperation =
+  | "verification-launch"
+  | "catalog-scan-launch"
+  | "library-binding"
+  | "authorization-repair"
+  | "identity-change";
+
+type CatalogAuthorizationAttempt = Readonly<{
+  intent: CatalogAuthorizationIntent;
+  preparedGeneration: number;
+}>;
+
+type TaskActionPermit = Readonly<{
+  revision: number;
+  nonce: symbol;
+}>;
+
+type FolderSelectionOwner = {
+  readonly nonce: symbol;
+  readonly purpose: CloudDirectoryPickerPurpose;
+  readonly driver: FolderSelectionSessionDriver;
+  readonly sourceImportSha256: string;
+  unsubscribe: () => void;
+  usePending: boolean;
+  commitStarted: boolean;
+  closeRequested: boolean;
+  driverDisposed: boolean;
+};
+
+interface LegacyAdoptionFailureToken {
+  readonly selectedEffectiveRootSha256: string;
+  readonly activeSourceImportSha256: string;
+  readonly legacyArtifactSetSha256: string;
+}
+
+type FolderBindingBaseline = Readonly<{
+  activeSourceImportSha256: string;
+  legacyArtifactSetSha256: string | null;
+  groupsKey: string;
+  settingsKey: string;
+  batchKey: string;
+}>;
 
 const emptyMap = (): FocusedMap => ({ nodes: [], edges: [], selected: null, truncated: false });
 const idleProgress = (label: string): WorkbenchProgress => ({ status: "idle", completed: 0, label });
@@ -111,18 +204,52 @@ const isAbortError = (error: unknown): boolean => error instanceof DOMException
   ? error.name === "AbortError"
   : error instanceof Error && error.name === "AbortError";
 const errorMessage = (error: unknown): string => error instanceof Error ? error.message : String(error);
+const requireCloudDirectorySelectionValidator = (
+  validator: CloudDirectorySelectionValidator | undefined,
+): CloudDirectorySelectionValidator => {
+  if (validator === undefined) throw new Error("catalog-unavailable");
+  return validator;
+};
 const RECOVERY_LOCK_MESSAGE = "Recovery required; organization writes are locked";
 const PROJECTION_REFRESH_ERROR = "Workbench projection refresh failed";
 const PROJECTION_QUIET_DELAY_MS = 50;
 const PROJECTION_MAX_WAIT_MS = 500;
+const assertVerificationLaunchBuildAvailable = (): void => {
+  if (
+    typeof __KNOWLEDGE_WORKBENCH_BUILD_MODE__ !== "undefined"
+    && __KNOWLEDGE_WORKBENCH_BUILD_MODE__ === "read-only-acceptance"
+  ) throw new Error("catalog-unavailable");
+};
+const verificationPickerPurpose = (
+  groups: readonly Readonly<{
+    groupKey: string;
+    rootRelativePath: string;
+    label: string;
+  }>[],
+): Extract<CloudDirectoryPickerPurpose, { kind: "verification" }> => ({
+  kind: "verification",
+  groups: groups
+    .filter((group) => group.groupKey !== "txt-root-items")
+    .map((group) => ({
+      groupKey: group.groupKey,
+      rootRelativePath: group.rootRelativePath,
+      label: group.label,
+    })),
+});
+const folderSelectionPurposeKey = (purpose: CloudDirectoryPickerPurpose): string => (
+  JSON.stringify(purpose)
+);
 const isSelectedCategoryRoot = (
   cloudRoot: string,
-  groups: readonly Readonly<{ groupKey: string; label: string }>[],
+  groups: readonly Readonly<{
+    groupKey: string;
+    rootRelativePath: string;
+  }>[],
 ): boolean => {
   const rootLeaf = cloudRoot.slice(cloudRoot.lastIndexOf("/") + 1);
   return groups.some((group) => (
     group.groupKey !== "txt-root-items"
-    && group.label.normalize("NFC") === rootLeaf
+    && group.rootRelativePath.normalize("NFC") === rootLeaf
   ));
 };
 const defaultProjectionScheduler: WorkbenchProjectionScheduler = {
@@ -194,6 +321,16 @@ const verificationBatchAdvanced = (
     || batch.runOrdinal > prior.runOrdinal;
 };
 
+const taskExecutionKey = (hybrid: HybridCatalogViewModel | undefined): string | null => (
+  hybrid?.executionActive === true
+    ? JSON.stringify([
+        hybrid.active?.sourceImportSha256 ?? null,
+        hybrid.batch?.batchId ?? null,
+        hybrid.batch?.runOrdinal ?? null,
+      ])
+    : null
+);
+
 const hybridWithoutMessage = (value: HybridCatalogViewModel): HybridCatalogViewModel => {
   const { messageCode: _messageCode, ...current } = value;
   return current;
@@ -210,6 +347,109 @@ const verificationValidationCode = (
   }
   return undefined;
 };
+
+const legacyAllowlistFor = (
+  adoption: LegacyVerificationAdoptionV1,
+  scope: CloudVerificationScope,
+): LegacyVerificationAllowlist | null => {
+  if (
+    adoption.state !== "adopted"
+    || adoption.verificationGeneration !== scope.generation
+    || adoption.sourceImportSha256 !== scope.sourceImportSha256
+    || adoption.cloudRootSha256 !== scope.cloudRootSha256
+  ) return null;
+  return {
+    candidate: { ...adoption.candidate },
+    overlays: adoption.overlays.map((overlay) => ({ ...overlay })),
+    unified: adoption.unified === null ? null : { ...adoption.unified },
+    resumableBatch: adoption.resumableBatch === null
+      ? null
+      : { ...adoption.resumableBatch },
+  };
+};
+
+const scopedAuthorityForSettings = (
+  settings: PluginSettings,
+  hashRoot: CloudVerificationRootHasher,
+): Extract<CloudVerificationAuthority, Readonly<{ kind: "scoped" }>> | null => {
+  const binding = settings.boundCloudLibrary;
+  if (
+    binding === null
+    || settings.cloudVerificationGeneration < 1
+    || binding.verificationGeneration !== settings.cloudVerificationGeneration
+  ) return null;
+  const scope = deriveCloudVerificationScope(binding, hashRoot);
+  if (scope === null) return null;
+  if (
+    settings.legacyVerificationAdoption.state === "pending"
+    || settings.legacyVerificationAdoption.state === "invalid"
+  ) return null;
+  const legacyAllowlist = legacyAllowlistFor(settings.legacyVerificationAdoption, scope);
+  return {
+    kind: "scoped",
+    scope: { ...scope },
+    legacyAllowlist,
+  };
+};
+
+const verificationAuthoritySettingsKey = (settings: PluginSettings): string => JSON.stringify({
+  boundCloudLibrary: settings.boundCloudLibrary,
+  cloudVerificationGeneration: settings.cloudVerificationGeneration,
+  legacyVerificationAdoption: settings.legacyVerificationAdoption,
+});
+
+const cloudVerificationSettingsFrom = (settings: PluginSettings): CloudVerificationSettings => ({
+  boundCloudLibrary: settings.boundCloudLibrary === null
+    ? null
+    : clone(settings.boundCloudLibrary),
+  cloudVerificationGeneration: settings.cloudVerificationGeneration,
+  verificationBatchTombstones: clone(settings.verificationBatchTombstones),
+  legacyVerificationAdoption: clone(settings.legacyVerificationAdoption),
+});
+
+const cloudVerificationSettingsKey = (settings: PluginSettings): string => JSON.stringify(
+  cloudVerificationSettingsFrom(settings),
+);
+
+const sameCloudVerificationSettings = (
+  left: CloudVerificationSettings,
+  right: CloudVerificationSettings,
+): boolean => left.cloudVerificationGeneration === right.cloudVerificationGeneration
+  && JSON.stringify(left.boundCloudLibrary) === JSON.stringify(right.boundCloudLibrary)
+  && JSON.stringify(left.verificationBatchTombstones)
+    === JSON.stringify(right.verificationBatchTombstones)
+  && JSON.stringify(left.legacyVerificationAdoption)
+    === JSON.stringify(right.legacyVerificationAdoption);
+
+const checkedNextVerificationGeneration = (current: number): number => {
+  if (!Number.isSafeInteger(current) || current < 0 || current >= Number.MAX_SAFE_INTEGER) {
+    throw new RangeError("cloud-verification-generation-overflow");
+  }
+  return current + 1;
+};
+
+const sameLegacyAdoptionFailureToken = (
+  left: LegacyAdoptionFailureToken | null,
+  right: LegacyAdoptionFailureToken | null,
+): boolean => left === null || right === null
+  ? left === right
+  : left.selectedEffectiveRootSha256 === right.selectedEffectiveRootSha256
+    && left.activeSourceImportSha256 === right.activeSourceImportSha256
+    && left.legacyArtifactSetSha256 === right.legacyArtifactSetSha256;
+
+const deterministicLegacyAdoptionConflict = (error: unknown): boolean => (
+  error instanceof HybridCatalogError
+  && [
+    "hybrid-cloud-root-mismatch",
+    "hybrid-snapshot-corrupt",
+    "hybrid-batch-invalid",
+  ].includes(error.code)
+);
+
+const bindingCasConflict = (error: unknown): boolean => error instanceof RangeError
+  && error.message === "Cloud verification authority changed before the transaction committed";
+
+const folderSelectionStale = (): Error => new Error("folder-selection-stale");
 
 export class WorkbenchController {
   private readonly listeners = new Set<() => void>();
@@ -249,6 +489,18 @@ export class WorkbenchController {
   private quietProjectionTimer: ProjectionTimer | null = null;
   private maxProjectionTimer: ProjectionTimer | null = null;
   private readonly cloudDirectoryCandidates: CloudDirectoryCandidateRuntime;
+  private pendingCatalogTxt: PendingCatalogTxtDraft | null = null;
+  private taskActionNonce: symbol | null = null;
+  private taskSemanticKey = "";
+  private taskPauseExecutionKey: string | null = null;
+  private cloudAuthorityOperation: Readonly<{
+    kind: CloudAuthorityOperation;
+    nonce: symbol;
+  }> | null = null;
+  private catalogAuthorizationAttempt: CatalogAuthorizationAttempt | null = null;
+  private folderSelectionOwner: FolderSelectionOwner | null = null;
+  private folderSelectionRevision = 0;
+  private legacyAdoptionFailureToken: LegacyAdoptionFailureToken | null = null;
 
   constructor(private readonly dependencies: WorkbenchDependencies) {
     this.cloudDirectoryCandidates = Object.freeze({
@@ -279,18 +531,40 @@ export class WorkbenchController {
     this.verificationConnectionKey = verificationConnectionSemanticKey(
       dependencies.catalog.connection?.snapshot(),
     );
+    const initialCatalogConnection = dependencies.catalog.connection?.snapshot();
+    const initialHybridCatalog = dependencies.catalog.hybrid?.snapshot();
+    const initialSettings = dependencies.store.settings();
+    const initialWorkflow = deriveLibraryWorkflowState({
+      connection: initialCatalogConnection,
+      hybrid: initialHybridCatalog,
+      boundCloudLibrary: initialSettings.boundCloudLibrary,
+      cloudVerificationGeneration: initialSettings.cloudVerificationGeneration,
+      verificationBatchTombstones: initialSettings.verificationBatchTombstones,
+      legacyVerificationAdoption: initialSettings.legacyVerificationAdoption,
+      pendingCatalogTxt: null,
+      cloudVerificationRootHasher: dependencies.cloudVerificationRootHasher,
+      capabilityAvailable: initialHybridCatalog !== undefined
+        && initialHybridCatalog.status !== "unavailable",
+    });
     this.model = {
       locale: effectiveSettings(dependencies.policy, dependencies.store.settings()).locale,
+      openAtStartup: initialSettings.openAtStartup,
       status: "ready",
-      activeTab: "workbench",
+      route: defaultWorkbenchRoute(),
       startSection: "overview",
       catalog: dependencies.catalog.snapshot(),
-      ...(dependencies.catalog.connection === undefined ? {} : {
-        catalogConnection: clone(dependencies.catalog.connection.snapshot()),
+      ...(initialCatalogConnection === undefined ? {} : {
+        catalogConnection: clone(initialCatalogConnection),
       }),
-      ...(dependencies.catalog.hybrid === undefined ? {} : {
-        hybridCatalog: clone(dependencies.catalog.hybrid.snapshot()),
+      ...(initialHybridCatalog === undefined ? {} : {
+        hybridCatalog: clone(initialHybridCatalog),
       }),
+      pendingCatalogTxt: null,
+      taskActionPending: false,
+      taskActionRevision: 1,
+      taskPauseRequested: false,
+      boundLibraryPath: initialSettings.boundCloudLibrary?.path ?? null,
+      workflow: initialWorkflow,
       verificationRoot: "",
       verificationRootLocked: false,
       selectedVerificationGroupKeys: [],
@@ -307,6 +581,12 @@ export class WorkbenchController {
       scanProgress: idleProgress("Index"),
       mapProgress: idleProgress("Map"),
     };
+    this.taskSemanticKey = this.taskProjectionSemanticKey(
+      initialSettings,
+      initialCatalogConnection,
+      initialHybridCatalog,
+      initialWorkflow.primaryAction,
+    );
     this.projectionDirtySince = this.projectionNow();
     this.unsubscribeIndex = dependencies.index.subscribe(() => {
       if (this.disposed) return;
@@ -342,10 +622,63 @@ export class WorkbenchController {
     };
   }
 
-  selectTab(tab: WorkbenchTab): void {
-    if (this.disposed || tab === this.model.activeTab) return;
-    this.model = { ...this.model, activeTab: tab };
+  /**
+   * Performs the local authority bootstrap before the catalog runtime may initialize
+   * its connection or issue any query.
+   */
+  async initializeCatalog(): Promise<void> {
+    if (this.disposed) return;
+    const hybrid = this.dependencies.catalog.hybrid;
+    let settings = this.dependencies.store.settings();
+    let authority: CloudVerificationAuthority | null = scopedAuthorityForSettings(
+      settings,
+      this.dependencies.cloudVerificationRootHasher,
+    );
+    if (
+      authority === null
+      && settings.boundCloudLibrary === null
+      && settings.cloudVerificationGeneration === 0
+      && settings.legacyVerificationAdoption.state === "pending"
+      && hybrid !== undefined
+    ) {
+      const expectedSettingsKey = verificationAuthoritySettingsKey(settings);
+      authority = await hybrid.prepareLegacyLocalVerificationAuthority();
+      if (this.disposed) return;
+      settings = this.dependencies.store.settings();
+      if (verificationAuthoritySettingsKey(settings) !== expectedSettingsKey) {
+        authority = scopedAuthorityForSettings(
+          settings,
+          this.dependencies.cloudVerificationRootHasher,
+        );
+        if (
+          authority === null
+          && settings.boundCloudLibrary === null
+          && settings.cloudVerificationGeneration === 0
+          && settings.legacyVerificationAdoption.state === "pending"
+        ) {
+          throw new Error("catalog-unavailable");
+        }
+      }
+    }
+    this.installVerificationAuthority(authority);
+    if (!this.disposed) await this.dependencies.catalog.initialize();
+  }
+
+  selectRoute(route: WorkbenchRoute): void {
+    if (this.disposed || sameWorkbenchRoute(route, this.model.route)) return;
+    const leavingFolderSelection = this.model.route.tab === "task"
+      && this.model.route.page === "folder-selection";
+    if (leavingFolderSelection) this.disposeFolderSelection(true, false);
+    this.model = { ...this.model, route: clone(route) };
     this.emit();
+  }
+
+  openTaskOverview(): void {
+    this.selectRoute({ tab: "task", page: "overview" });
+  }
+
+  selectTab(tab: WorkbenchTab): void {
+    this.selectRoute(routeForTab(tab));
   }
 
   selectStartSection(section: StartSection): void {
@@ -358,7 +691,10 @@ export class WorkbenchController {
     if (
       this.disposed
       || this.lockedVerificationRoot !== null
-      || value === this.model.verificationRoot
+      || (
+        value === this.model.verificationRoot
+        && this.model.verificationDirectorySelection === undefined
+      )
     ) return;
     const runtimeMessageCode = this.dependencies.catalog.hybrid?.snapshot().messageCode;
     if (runtimeMessageCode === "hybrid-cloud-root-mismatch") {
@@ -366,6 +702,7 @@ export class WorkbenchController {
     }
     const {
       verificationActionMessageCode: _verificationActionMessageCode,
+      verificationDirectorySelection: _verificationDirectorySelection,
       hybridCatalog,
       ...current
     } = this.model;
@@ -376,6 +713,141 @@ export class WorkbenchController {
       ...current,
       ...(visibleHybrid === undefined ? {} : { hybridCatalog: visibleHybrid }),
       verificationRoot: value,
+    };
+    this.emit();
+  }
+
+  openVerificationFolderSelection(): void {
+    if (this.disposed || this.lockedVerificationRoot !== null) return;
+    if (this.folderSelectionOwner?.usePending === true) return;
+    const factory = this.dependencies.folderSelectionSessionFactory;
+    const active = this.dependencies.catalog.hybrid?.snapshot().active;
+    if (factory?.available !== true || active === undefined) {
+      throw new Error("catalog-unavailable");
+    }
+    const purpose = verificationPickerPurpose(active.groups);
+    const currentSelectedPath = this.model.verificationDirectorySelection?.selectedPath;
+    const rawInitialPath = currentSelectedPath ?? this.model.verificationRoot.trim();
+    const initialPath = rawInitialPath.length === 0
+      ? null
+      : this.validateCatalogScanRoot(rawInitialPath);
+    this.disposeFolderSelection(true, false);
+    let owner: FolderSelectionOwner | null = null;
+    try {
+      const driver = factory.create({
+        purpose: clone(purpose),
+        initialPath,
+      });
+      owner = {
+        nonce: Symbol("folder-selection"),
+        purpose: clone(purpose),
+        driver,
+        sourceImportSha256: active.sourceImportSha256,
+        unsubscribe: () => undefined,
+        usePending: false,
+        commitStarted: false,
+        closeRequested: false,
+        driverDisposed: false,
+      };
+      owner.unsubscribe = driver.subscribe(() => this.onFolderSelectionEmission(owner!));
+      const state = clone(driver.snapshot());
+      if (state.phase === "closed") throw new Error("folder-selection-open-closed");
+      const folderSelection = this.folderSelectionRenderState(state);
+      this.folderSelectionOwner = owner;
+      this.model = {
+        ...this.model,
+        route: { tab: "task", page: "folder-selection" },
+        folderSelection,
+      };
+      this.emit();
+    } catch (error) {
+      if (owner !== null) this.destroyFolderSelectionOwner(owner);
+      this.removeFolderSelectionModel();
+      this.emit();
+      throw error;
+    }
+  }
+
+  closeFolderSelection(): void {
+    const onFolderSelectionRoute = this.model.route.tab === "task"
+      && this.model.route.page === "folder-selection";
+    if (this.folderSelectionOwner === null && !onFolderSelectionRoute) return;
+    this.disposeFolderSelection(true, false);
+    if (!this.disposed && onFolderSelectionRoute) {
+      this.model = { ...this.model, route: { tab: "task", page: "overview" } };
+    }
+    if (!this.disposed) this.emit();
+  }
+
+  folderSelectionActions(expectedRevision: number): FolderSelectionHostActions {
+    const current = (): FolderSelectionOwner | null => this.currentFolderSelection(
+      expectedRevision,
+    );
+    const invoke = (action: (driver: FolderSelectionSessionDriver) => void): void => {
+      const owner = current();
+      if (owner !== null) action(owner.driver);
+    };
+    const invokeAsync = async (
+      action: (driver: FolderSelectionSessionDriver) => Promise<void>,
+    ): Promise<void> => {
+      const owner = current();
+      if (owner !== null) await action(owner.driver);
+    };
+    const actions: FolderSelectionHostActions = {
+      onBack: () => {
+        if (current() !== null) this.closeFolderSelection();
+      },
+      onQuery: (value) => invoke((driver) => driver.setQuery(value)),
+      onToggleSource: (source) => invoke((driver) => driver.toggleSource(source)),
+      onSelectCandidate: (path) => invoke((driver) => driver.selectCandidate(path)),
+      onUse: () => this.useFolderSelection(expectedRevision),
+      onBrowseOther: () => invoke((driver) => driver.requestLookupConsent()),
+      onConfirmLookup: () => invokeAsync((driver) => driver.confirmLookup()),
+      onRevealRoot: () => invoke((driver) => driver.revealRootBrowser()),
+      onConfirmRoot: () => invoke((driver) => driver.confirmRootBrowser()),
+      onBrowserAction: {
+        onNavigate: (path) => invoke((driver) => driver.enterBrowserPath(path)),
+        onHighlight: (path) => invoke((driver) => driver.highlightBrowserPath(path)),
+        onSelectCurrent: () => invokeAsync((driver) => driver.selectCurrentDirectory()),
+        onSelectHighlighted: () => invokeAsync((driver) => driver.selectHighlightedDirectory()),
+        onSelectCategory: (path) => invokeAsync((driver) => driver.selectCategory(path)),
+        onContinue: () => invokeAsync((driver) => driver.continueBrowser()),
+        onRetry: () => invokeAsync((driver) => driver.retryBrowser()),
+        onCancel: () => invoke((driver) => driver.cancelBrowser()),
+      },
+    };
+    return Object.freeze(actions);
+  }
+
+  applyCatalogRootSelection(selection: CloudDirectorySelection): void {
+    if (this.disposed || this.lockedVerificationRoot !== null) return;
+    const activeGroups = this.dependencies.catalog.hybrid?.snapshot().active?.groups;
+    if (activeGroups === undefined) throw new Error("catalog-unavailable");
+    const validateSelection = requireCloudDirectorySelectionValidator(
+      this.dependencies.catalogDirectorySelectionValidator,
+    );
+    let validated: CloudDirectorySelection;
+    try {
+      validated = validateSelection(
+        selection,
+        verificationPickerPurpose(activeGroups),
+      );
+    } catch {
+      throw new RangeError("cloud-directory-selection-invalid");
+    }
+    const availableKeys = new Set(activeGroups.map((group) => group.groupKey));
+    const selectedVerificationGroupKeys = validated.kind === "category"
+      ? [validated.groupKey]
+      : this.model.selectedVerificationGroupKeys.filter((groupKey) => availableKeys.has(groupKey));
+    const {
+      verificationActionMessageCode: _verificationActionMessageCode,
+      ...current
+    } = this.model;
+    this.model = {
+      ...current,
+      verificationRoot: validated.effectiveRoot,
+      verificationDirectorySelection: clone(validated),
+      selectedVerificationGroupKeys,
     };
     this.emit();
   }
@@ -391,73 +863,44 @@ export class WorkbenchController {
       if (selected.size >= LARGE_CATALOG_RUN_BUDGET.maxSelectedTopLevelGroups) return;
       selected.add(groupKey);
     }
-    this.model = { ...this.model, selectedVerificationGroupKeys: [...selected] };
+    if (this.model.verificationDirectorySelection?.kind === "category") {
+      const {
+        verificationDirectorySelection: _verificationDirectorySelection,
+        ...current
+      } = this.model;
+      this.model = { ...current, selectedVerificationGroupKeys: [...selected] };
+    } else {
+      this.model = { ...this.model, selectedVerificationGroupKeys: [...selected] };
+    }
     this.emit();
   }
 
   async startSelectedVerification(): Promise<void> {
     if (this.disposed) return;
-    this.clearVerificationHybridMessageSuppression();
-    const groupKeys = [...this.model.selectedVerificationGroupKeys];
-    if (groupKeys.length === 0) throw new RangeError("verification-group-required");
-    let normalized: string;
-    try {
-      normalized = this.validateCatalogScanRoot(this.model.verificationRoot);
-    } catch (error) {
-      this.captureVerificationValidation(error);
-      throw error;
-    }
-    const before = this.dependencies.catalog.hybrid?.snapshot();
-    const alreadyLocked = this.lockedVerificationRoot !== null;
-    let lockedForAttempt = false;
-    try {
-      await this.requestLargeCatalogVerification(normalized, groupKeys, () => {
-        lockedForAttempt = !alreadyLocked;
-        this.lockVerificationRoot(normalized);
-      });
-      this.clearVerificationActionMessage();
-    } catch (error) {
-      const after = this.dependencies.catalog.hybrid?.snapshot();
-      if (lockedForAttempt && !verificationBatchAdvanced(before, after)) {
-        this.unlockVerificationRoot();
-      }
-      this.captureVerificationValidation(error);
-      throw error;
-    }
+    assertVerificationLaunchBuildAvailable();
+    await this.runVerifiedLaunch({
+      kind: "start",
+      cloudRoot: this.model.verificationRoot,
+      groupKeys: [...this.model.selectedVerificationGroupKeys],
+      ...(this.model.verificationDirectorySelection === undefined
+        ? {}
+        : { directorySelection: this.model.verificationDirectorySelection }),
+      confirm: true,
+    });
   }
 
   async resumeSelectedVerification(): Promise<void> {
     if (this.disposed) return;
-    this.clearVerificationHybridMessageSuppression();
-    const alreadyLocked = this.lockedVerificationRoot !== null;
-    const candidate = this.lockedVerificationRoot ?? this.model.verificationRoot;
-    let normalized: string;
-    try {
-      normalized = this.validateCatalogScanRoot(candidate);
-    } catch (error) {
-      this.captureVerificationValidation(error);
-      throw error;
-    }
-    let lockedForAttempt = false;
-    try {
-      await this.requestResumeLargeCatalogVerification(normalized, () => {
-        if (alreadyLocked) return;
-        lockedForAttempt = true;
-        this.lockVerificationRoot(normalized);
-      });
-      this.clearVerificationActionMessage();
-    } catch (error) {
-      if (lockedForAttempt) this.unlockVerificationRoot();
-      if (
-        error instanceof HybridCatalogError
-        && error.code === "hybrid-cloud-root-mismatch"
-      ) {
-        this.unlockVerificationRoot();
-        this.setVerificationActionMessage("hybrid-cloud-root-mismatch");
-      }
-      this.captureVerificationValidation(error);
-      throw error;
-    }
+    assertVerificationLaunchBuildAvailable();
+    const batch = this.dependencies.catalog.hybrid?.snapshot().batch;
+    if (batch === undefined) throw new HybridCatalogError("hybrid-batch-unavailable");
+    const boundRoot = this.dependencies.store.settings().boundCloudLibrary?.path;
+    await this.runVerifiedLaunch({
+      kind: "resume",
+      cloudRoot: this.lockedVerificationRoot ?? boundRoot ?? this.model.verificationRoot,
+      groupKeys: [...batch.selectedGroupKeys],
+      confirm: true,
+    });
   }
 
   cancelSelectedVerification(): void {
@@ -485,7 +928,7 @@ export class WorkbenchController {
     if (this.scanPromise !== null) return this.scanPromise;
     const controller = new AbortController();
     const lifecycleEpoch = this.lifecycleEpoch;
-    const hadActiveIndex = this.dependencies.store.activeIndex() !== null;
+    const hadActiveIndex = this.dependencies.store.hasActiveIndex();
     this.scanController = controller;
     this.model = {
       ...this.model,
@@ -610,68 +1053,149 @@ export class WorkbenchController {
     return this.dependencies.catalog.subscribe(listener);
   }
 
-  async connectCatalog(credentials: Readonly<{ appKey: string; secretKey: string }>): Promise<void> {
+  async connectCatalog(
+    credentials: Readonly<{ appKey: string; secretKey: string }>,
+    intent: CatalogAuthorizationIntent = "repair-same-account",
+  ): Promise<void> {
     if (this.disposed) return;
-    const connection = this.dependencies.catalog.connection;
-    if (connection === undefined) throw new Error("catalog-unavailable");
-    this.dependencies.catalog.directoryLocator?.cancel();
-    this.dependencies.catalog.directoryDiscovery?.clear();
-    await connection.saveApplicationCredentials(credentials);
-    if (this.disposed) return;
-    await connection.beginAuthorization();
+    const operation = intent === "repair-same-account"
+      ? "authorization-repair" as const
+      : "identity-change" as const;
+    await this.withCloudAuthorityPermit(operation, async () => {
+      this.assertNoLiveCloudExecution();
+      const connection = this.dependencies.catalog.connection;
+      if (connection === undefined) throw new Error("catalog-unavailable");
+      let preparedGeneration = this.dependencies.store.settings().cloudVerificationGeneration;
+      let saveCredentials = intent === "replace-identity";
+      if (intent === "replace-identity") {
+        preparedGeneration = await this.replaceCatalogIdentityAuthority();
+      } else {
+        const settings = this.dependencies.store.settings();
+        if (connection.snapshot().status === "unconfigured") {
+          if (
+            settings.cloudVerificationGeneration !== 0
+            || settings.boundCloudLibrary !== null
+          ) throw new Error("authorization-attempt-unavailable");
+          saveCredentials = true;
+        }
+      }
+      if (
+        this.dependencies.store.settings().cloudVerificationGeneration !== preparedGeneration
+      ) throw new Error("authorization-attempt-unavailable");
+      this.clearCatalogDirectorySessions();
+      if (saveCredentials) {
+        await connection.saveApplicationCredentials(credentials);
+      }
+      if (this.disposed) return;
+      await connection.beginAuthorization();
+      if (this.disposed) return;
+      if (
+        this.dependencies.store.settings().cloudVerificationGeneration !== preparedGeneration
+      ) throw new Error("authorization-attempt-unavailable");
+      this.catalogAuthorizationAttempt = Object.freeze({ intent, preparedGeneration });
+    });
   }
 
-  async submitCatalogAuthorizationCode(code: string): Promise<void> {
+  async submitCatalogAuthorizationCode(
+    code: string,
+    expectedIntent?: CatalogAuthorizationIntent,
+  ): Promise<void> {
     if (this.disposed) return;
-    const connection = this.dependencies.catalog.connection;
-    if (connection === undefined) throw new Error("catalog-unavailable");
-    await connection.submitAuthorizationCode(code);
+    const attempt = this.catalogAuthorizationAttempt;
+    if (attempt === null || (expectedIntent !== undefined && expectedIntent !== attempt.intent)) {
+      throw new Error("authorization-attempt-unavailable");
+    }
+    const operation = attempt.intent === "repair-same-account"
+      ? "authorization-repair" as const
+      : "identity-change" as const;
+    await this.withCloudAuthorityPermit(operation, async () => {
+      this.assertNoLiveCloudExecution();
+      if (
+        this.catalogAuthorizationAttempt !== attempt
+        || this.dependencies.store.settings().cloudVerificationGeneration
+          !== attempt.preparedGeneration
+      ) throw new Error("authorization-attempt-unavailable");
+      const connection = this.dependencies.catalog.connection;
+      if (connection === undefined) throw new Error("catalog-unavailable");
+      await connection.submitAuthorizationCode(code);
+      if (!this.disposed && this.catalogAuthorizationAttempt === attempt) {
+        this.catalogAuthorizationAttempt = null;
+      }
+    });
   }
 
   cancelCatalogAuthorization(): void {
     if (this.disposed) return;
+    if (this.cloudAuthorityOperation !== null) {
+      this.failCloudAuthorityOperation("cloud-authority-operation-busy");
+    }
+    this.catalogAuthorizationAttempt = null;
     this.dependencies.catalog.connection?.cancelAuthorization();
   }
 
   async revokeCatalog(): Promise<void> {
     if (this.disposed) return;
-    const connection = this.dependencies.catalog.connection;
-    if (connection === undefined) throw new Error("catalog-unavailable");
-    this.dependencies.catalog.directoryLocator?.cancel();
-    this.dependencies.catalog.directoryDiscovery?.clear();
-    await connection.revoke();
+    await this.withCloudAuthorityPermit("identity-change", async () => {
+      this.assertNoLiveCloudExecution();
+      const connection = this.dependencies.catalog.connection;
+      if (connection === undefined) throw new Error("catalog-unavailable");
+      await this.replaceCatalogIdentityAuthority();
+      this.clearCatalogDirectorySessions();
+      await connection.revoke();
+    });
   }
 
   validateCatalogScanRoot(rootPath: string): string {
     return normalizeCatalogScanRoot(rootPath);
   }
 
-  async chooseCatalogRoot(initialRoot: string): Promise<string | null> {
+  async chooseCatalogRoot(input: Readonly<{
+    initialRoot: string;
+    purpose: CloudDirectoryPickerPurpose;
+  }>): Promise<CloudDirectorySelection | null> {
     if (this.disposed) return null;
-    const trimmed = initialRoot.trim();
+    const trimmed = input.initialRoot.trim();
     const initialPath = trimmed.length === 0
       ? null
       : this.validateCatalogScanRoot(trimmed);
     const picker = this.dependencies.catalogDirectoryPicker;
     if (picker === undefined) throw new Error("catalog-unavailable");
-    return picker.request({
+    const validateSelection = requireCloudDirectorySelectionValidator(
+      this.dependencies.catalogDirectorySelectionValidator,
+    );
+    const purpose = clone(input.purpose);
+    const selection = await picker.request({
       initialPath,
+      purpose,
       candidates: this.cloudDirectoryCandidates,
+      ...(this.dependencies.catalog.directoryBrowser === undefined
+        ? {}
+        : { browser: this.dependencies.catalog.directoryBrowser }),
       ...(this.dependencies.catalog.directoryLocator === undefined
         ? {}
         : { locator: this.dependencies.catalog.directoryLocator }),
     });
+    if (selection === null || this.disposed) return null;
+    try {
+      return validateSelection(selection, purpose);
+    } catch {
+      throw new RangeError("cloud-directory-selection-invalid");
+    }
   }
 
   async requestCatalogScan(rootPath: string, onConfirmed?: () => void): Promise<void> {
     if (this.disposed) return;
-    const normalized = this.validateCatalogScanRoot(rootPath);
-    const connection = this.dependencies.catalog.connection;
-    if (connection === undefined) throw new Error("catalog-unavailable");
-    const confirmed = await this.dependencies.catalogConfirmation.request(normalized);
-    if (this.disposed || !confirmed) return;
-    onConfirmed?.();
-    await connection.startScan(normalized);
+    await this.withCloudAuthorityPermit("catalog-scan-launch", async () => {
+      this.assertNoLiveCloudExecution();
+      const normalized = this.validateCatalogScanRoot(rootPath);
+      const connection = this.dependencies.catalog.connection;
+      if (connection === undefined) throw new Error("catalog-unavailable");
+      const confirmed = await this.dependencies.catalogConfirmation.request(normalized);
+      if (this.disposed || !confirmed) return;
+      this.assertNoLiveCloudExecution();
+      onConfirmed?.();
+      await connection.startScan(normalized);
+    });
   }
 
   cancelCatalogScan(): void {
@@ -690,81 +1214,262 @@ export class WorkbenchController {
 
   async previewCatalogTxt(path: string): Promise<void> {
     if (this.disposed) return;
-    const hybrid = this.dependencies.catalog.hybrid;
-    if (hybrid === undefined) throw new Error("catalog-unavailable");
-    await hybrid.previewTxt(path);
+    await this.previewTaskCatalogTxt(path, this.model.taskActionRevision);
+  }
+
+  async previewTaskCatalogTxt(path: string, expectedRevision: number): Promise<void> {
+    if (this.disposed) return;
+    await this.withTaskActionPermit(expectedRevision, (permit) => (
+      this.previewTaskCatalogTxtWithPermit(path, permit, false)
+    ));
+  }
+
+  async performTaskTxtSelection(
+    expectedRevision: number,
+    requestPath: () => Promise<string | null>,
+  ): Promise<void> {
+    if (this.disposed) return;
+    const priorRevision = this.model.taskActionRevision;
+    this.reconcileTaskProjection();
+    if (this.model.taskActionRevision !== priorRevision) this.emit();
+    await this.withTaskActionPermit(expectedRevision, async (permit) => {
+      if (this.model.workflow.primaryAction !== "choose-txt") {
+        throw new Error("task-action-stale");
+      }
+      const path = await requestPath();
+      if (path === null || this.disposed) return;
+      this.assertTaskActionPermit(permit);
+      await this.previewTaskCatalogTxtWithPermit(path, permit, true);
+    });
   }
 
   async requestCatalogTxtImport(path: string, onConfirmed?: () => void): Promise<void> {
     if (this.disposed) return;
-    const hybrid = this.dependencies.catalog.hybrid;
-    const confirmation = this.dependencies.catalogTxtImportConfirmation;
-    const candidate = hybrid?.snapshot().candidate;
-    if (hybrid === undefined || confirmation === undefined || candidate === undefined) {
-      throw new Error("catalog-unavailable");
+    await this.withTaskActionPermit(this.model.taskActionRevision, async () => {
+      const candidate = this.dependencies.catalog.hybrid?.snapshot().candidate;
+      if (candidate === undefined) throw new Error("catalog-unavailable");
+      if (
+        this.pendingCatalogTxt === null
+        || this.pendingCatalogTxt.path !== path
+        || this.pendingCatalogTxt.sourceSha256 !== candidate.sourceSha256
+      ) {
+        this.pendingCatalogTxt = Object.freeze({ path, sourceSha256: candidate.sourceSha256 });
+        this.model = { ...this.model, pendingCatalogTxt: clone(this.pendingCatalogTxt) };
+        this.emit();
+      }
+      await this.importCatalogTxtDraft(onConfirmed);
+    });
+  }
+
+  async importPreviewedTaskCatalogTxt(): Promise<void> {
+    if (this.disposed) return;
+    await this.withTaskActionPermit(
+      this.model.taskActionRevision,
+      () => this.importCatalogTxtDraft(),
+    );
+  }
+
+  async performTaskVerificationAction(
+    kind: "start" | "resume",
+    expectedRevision: number,
+  ): Promise<void> {
+    if (this.disposed) return;
+    assertVerificationLaunchBuildAvailable();
+    const priorRevision = this.model.taskActionRevision;
+    this.reconcileTaskProjection();
+    if (this.model.taskActionRevision !== priorRevision) this.emit();
+    await this.withTaskActionPermit(expectedRevision, async (permit) => {
+      const primaryAction = this.model.workflow.primaryAction;
+      if (
+        (kind === "start" && primaryAction !== "start")
+        || (kind === "resume" && primaryAction !== "resume" && primaryAction !== "retry")
+      ) throw new Error("task-action-stale");
+      const hybrid = this.dependencies.catalog.hybrid;
+      const settings = this.dependencies.store.settings();
+      const binding = settings.boundCloudLibrary;
+      if (hybrid === undefined || binding === null) {
+        throw new HybridCatalogError("hybrid-batch-unavailable");
+      }
+      if (kind === "resume") {
+        const batch = hybrid.snapshot().batch;
+        if (batch === undefined) throw new HybridCatalogError("hybrid-batch-unavailable");
+        await this.runVerifiedLaunch({
+          kind,
+          expectedRevision,
+          cloudRoot: binding.path,
+          groupKeys: [...batch.selectedGroupKeys],
+          confirm: false,
+        }, permit);
+        return;
+      }
+      const selectedGroupKeys = this.model.selectedVerificationGroupKeys;
+      const recommendedGroup = this.model.workflow.recommendedGroup;
+      const groupKeys = selectedGroupKeys.length > 0
+        ? [...selectedGroupKeys]
+        : recommendedGroup === null
+          ? []
+          : [recommendedGroup.groupKey];
+      await this.runVerifiedLaunch({
+        kind,
+        expectedRevision,
+        cloudRoot: binding.path,
+        groupKeys,
+        ...(this.model.verificationDirectorySelection === undefined
+          ? {}
+          : { directorySelection: this.model.verificationDirectorySelection }),
+        confirm: false,
+      }, permit);
+    });
+  }
+
+  async performTaskPrimaryAction(expectedRevision: number): Promise<void> {
+    if (this.disposed) return;
+    const priorRevision = this.model.taskActionRevision;
+    this.reconcileTaskProjection();
+    if (this.model.taskActionRevision !== priorRevision) this.emit();
+    if (expectedRevision !== this.model.taskActionRevision) {
+      throw new Error("task-action-stale");
     }
-    const confirmed = await confirmation.request(candidate);
-    if (this.disposed || !confirmed) return;
-    onConfirmed?.();
-    await hybrid.importTxt(path);
-    if (!this.disposed) await refreshCatalogProjection(this.dependencies.catalog);
+    switch (this.model.workflow.primaryAction) {
+      case "choose-txt":
+        throw new RangeError("host-task-action-required");
+      case "import-txt":
+        await this.withTaskActionPermit(expectedRevision, () => this.importCatalogTxtDraft());
+        return;
+      case "open-connection":
+        await this.withTaskActionPermit(expectedRevision, async () => {
+          this.selectRoute({ tab: "more", page: "connection" });
+        });
+        return;
+      case "choose-library":
+        await this.withTaskActionPermit(expectedRevision, async () => {
+          this.openVerificationFolderSelection();
+        });
+        return;
+      case "start":
+        await this.performTaskVerificationAction("start", expectedRevision);
+        return;
+      case "pause":
+        this.requestTaskPause(expectedRevision);
+        return;
+      case "resume":
+      case "retry": {
+        if (this.dependencies.catalog.hybrid?.snapshot().batch?.resumeAvailable !== true) {
+          throw new RangeError("task-resume-unavailable");
+        }
+        await this.performTaskVerificationAction("resume", expectedRevision);
+        return;
+      }
+      case "open-library":
+        await this.withTaskActionPermit(expectedRevision, async () => {
+          this.selectRoute({ tab: "library" });
+        });
+    }
+  }
+
+  requestTaskPause(expectedRevision: number): void {
+    if (this.disposed) return;
+    const priorRevision = this.model.taskActionRevision;
+    this.reconcileTaskProjection();
+    if (this.model.taskActionRevision !== priorRevision) this.emit();
+    const hybrid = this.dependencies.catalog.hybrid?.snapshot();
+    const executionKey = taskExecutionKey(hybrid);
+    if (
+      expectedRevision !== this.model.taskActionRevision
+      || this.model.workflow.primaryAction !== "pause"
+      || hybrid?.executionActive !== true
+      || executionKey === null
+    ) throw new Error("task-action-stale");
+    if (this.taskPauseExecutionKey === executionKey) return;
+    this.taskPauseExecutionKey = executionKey;
+    this.model = { ...this.model, taskPauseRequested: true };
+    this.emit();
+    this.dependencies.catalog.hybrid?.cancelLargeVerification();
+  }
+
+  saveTaskCategorySelection(
+    expectedRevision: number,
+    input: Readonly<{ rootPath: string; groupKeys: readonly string[] }>,
+  ): void {
+    if (this.disposed) return;
+    const priorRevision = this.model.taskActionRevision;
+    this.reconcileTaskProjection();
+    if (this.model.taskActionRevision !== priorRevision) this.emit();
+    if (
+      expectedRevision !== this.model.taskActionRevision
+      || this.model.workflow.kind !== "ready"
+    ) throw new Error("task-action-stale");
+    const active = this.dependencies.catalog.hybrid?.snapshot().active;
+    const binding = this.dependencies.store.settings().boundCloudLibrary;
+    if (active === undefined || binding === null) throw new Error("catalog-unavailable");
+    const normalizedRoot = this.validateCatalogScanRoot(input.rootPath);
+    if (normalizedRoot !== this.validateCatalogScanRoot(binding.path)) {
+      throw new Error("invalid-large-catalog-root");
+    }
+    const requested = new Set(input.groupKeys);
+    const groupKeys = active.groups
+      .filter((group) => requested.has(group.groupKey))
+      .map((group) => group.groupKey);
+    if (
+      input.groupKeys.length < 1
+      || input.groupKeys.length > LARGE_CATALOG_RUN_BUDGET.maxSelectedTopLevelGroups
+      || requested.size !== input.groupKeys.length
+      || groupKeys.length !== input.groupKeys.length
+    ) throw new RangeError("verification-group-required");
+    const selection = this.model.verificationDirectorySelection;
+    const selectionStillMatchesScope = selection?.effectiveRoot === normalizedRoot
+      && (
+        selection.kind !== "category"
+        || (groupKeys.length === 1 && groupKeys[0] === selection.groupKey)
+      );
+    const {
+      verificationDirectorySelection: _verificationDirectorySelection,
+      ...current
+    } = this.model;
+    this.model = {
+      ...current,
+      route: { tab: "task", page: "overview" },
+      verificationRoot: normalizedRoot,
+      selectedVerificationGroupKeys: groupKeys,
+      ...(selectionStillMatchesScope
+        ? { verificationDirectorySelection: selection }
+        : {}),
+    };
+    this.emit();
   }
 
   async requestLargeCatalogVerification(
     rootPath: string,
     groupKeys: readonly string[],
     onConfirmed?: () => void,
+    directorySelection?: CloudDirectorySelection,
   ): Promise<void> {
     if (this.disposed) return;
-    const normalized = this.validateCatalogScanRoot(rootPath);
-    const hybrid = this.dependencies.catalog.hybrid;
-    const confirmation = this.dependencies.catalogLargeScanConfirmation;
-    const active = hybrid?.snapshot().active;
-    if (hybrid === undefined || confirmation === undefined || active === undefined) {
-      throw new Error("catalog-unavailable");
-    }
-    const groupsByKey = new Map(active.groups.map((group) => [group.groupKey, group]));
-    const groups = groupKeys.map((groupKey) => {
-      const group = groupsByKey.get(groupKey);
-      if (group === undefined) throw new Error("catalog-unavailable");
-      return { groupKey, label: group.label, pdfCount: group.pdfCount };
-    });
-    if (isSelectedCategoryRoot(normalized, groups)) {
-      throw new Error("invalid-large-catalog-root");
-    }
-    const confirmed = await confirmation.request({
+    assertVerificationLaunchBuildAvailable();
+    await this.runVerifiedLaunch({
       kind: "start",
-      cloudRoot: normalized,
-      groups,
+      cloudRoot: rootPath,
+      groupKeys,
+      ...(directorySelection === undefined ? {} : { directorySelection }),
+      confirm: true,
+      ...(onConfirmed === undefined ? {} : { onConfirmed }),
     });
-    if (this.disposed || !confirmed) return;
-    onConfirmed?.();
-    await hybrid.startLargeVerification({ cloudRoot: normalized, groupKeys });
-    if (!this.disposed) await refreshCatalogProjection(this.dependencies.catalog);
   }
 
   async requestResumeLargeCatalogVerification(
     rootPath: string,
+    groupKeys: readonly string[],
     onConfirmed?: () => void,
   ): Promise<void> {
     if (this.disposed) return;
-    const normalized = this.validateCatalogScanRoot(rootPath);
-    const hybrid = this.dependencies.catalog.hybrid;
-    const confirmation = this.dependencies.catalogLargeScanConfirmation;
-    if (
-      hybrid === undefined
-      || confirmation === undefined
-      || hybrid.snapshot().batch?.resumeAvailable !== true
-    ) throw new Error("catalog-unavailable");
-    const confirmed = await confirmation.request({
+    assertVerificationLaunchBuildAvailable();
+    await this.runVerifiedLaunch({
       kind: "resume",
-      cloudRoot: normalized,
-      groups: [],
+      cloudRoot: rootPath,
+      groupKeys,
+      confirm: true,
+      ...(onConfirmed === undefined ? {} : { onConfirmed }),
     });
-    if (this.disposed || !confirmed) return;
-    onConfirmed?.();
-    await hybrid.resumeLargeVerification(normalized);
-    if (!this.disposed) await refreshCatalogProjection(this.dependencies.catalog);
   }
 
   cancelLargeCatalogVerification(): void {
@@ -1094,6 +1799,7 @@ export class WorkbenchController {
     const settings = this.dependencies.store.settings();
     await this.dependencies.store.saveSettings({ ...settings, openAtStartup: value });
     if (this.disposed) return;
+    this.model = { ...this.model, openAtStartup: value };
     this.emit();
   }
 
@@ -1103,7 +1809,11 @@ export class WorkbenchController {
     await this.dependencies.store.saveSettings({ ...settings, locale });
     if (this.disposed) return;
     this.model = { ...this.model, locale };
-    this.emit();
+    if (
+      this.folderSelectionOwner === null
+      || this.folderSelectionOwner.closeRequested
+    ) this.emit();
+    else this.publishFolderSelection(this.folderSelectionOwner);
   }
 
   async setWriteEnabled(value: boolean): Promise<void> {
@@ -1183,7 +1893,7 @@ export class WorkbenchController {
     if (this.disposed) return;
     const lifecycleEpoch = this.lifecycleEpoch;
     const generation = ++this.exclusionGeneration;
-    const hadActiveIndex = this.dependencies.store.activeIndex() !== null;
+    const hadActiveIndex = this.dependencies.store.hasActiveIndex();
     this.cancelScan();
     await this.scanPromise;
     if (!this.ownsExclusion(lifecycleEpoch, generation)) return;
@@ -1226,6 +1936,7 @@ export class WorkbenchController {
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
+    this.disposeFolderSelection(true, false);
     this.cancelProjectionSchedule();
     this.lifecycleEpoch += 1;
     this.exclusionGeneration += 1;
@@ -1251,6 +1962,11 @@ export class WorkbenchController {
     const incomingHybridCatalog = this.dependencies.catalog.hybrid === undefined
       ? undefined
       : clone(this.dependencies.catalog.hybrid.snapshot());
+    if (
+      this.folderSelectionOwner !== null
+      && incomingHybridCatalog?.active?.sourceImportSha256
+        !== this.folderSelectionOwner.sourceImportSha256
+    ) this.disposeFolderSelection(true, false);
     const verificationCapabilityAvailable = incomingHybridCatalog !== undefined
       && incomingHybridCatalog.status !== "unavailable";
     if (!verificationCapabilityAvailable) {
@@ -1275,10 +1991,24 @@ export class WorkbenchController {
     );
     const selectedVerificationGroupKeys = this.model.selectedVerificationGroupKeys
       .filter((groupKey) => availableGroupKeys.has(groupKey));
+    let verificationDirectorySelection = this.model.verificationDirectorySelection;
+    if (verificationDirectorySelection?.kind === "category") {
+      try {
+        verificationDirectorySelection = requireCloudDirectorySelectionValidator(
+          this.dependencies.catalogDirectorySelectionValidator,
+        )(
+          verificationDirectorySelection,
+          verificationPickerPurpose(hybridCatalog?.active?.groups ?? []),
+        );
+      } catch {
+        verificationDirectorySelection = undefined;
+      }
+    }
     const {
       catalogConnection: _catalogConnection,
       hybridCatalog: _hybridCatalog,
       verificationActionMessageCode,
+      verificationDirectorySelection: _verificationDirectorySelection,
       ...current
     } = this.model;
     this.model = {
@@ -1289,12 +2019,33 @@ export class WorkbenchController {
       ...(verificationCapabilityAvailable && verificationActionMessageCode !== undefined
         ? { verificationActionMessageCode }
         : {}),
+      ...(verificationDirectorySelection === undefined ? {} : { verificationDirectorySelection }),
       verificationRootLocked: this.lockedVerificationRoot !== null,
       selectedVerificationGroupKeys,
       selectedCatalogId: catalogPageContains(catalog, this.model.selectedCatalogId)
         ? this.model.selectedCatalogId
         : null,
     };
+    const folderOwner = this.folderSelectionOwner;
+    if (folderOwner !== null && !folderOwner.closeRequested) {
+      try {
+        const state = clone(folderOwner.driver.snapshot());
+        if (state.phase !== "closed") {
+          this.model = {
+            ...this.model,
+            folderSelection: {
+              revision: this.nextFolderSelectionRevision(),
+              locale: this.model.locale,
+              state,
+              returnLabel: this.model.locale === "zh-CN" ? "云端核验" : "Cloud verification",
+              legacyProgressMode: this.folderSelectionLegacyProgressMode(state),
+            },
+          };
+        }
+      } catch {
+        this.disposeFolderSelection(true, false);
+      }
+    }
     this.emit();
   }
 
@@ -1911,8 +2662,1182 @@ export class WorkbenchController {
     this.clearAiDisplay();
   }
 
+  private validatedVerificationLaunch(input: Readonly<{
+    kind: "start" | "resume";
+    cloudRoot: string;
+    groupKeys: readonly string[];
+    directorySelection?: CloudDirectorySelection;
+  }>): VerificationLaunchRequest {
+    if (input.groupKeys.length === 0) throw new RangeError("verification-group-required");
+    const active = this.dependencies.catalog.hybrid?.snapshot().active;
+    if (active === undefined) throw new Error("catalog-unavailable");
+    const groupsByKey = new Map(active.groups.map((group) => [group.groupKey, group]));
+    const groups: VerificationLaunchGroup[] = input.groupKeys.map((groupKey) => {
+      const group = groupsByKey.get(groupKey);
+      if (group === undefined) throw new Error("catalog-unavailable");
+      return {
+        groupKey,
+        rootRelativePath: group.rootRelativePath,
+        label: group.label,
+        pdfCount: group.pdfCount,
+      };
+    });
+    const normalized = this.validateCatalogScanRoot(input.cloudRoot);
+    if (input.kind === "start" && isSelectedCategoryRoot(normalized, groups)) {
+      throw new Error("invalid-large-catalog-root");
+    }
+    const request: VerificationLaunchRequest = input.kind === "start"
+      ? {
+          kind: "start",
+          cloudRoot: normalized,
+          groups,
+          ...(input.directorySelection === undefined
+            ? {}
+            : { directorySelection: input.directorySelection }),
+        }
+      : { kind: "resume", cloudRoot: normalized, groups };
+    return validateVerificationLaunchRequest(
+      request,
+      this.dependencies.catalogDirectorySelectionValidator,
+    );
+  }
+
+  private async runVerifiedLaunch(input: Readonly<{
+    kind: "start" | "resume";
+    expectedRevision?: number;
+    cloudRoot: string;
+    groupKeys: readonly string[];
+    directorySelection?: CloudDirectorySelection;
+    confirm: boolean;
+    onConfirmed?: () => void;
+  }>, permit?: TaskActionPermit): Promise<void> {
+    if (this.disposed) return;
+    if (input.expectedRevision !== undefined) {
+      if (
+        permit === undefined
+        || permit.revision !== input.expectedRevision
+        || this.taskActionNonce !== permit.nonce
+      ) throw new Error("task-action-stale");
+    } else if (permit !== undefined) {
+      throw new Error("task-action-stale");
+    }
+    await this.withCloudAuthorityPermit("verification-launch", async () => {
+      this.assertNoLiveCloudExecution();
+      this.assertTaskActionPermit(permit);
+      this.clearVerificationHybridMessageSuppression();
+      const hybrid = this.dependencies.catalog.hybrid;
+      if (hybrid === undefined) throw new Error("catalog-unavailable");
+      const batchAtLaunch = input.kind === "resume" ? hybrid.snapshot().batch : undefined;
+      if (input.kind === "resume" && batchAtLaunch === undefined) {
+        throw new HybridCatalogError("hybrid-batch-unavailable");
+      }
+      const groupKeys = input.kind === "resume"
+        ? [...batchAtLaunch!.selectedGroupKeys]
+        : [...input.groupKeys];
+      if (
+        input.kind === "resume"
+        && input.expectedRevision === undefined
+        && (
+          input.groupKeys.length !== groupKeys.length
+          || input.groupKeys.some((groupKey, index) => groupKey !== groupKeys[index])
+        )
+      ) throw new HybridCatalogError("hybrid-batch-unavailable");
+      const launchInput = { ...input, groupKeys };
+      const before = hybrid.snapshot();
+      const alreadyLocked = this.lockedVerificationRoot !== null;
+      let lockedForAttempt = false;
+      try {
+        let request = this.validatedVerificationLaunch(launchInput);
+        if (request.kind === "start") {
+          this.assertStartAuthority(request.cloudRoot, groupKeys);
+        } else {
+          this.assertResumeAuthority(request.cloudRoot, groupKeys);
+        }
+        if (input.confirm) {
+          const confirmation = this.dependencies.catalogLargeScanConfirmation;
+          if (confirmation === undefined) throw new Error("catalog-unavailable");
+          const confirmed = await confirmation.request(request);
+          if (this.disposed || !confirmed) return;
+          this.assertTaskActionPermit(permit);
+        }
+        this.assertNoLiveCloudExecution();
+        request = this.validatedVerificationLaunch(launchInput);
+        if (request.kind === "start") {
+          this.assertStartAuthority(request.cloudRoot, groupKeys);
+        } else {
+          this.assertResumeAuthority(request.cloudRoot, groupKeys);
+        }
+        this.assertTaskActionPermit(permit);
+        input.onConfirmed?.();
+        if (!alreadyLocked) {
+          lockedForAttempt = true;
+          this.lockVerificationRoot(request.cloudRoot);
+        }
+        if (request.kind === "start") {
+          await hybrid.startLargeVerification({
+            cloudRoot: request.cloudRoot,
+            groupKeys: request.groups.map((group) => group.groupKey),
+          });
+        } else {
+          await hybrid.resumeLargeVerification({
+            cloudRoot: request.cloudRoot,
+            groupKeys: request.groups.map((group) => group.groupKey),
+          });
+        }
+        if (!this.disposed) await refreshCatalogProjection(this.dependencies.catalog);
+        if (lockedForAttempt && !verificationBatchAdvanced(before, hybrid.snapshot())) {
+          this.unlockVerificationRoot();
+        }
+        this.clearVerificationActionMessage();
+      } catch (error) {
+        if (lockedForAttempt) this.unlockVerificationRoot();
+        if (
+          error instanceof HybridCatalogError
+          && error.code === "hybrid-cloud-root-mismatch"
+        ) {
+          this.unlockVerificationRoot();
+          this.setVerificationActionMessage("hybrid-cloud-root-mismatch");
+        }
+        this.captureVerificationValidation(error);
+        throw error;
+      }
+    });
+  }
+
+  private assertTaskActionPermit(permit: TaskActionPermit | undefined): void {
+    if (permit === undefined) return;
+    this.reconcileTaskProjection();
+    if (
+      this.taskActionNonce !== permit.nonce
+      || this.model.taskActionRevision !== permit.revision
+    ) throw new Error("task-action-stale");
+  }
+
+  private async withTaskActionPermit<T>(
+    expectedRevision: number,
+    action: (permit: TaskActionPermit) => Promise<T>,
+  ): Promise<T> {
+    if (this.taskActionNonce !== null) throw new Error("task-action-busy");
+    if (expectedRevision !== this.model.taskActionRevision) {
+      throw new Error("task-action-stale");
+    }
+    const nonce = Symbol("task-action");
+    const permit = Object.freeze({ revision: expectedRevision, nonce });
+    this.taskActionNonce = nonce;
+    this.model = { ...this.model, taskActionPending: true };
+    this.emit();
+    try {
+      return await action(permit);
+    } finally {
+      if (this.taskActionNonce === nonce) {
+        this.taskActionNonce = null;
+        if (!this.disposed) {
+          this.model = { ...this.model, taskActionPending: false };
+          this.emit();
+        }
+      }
+    }
+  }
+
+  private async previewTaskCatalogTxtWithPermit(
+    path: string,
+    permit: TaskActionPermit,
+    revalidateSemanticScope: boolean,
+  ): Promise<void> {
+    const hybrid = this.dependencies.catalog.hybrid;
+    if (hybrid === undefined) throw new Error("catalog-unavailable");
+    const priorDraft = this.pendingCatalogTxt;
+    try {
+      const preview = await hybrid.previewTxt(path);
+      if (this.disposed) return;
+      if (revalidateSemanticScope) this.assertTaskActionPermit(permit);
+      this.pendingCatalogTxt = Object.freeze({
+        path,
+        sourceSha256: preview.sourceSha256,
+      });
+      this.model = { ...this.model, pendingCatalogTxt: clone(this.pendingCatalogTxt) };
+      this.emit();
+    } catch (error) {
+      if (!this.disposed) {
+        const retainedCandidate = hybrid.snapshot().candidate;
+        this.pendingCatalogTxt = priorDraft !== null
+          && retainedCandidate?.sourceSha256 === priorDraft.sourceSha256
+          ? priorDraft
+          : null;
+        this.model = {
+          ...this.model,
+          pendingCatalogTxt: this.pendingCatalogTxt === null
+            ? null
+            : clone(this.pendingCatalogTxt),
+          status: "error",
+          statusMessage: "task.txtImportFailed",
+        };
+        this.emit();
+      }
+      throw error;
+    }
+  }
+
+  private async importCatalogTxtDraft(onConfirmed?: () => void): Promise<void> {
+    const hybrid = this.dependencies.catalog.hybrid;
+    const confirmation = this.dependencies.catalogTxtImportConfirmation;
+    const draft = this.pendingCatalogTxt;
+    const candidate = hybrid?.snapshot().candidate;
+    if (hybrid === undefined || confirmation === undefined || draft === null) {
+      throw new Error("catalog-unavailable");
+    }
+    if (candidate === undefined || candidate.sourceSha256 !== draft.sourceSha256) {
+      this.pendingCatalogTxt = null;
+      this.model = {
+        ...this.model,
+        pendingCatalogTxt: null,
+        status: "error",
+        statusMessage: "task.txtImportFailed",
+      };
+      this.emit();
+      throw new HybridCatalogError("txt-source-invalid");
+    }
+    await this.withCloudAuthorityPermit("library-binding", async () => {
+      const confirmed = await confirmation.request(clone(candidate));
+      if (this.disposed || !confirmed) return;
+      let result: Awaited<ReturnType<typeof hybrid.consumeTxtPreview>>;
+      try {
+        result = await hybrid.consumeTxtPreview({
+          path: draft.path,
+          expectedSourceSha256: draft.sourceSha256,
+        });
+      } catch (error) {
+        if (!this.disposed) {
+          const retainedCandidate = hybrid.snapshot().candidate;
+          if (retainedCandidate?.sourceSha256 !== draft.sourceSha256) {
+            this.pendingCatalogTxt = null;
+          }
+          this.model = {
+            ...this.model,
+            pendingCatalogTxt: this.pendingCatalogTxt === null
+              ? null
+              : clone(this.pendingCatalogTxt),
+            status: "error",
+            statusMessage: "task.txtImportFailed",
+          };
+          this.emit();
+        }
+        throw error;
+      }
+      if (this.disposed) return;
+      onConfirmed?.();
+      this.pendingCatalogTxt = null;
+      this.model = {
+        ...this.model,
+        pendingCatalogTxt: null,
+        status: "ready",
+        statusMessage: result.kind === "unchanged" ? "task.txtContentUnchanged" : undefined,
+      };
+      this.emit();
+      if (result.kind === "unchanged") return;
+
+      this.disposeFolderSelection(true, false);
+
+      // Activation is the one-use boundary. Revoke old scope in memory before
+      // any fallible persistence/rebuild await so cleanup failure stays closed.
+      this.installVerificationAuthority(null);
+      const current = this.dependencies.store.settings();
+      const replacement: CloudVerificationSettings = {
+        boundCloudLibrary: null,
+        cloudVerificationGeneration: current.cloudVerificationGeneration,
+        verificationBatchTombstones: clone(current.verificationBatchTombstones),
+        legacyVerificationAdoption: clone(current.legacyVerificationAdoption),
+      };
+      await this.dependencies.store.updateCloudVerificationSettings(replacement, {
+        kind: "txt-source-replacement",
+        currentWorkflowBatchId: null,
+      });
+      if (this.disposed) return;
+      await hybrid.rebuildVerificationProjection();
+      if (!this.disposed) await refreshCatalogProjection(this.dependencies.catalog);
+    });
+  }
+
+  private currentFolderSelection(expectedRevision: number): FolderSelectionOwner | null {
+    const owner = this.folderSelectionOwner;
+    if (
+      this.disposed
+      || owner === null
+      || this.model.folderSelection?.revision !== expectedRevision
+    ) return null;
+    return owner;
+  }
+
+  private nextFolderSelectionRevision(): number {
+    this.folderSelectionRevision = this.folderSelectionRevision >= Number.MAX_SAFE_INTEGER
+      ? 1
+      : this.folderSelectionRevision + 1;
+    return this.folderSelectionRevision;
+  }
+
+  private legacyInputForSelection(
+    state: FolderSelectionRenderState["state"],
+  ): LegacyAdoptionFailureToken | null {
+    const active = this.dependencies.catalog.hybrid?.snapshot().active;
+    const effectiveRoot = state.draftSelection?.effectiveRoot;
+    if (
+      active === undefined
+      || active.legacyArtifactSetSha256 === null
+      || effectiveRoot === undefined
+    ) return null;
+    let normalizedRoot: string;
+    try {
+      normalizedRoot = this.validateCatalogScanRoot(effectiveRoot);
+    } catch {
+      return null;
+    }
+    const selectedEffectiveRootSha256 = this.dependencies.cloudVerificationRootHasher(
+      normalizedRoot,
+    );
+    if (selectedEffectiveRootSha256 === null) return null;
+    return {
+      selectedEffectiveRootSha256,
+      activeSourceImportSha256: active.sourceImportSha256,
+      legacyArtifactSetSha256: active.legacyArtifactSetSha256,
+    };
+  }
+
+  private folderSelectionLegacyProgressMode(
+    state: FolderSelectionRenderState["state"],
+  ): FolderSelectionRenderState["legacyProgressMode"] {
+    const adoption = this.dependencies.store.settings().legacyVerificationAdoption;
+    if (adoption.state === "invalid") return "requires-fresh";
+    if (adoption.state !== "pending") return "none";
+    const input = this.legacyInputForSelection(state);
+    return input !== null
+      && sameLegacyAdoptionFailureToken(this.legacyAdoptionFailureToken, input)
+      ? "requires-fresh"
+      : "will-preserve";
+  }
+
+  private publishFolderSelection(owner: FolderSelectionOwner): void {
+    if (
+      this.disposed
+      || this.folderSelectionOwner !== owner
+      || owner.closeRequested
+    ) return;
+    let state: FolderSelectionRenderState["state"];
+    try {
+      state = clone(owner.driver.snapshot());
+    } catch {
+      this.disposeFolderSelection(true, true);
+      return;
+    }
+    if (state.phase === "closed") {
+      if (!owner.usePending) this.disposeFolderSelection(true, true);
+      return;
+    }
+    this.model = { ...this.model, folderSelection: this.folderSelectionRenderState(state) };
+    this.emit();
+  }
+
+  private folderSelectionRenderState(
+    state: FolderSelectionRenderState["state"],
+    feedbackCode?: FolderSelectionRenderState["feedbackCode"],
+  ): FolderSelectionRenderState {
+    return {
+      revision: this.nextFolderSelectionRevision(),
+      locale: this.model.locale,
+      state,
+      returnLabel: this.model.locale === "zh-CN" ? "云端核验" : "Cloud verification",
+      legacyProgressMode: this.folderSelectionLegacyProgressMode(state),
+      ...(feedbackCode === undefined ? {} : { feedbackCode }),
+    };
+  }
+
+  private onFolderSelectionEmission(owner: FolderSelectionOwner): void {
+    if (
+      this.folderSelectionOwner !== owner
+      || this.disposed
+      || owner.closeRequested
+    ) return;
+    let phase: FolderSelectionRenderState["state"]["phase"];
+    try {
+      phase = owner.driver.snapshot().phase;
+    } catch {
+      this.disposeFolderSelection(true, true);
+      return;
+    }
+    if (phase === "closed" && owner.usePending) return;
+    if (phase === "closed") {
+      this.disposeFolderSelection(true, true);
+      return;
+    }
+    this.publishFolderSelection(owner);
+  }
+
+  private destroyFolderSelectionOwner(owner: FolderSelectionOwner): void {
+    if (owner.driverDisposed) return;
+    owner.driverDisposed = true;
+    const unsubscribe = owner.unsubscribe;
+    owner.unsubscribe = () => undefined;
+    try { unsubscribe(); } catch { /* best-effort listener detachment */ }
+    try { owner.driver.cancel(); } catch { /* driver lifecycle is fail-closed below */ }
+    try { owner.driver.dispose(); } catch { /* no shared runtime is cleared by disposal */ }
+  }
+
+  private removeFolderSelectionModel(): void {
+    const { folderSelection: _folderSelection, ...current } = this.model;
+    this.model = current.route.tab === "task" && current.route.page === "folder-selection"
+      ? { ...current, route: { tab: "task", page: "overview" } }
+      : current;
+  }
+
+  private finalizeFolderSelectionOwner(
+    owner: FolderSelectionOwner,
+    clearFailureToken: boolean,
+    emit: boolean,
+  ): void {
+    if (this.folderSelectionOwner !== owner) return;
+    this.folderSelectionOwner = null;
+    if (clearFailureToken) this.legacyAdoptionFailureToken = null;
+    this.destroyFolderSelectionOwner(owner);
+    this.removeFolderSelectionModel();
+    if (emit && !this.disposed) this.emit();
+  }
+
+  private disposeFolderSelection(clearFailureToken: boolean, emit: boolean): void {
+    const owner = this.folderSelectionOwner;
+    if (clearFailureToken) this.legacyAdoptionFailureToken = null;
+    if (owner !== null && owner.commitStarted && owner.usePending) {
+      owner.closeRequested = true;
+      this.destroyFolderSelectionOwner(owner);
+      this.removeFolderSelectionModel();
+      if (emit && !this.disposed) this.emit();
+      return;
+    }
+    if (owner !== null) {
+      this.finalizeFolderSelectionOwner(owner, clearFailureToken, emit);
+      return;
+    }
+    this.removeFolderSelectionModel();
+    if (emit && !this.disposed) this.emit();
+  }
+
+  private rebuildFolderSelection(
+    previousOwner: FolderSelectionOwner,
+    selectedPath: string,
+    baseline: FolderBindingBaseline,
+    feedbackCode?: FolderSelectionRenderState["feedbackCode"],
+  ): void {
+    if (
+      this.disposed
+      || this.folderSelectionOwner !== previousOwner
+      || previousOwner.closeRequested
+    ) return;
+    const factory = this.dependencies.folderSelectionSessionFactory;
+    const active = this.dependencies.catalog.hybrid?.snapshot().active;
+    const purpose = clone(previousOwner.purpose);
+    if (
+      factory?.available !== true
+      || active === undefined
+      || active.sourceImportSha256 !== previousOwner.sourceImportSha256
+      || active.legacyArtifactSetSha256 !== baseline.legacyArtifactSetSha256
+      || folderSelectionPurposeKey(verificationPickerPurpose(active.groups))
+        !== folderSelectionPurposeKey(purpose)
+    ) {
+      this.legacyAdoptionFailureToken = null;
+      this.finalizeFolderSelectionOwner(previousOwner, false, true);
+      throw folderSelectionStale();
+    }
+    let owner: FolderSelectionOwner | null = null;
+    try {
+      const driver = factory.create({ purpose: clone(purpose), initialPath: selectedPath });
+      owner = {
+        nonce: Symbol("folder-selection"),
+        purpose,
+        driver,
+        sourceImportSha256: active.sourceImportSha256,
+        unsubscribe: () => undefined,
+        usePending: false,
+        commitStarted: false,
+        closeRequested: false,
+        driverDisposed: false,
+      };
+      owner.unsubscribe = driver.subscribe(() => this.onFolderSelectionEmission(owner!));
+      const state = clone(driver.snapshot());
+      if (state.phase === "closed") throw new Error("folder-selection-rebuild-closed");
+      const folderSelection = this.folderSelectionRenderState(state, feedbackCode);
+      this.folderSelectionOwner = owner;
+      this.destroyFolderSelectionOwner(previousOwner);
+      this.model = { ...this.model, folderSelection };
+      this.emit();
+    } catch (error) {
+      if (owner !== null) this.destroyFolderSelectionOwner(owner);
+      this.finalizeFolderSelectionOwner(previousOwner, false, true);
+      throw error;
+    }
+  }
+
+  private captureFolderBindingBaseline(owner: FolderSelectionOwner): FolderBindingBaseline {
+    const hybrid = this.dependencies.catalog.hybrid?.snapshot();
+    const active = hybrid?.active;
+    if (
+      active === undefined
+      || active.sourceImportSha256 !== owner.sourceImportSha256
+    ) throw folderSelectionStale();
+    return {
+      activeSourceImportSha256: active.sourceImportSha256,
+      legacyArtifactSetSha256: active.legacyArtifactSetSha256,
+      groupsKey: folderSelectionPurposeKey(verificationPickerPurpose(active.groups)),
+      settingsKey: cloudVerificationSettingsKey(this.dependencies.store.settings()),
+      batchKey: JSON.stringify(hybrid?.batch ?? null),
+    };
+  }
+
+  private assertFolderBindingBaseline(
+    owner: FolderSelectionOwner,
+    baseline: FolderBindingBaseline,
+    permitNonce: symbol,
+  ): void {
+    this.assertNoLiveCloudExecution();
+    const hybrid = this.dependencies.catalog.hybrid?.snapshot();
+    const active = hybrid?.active;
+    if (
+      this.disposed
+      || this.cloudAuthorityOperation?.nonce !== permitNonce
+      || this.folderSelectionOwner !== owner
+      || owner.nonce !== this.folderSelectionOwner.nonce
+      || active === undefined
+      || active.sourceImportSha256 !== baseline.activeSourceImportSha256
+      || active.legacyArtifactSetSha256 !== baseline.legacyArtifactSetSha256
+      || folderSelectionPurposeKey(verificationPickerPurpose(active.groups)) !== baseline.groupsKey
+      || cloudVerificationSettingsKey(this.dependencies.store.settings()) !== baseline.settingsKey
+      || JSON.stringify(hybrid?.batch ?? null) !== baseline.batchKey
+    ) throw folderSelectionStale();
+  }
+
+  private folderBindingSnapshotMatchesBaseline(
+    owner: FolderSelectionOwner,
+    baseline: FolderBindingBaseline,
+    permitNonce: symbol,
+    snapshot: HybridCatalogViewModel | undefined,
+  ): boolean {
+    if (snapshot === undefined) return false;
+    const active = snapshot.active;
+    return !this.disposed
+      && this.cloudAuthorityOperation?.nonce === permitNonce
+      && this.folderSelectionOwner === owner
+      && active !== undefined
+      && snapshot.executionActive !== true
+      && active.sourceImportSha256 === baseline.activeSourceImportSha256
+      && active.legacyArtifactSetSha256 === baseline.legacyArtifactSetSha256
+      && folderSelectionPurposeKey(verificationPickerPurpose(active.groups)) === baseline.groupsKey
+      && JSON.stringify(snapshot.batch ?? null) === baseline.batchKey;
+  }
+
+  private folderBindingProjectionMatches(
+    owner: FolderSelectionOwner,
+    baseline: FolderBindingBaseline,
+    permitNonce: symbol,
+    selection: CloudDirectorySelection,
+    replacement: CloudVerificationSettings,
+    scope: CloudVerificationScope,
+    expectedBatchId: string | null,
+  ): boolean {
+    const snapshot = this.dependencies.catalog.hybrid?.snapshot();
+    if (snapshot === undefined) return false;
+    const active = snapshot.active;
+    if (
+      this.disposed
+      || this.cloudAuthorityOperation?.nonce !== permitNonce
+      || this.folderSelectionOwner !== owner
+      || active === undefined
+      || snapshot.executionActive === true
+      || active.sourceImportSha256 !== baseline.activeSourceImportSha256
+      || active.legacyArtifactSetSha256 !== baseline.legacyArtifactSetSha256
+      || folderSelectionPurposeKey(verificationPickerPurpose(active.groups)) !== baseline.groupsKey
+      || !sameCloudVerificationSettings(
+        cloudVerificationSettingsFrom(this.dependencies.store.settings()),
+        replacement,
+      )
+    ) return false;
+    const availableGroupKeys = new Set(active.groups.map((group) => group.groupKey));
+    if (selection.kind === "category" && !availableGroupKeys.has(selection.groupKey)) {
+      return false;
+    }
+    const batch = snapshot.batch;
+    if ((batch?.batchId ?? null) !== expectedBatchId) return false;
+    if (batch === undefined) return true;
+    if (
+      replacement.verificationBatchTombstones.state !== "valid"
+      || replacement.verificationBatchTombstones.batchIds.includes(batch.batchId)
+      || !cloudVerificationScopesEqual(batch.verificationScope, scope)
+      || batch.selectedGroupCount !== batch.selectedGroupKeys.length
+      || new Set(batch.selectedGroupKeys).size !== batch.selectedGroupKeys.length
+      || batch.selectedGroupKeys.some((groupKey) => !availableGroupKeys.has(groupKey))
+    ) return false;
+    if (!batch.legacyPromotionRequired) return true;
+    const adoption = replacement.legacyVerificationAdoption;
+    return adoption.state === "adopted"
+      && adoption.verificationGeneration === scope.generation
+      && adoption.sourceImportSha256 === scope.sourceImportSha256
+      && adoption.cloudRootSha256 === scope.cloudRootSha256
+      && adoption.resumableBatch?.batchId === batch.batchId
+      && adoption.resumableBatch.sourceImportSha256 === scope.sourceImportSha256
+      && adoption.resumableBatch.cloudRootSha256 === scope.cloudRootSha256;
+  }
+
+  private async useFolderSelection(expectedRevision: number): Promise<void> {
+    const owner = this.currentFolderSelection(expectedRevision);
+    if (owner === null) return;
+    await this.withCloudAuthorityPermit("library-binding", async (permitNonce) => {
+      this.assertNoLiveCloudExecution();
+      if (this.folderSelectionOwner !== owner) throw folderSelectionStale();
+      const baseline = this.captureFolderBindingBaseline(owner);
+      owner.usePending = true;
+      let selection: CloudDirectorySelection | null = null;
+      try {
+        selection = await owner.driver.useSelection();
+        if (selection === null) return;
+        this.assertFolderBindingBaseline(owner, baseline, permitNonce);
+        await this.commitFolderSelection(owner, baseline, permitNonce, selection);
+      } catch (error) {
+        const stale = bindingCasConflict(error)
+          || (error instanceof Error && error.message === "folder-selection-stale");
+        let recovered = false;
+        if (
+          selection !== null
+          && this.folderSelectionOwner === owner
+          && !owner.closeRequested
+          && !this.disposed
+        ) {
+          try {
+            this.rebuildFolderSelection(
+              owner,
+              selection.selectedPath,
+              baseline,
+              stale ? undefined : "binding-failed",
+            );
+            recovered = true;
+          } catch { /* original binding failure remains authoritative */ }
+        }
+        if (
+          selection !== null
+          && !stale
+          && !recovered
+          && !owner.closeRequested
+          && !this.disposed
+          && this.model.folderSelection === undefined
+        ) {
+          this.model = {
+            ...this.model,
+            status: "ready",
+            statusMessage: "folder-selection-binding-failed",
+          };
+          this.emit();
+        }
+        if (bindingCasConflict(error)) throw folderSelectionStale();
+        throw error;
+      } finally {
+        if (this.folderSelectionOwner === owner) {
+          owner.usePending = false;
+          if (owner.closeRequested || this.disposed) {
+            this.finalizeFolderSelectionOwner(owner, false, false);
+          }
+        }
+      }
+    });
+  }
+
+  private async commitFolderSelection(
+    owner: FolderSelectionOwner,
+    baseline: FolderBindingBaseline,
+    permitNonce: symbol,
+    selection: CloudDirectorySelection,
+  ): Promise<void> {
+    const hybrid = this.dependencies.catalog.hybrid;
+    if (hybrid === undefined) throw new Error("catalog-unavailable");
+    const before = hybrid.snapshot();
+    const active = before.active;
+    if (active === undefined) throw folderSelectionStale();
+    const effectiveRoot = this.validateCatalogScanRoot(selection.effectiveRoot);
+    if (
+      selection.kind === "category"
+      && !active.groups.some((group) => group.groupKey === selection.groupKey)
+    ) throw folderSelectionStale();
+
+    const currentSettings = this.dependencies.store.settings();
+    const currentBindingRoot = currentSettings.boundCloudLibrary === null
+      ? null
+      : this.validateCatalogScanRoot(currentSettings.boundCloudLibrary.path);
+    const rootChanged = currentBindingRoot !== null && currentBindingRoot !== effectiveRoot;
+    const rotateGeneration = currentSettings.cloudVerificationGeneration === 0 || rootChanged;
+    const nextGeneration = rotateGeneration
+      ? checkedNextVerificationGeneration(currentSettings.cloudVerificationGeneration)
+      : currentSettings.cloudVerificationGeneration;
+    const proposedBinding = {
+      schemaVersion: 1 as const,
+      path: effectiveRoot,
+      sourceImportSha256: active.sourceImportSha256,
+      verificationGeneration: nextGeneration,
+    };
+    const proposedScope = deriveCloudVerificationScope(
+      proposedBinding,
+      this.dependencies.cloudVerificationRootHasher,
+    );
+    if (proposedScope === null) throw new RangeError("cloud-verification-root-unavailable");
+    const legacyInput: LegacyAdoptionFailureToken | null = active.legacyArtifactSetSha256 === null
+      ? null
+      : {
+          selectedEffectiveRootSha256: proposedScope.cloudRootSha256,
+          activeSourceImportSha256: active.sourceImportSha256,
+          legacyArtifactSetSha256: active.legacyArtifactSetSha256,
+        };
+    const forceFreshByInvalid = currentSettings.legacyVerificationAdoption.state === "invalid";
+    const forceFreshByToken = legacyInput !== null
+      && sameLegacyAdoptionFailureToken(this.legacyAdoptionFailureToken, legacyInput);
+    const forceFreshLegacy = forceFreshByInvalid || forceFreshByToken;
+    let preparedAdoption: LegacyVerificationAdoptionV1 | null = null;
+    if (
+      !forceFreshLegacy
+      && currentSettings.cloudVerificationGeneration === 0
+      && currentSettings.legacyVerificationAdoption.state === "pending"
+    ) {
+      try {
+        preparedAdoption = await hybrid.prepareLegacyVerificationAdoption(proposedScope);
+        this.assertFolderBindingBaseline(owner, baseline, permitNonce);
+        await hybrid.revalidatePreparedLegacyAdoption(preparedAdoption);
+        this.assertFolderBindingBaseline(owner, baseline, permitNonce);
+      } catch (error) {
+        this.assertFolderBindingBaseline(owner, baseline, permitNonce);
+        if (!deterministicLegacyAdoptionConflict(error)) throw error;
+        if (legacyInput === null) {
+          throw new RangeError("legacy-adoption-input-unavailable");
+        }
+        this.legacyAdoptionFailureToken = legacyInput;
+        this.rebuildFolderSelection(owner, selection.selectedPath, baseline);
+        return;
+      }
+    }
+
+    this.assertFolderBindingBaseline(owner, baseline, permitNonce);
+    const latest = hybrid.snapshot();
+    const latestActive = latest.active;
+    const latestLegacyInput: LegacyAdoptionFailureToken | null = latestActive?.legacyArtifactSetSha256 == null
+      ? null
+      : {
+          selectedEffectiveRootSha256: proposedScope.cloudRootSha256,
+          activeSourceImportSha256: latestActive.sourceImportSha256,
+          legacyArtifactSetSha256: latestActive.legacyArtifactSetSha256,
+        };
+    if (
+      forceFreshByToken
+      && !sameLegacyAdoptionFailureToken(this.legacyAdoptionFailureToken, latestLegacyInput)
+    ) {
+      this.legacyAdoptionFailureToken = null;
+      this.rebuildFolderSelection(owner, selection.selectedPath, baseline);
+      return;
+    }
+
+    const batch = latest.batch;
+    const currentBatchId = batch !== undefined && batch.status !== "complete"
+      ? batch.batchId
+      : null;
+    const adoptedBatchId = preparedAdoption?.state === "adopted"
+      ? preparedAdoption.resumableBatch?.batchId ?? null
+      : legacyAllowlistFor(
+          currentSettings.legacyVerificationAdoption,
+          proposedScope,
+        )?.resumableBatch?.batchId ?? null;
+    const repairingCurrentBatch = currentBatchId !== null
+      && deriveLibraryWorkflowState({
+        connection: this.dependencies.catalog.connection?.snapshot(),
+        hybrid: latest,
+        boundCloudLibrary: currentSettings.boundCloudLibrary,
+        cloudVerificationGeneration: currentSettings.cloudVerificationGeneration,
+        verificationBatchTombstones: currentSettings.verificationBatchTombstones,
+        legacyVerificationAdoption: currentSettings.legacyVerificationAdoption,
+        pendingCatalogTxt: this.pendingCatalogTxt,
+        cloudVerificationRootHasher: this.dependencies.cloudVerificationRootHasher,
+        capabilityAvailable: latest.status !== "unavailable",
+      }).kind === "repair-library";
+    const requiresBatchRepair = rootChanged
+      || forceFreshLegacy
+      || repairingCurrentBatch
+      || currentSettings.verificationBatchTombstones.state === "invalid";
+    const adoptedBatchExempt = !rootChanged
+      && !forceFreshLegacy
+      && !repairingCurrentBatch
+      && currentBatchId !== null
+      && currentBatchId === adoptedBatchId;
+    const currentWorkflowBatchId = requiresBatchRepair && !adoptedBatchExempt
+      ? currentBatchId
+      : null;
+    const expectedPostBatchId = adoptedBatchId ?? (
+      currentBindingRoot === effectiveRoot
+      && !forceFreshLegacy
+      && !repairingCurrentBatch
+      && currentSettings.verificationBatchTombstones.state === "valid"
+        ? latest.batch?.batchId ?? null
+        : null
+    );
+    const replacement: CloudVerificationSettings = {
+      boundCloudLibrary: proposedBinding,
+      cloudVerificationGeneration: nextGeneration,
+      legacyVerificationAdoption: forceFreshLegacy
+        ? { schemaVersion: 1, state: "ineligible" }
+        : preparedAdoption
+          ?? (currentSettings.legacyVerificationAdoption.state === "pending"
+            ? { schemaVersion: 1, state: "none" }
+            : clone(currentSettings.legacyVerificationAdoption)),
+      verificationBatchTombstones: repairVerificationBatchTombstones(
+        currentSettings.verificationBatchTombstones,
+        currentWorkflowBatchId,
+      ),
+    };
+    this.assertFolderBindingBaseline(owner, baseline, permitNonce);
+    owner.commitStarted = true;
+    await this.dependencies.store.updateCloudVerificationSettings(replacement, {
+      kind: "library-binding",
+      currentWorkflowBatchId,
+    });
+    this.legacyAdoptionFailureToken = null;
+
+    if (this.disposed) return;
+
+    const saved = this.dependencies.store.settings();
+    if (!sameCloudVerificationSettings(cloudVerificationSettingsFrom(saved), replacement)) {
+      this.installVerificationAuthority(scopedAuthorityForSettings(
+        saved,
+        this.dependencies.cloudVerificationRootHasher,
+      ));
+      throw folderSelectionStale();
+    }
+    const beforeProjectionMatches = this.folderBindingSnapshotMatchesBaseline(
+      owner,
+      baseline,
+      permitNonce,
+      hybrid.snapshot(),
+    );
+    const authority = scopedAuthorityForSettings(
+      saved,
+      this.dependencies.cloudVerificationRootHasher,
+    );
+    if (authority === null) throw folderSelectionStale();
+    try {
+      this.installVerificationAuthority(authority);
+      await hybrid.rebuildVerificationProjection();
+      if (this.disposed) return;
+      await refreshCatalogProjection(this.dependencies.catalog);
+      if (this.disposed) return;
+    } catch (error) {
+      if (this.disposed) return;
+      const durableSettings = this.dependencies.store.settings();
+      this.installVerificationAuthority(scopedAuthorityForSettings(
+        durableSettings,
+        this.dependencies.cloudVerificationRootHasher,
+      ));
+      throw error;
+    }
+
+    const durableSettings = this.dependencies.store.settings();
+    if (!sameCloudVerificationSettings(
+      cloudVerificationSettingsFrom(durableSettings),
+      replacement,
+    )) {
+      const durableAuthority = scopedAuthorityForSettings(
+        durableSettings,
+        this.dependencies.cloudVerificationRootHasher,
+      );
+      this.installVerificationAuthority(durableAuthority);
+      await hybrid.rebuildVerificationProjection();
+      throw folderSelectionStale();
+    }
+    if (
+      !beforeProjectionMatches
+      || !this.folderBindingProjectionMatches(
+        owner,
+        baseline,
+        permitNonce,
+        selection,
+        replacement,
+        proposedScope,
+        expectedPostBatchId,
+      )
+    ) throw folderSelectionStale();
+    if (owner.closeRequested) return;
+    const afterActive = hybrid.snapshot().active;
+    if (afterActive === undefined) throw folderSelectionStale();
+    const availableGroupKeys = new Set(afterActive.groups.map((group) => group.groupKey));
+    const selectedVerificationGroupKeys = selection.kind === "category"
+      ? [selection.groupKey]
+      : this.model.selectedVerificationGroupKeys.filter((groupKey) => (
+          availableGroupKeys.has(groupKey)
+        ));
+    this.finalizeFolderSelectionOwner(owner, false, false);
+    const {
+      verificationActionMessageCode: _verificationActionMessageCode,
+      statusMessage: _statusMessage,
+      ...currentModel
+    } = this.model;
+    this.model = {
+      ...currentModel,
+      status: "ready",
+      ...(preparedAdoption?.state === "adopted"
+        ? { statusMessage: "folder-selection-preserved" }
+        : {}),
+      verificationRoot: effectiveRoot,
+      verificationDirectorySelection: clone(selection),
+      selectedVerificationGroupKeys,
+    };
+    this.emit();
+  }
+
+  private async withCloudAuthorityPermit<T>(
+    kind: CloudAuthorityOperation,
+    action: (nonce: symbol) => Promise<T>,
+  ): Promise<T> {
+    if (this.cloudAuthorityOperation !== null) {
+      this.assertNoLiveCloudExecution();
+      this.failCloudAuthorityOperation("cloud-authority-operation-busy");
+    }
+    const nonce = Symbol(kind);
+    this.cloudAuthorityOperation = Object.freeze({ kind, nonce });
+    try {
+      return await action(nonce);
+    } finally {
+      if (this.cloudAuthorityOperation?.nonce === nonce) {
+        this.cloudAuthorityOperation = null;
+      }
+    }
+  }
+
+  private assertNoLiveCloudExecution(): void {
+    if (this.dependencies.catalog.hybrid?.snapshot().executionActive === true) {
+      this.failCloudAuthorityOperation("verification-must-pause");
+    }
+    if (this.dependencies.catalog.connection?.snapshot().status === "scanning") {
+      this.failCloudAuthorityOperation("scan-must-cancel");
+    }
+  }
+
+  private failCloudAuthorityOperation(
+    code: "verification-must-pause" | "scan-must-cancel" | "cloud-authority-operation-busy",
+  ): never {
+    if (!this.disposed) {
+      this.model = { ...this.model, status: "ready", statusMessage: code };
+      this.emit();
+    }
+    throw new Error(code);
+  }
+
+  private clearCatalogDirectorySessions(): void {
+    this.dependencies.catalog.directoryLocator?.cancel();
+    this.dependencies.catalog.directoryDiscovery?.clear();
+    this.dependencies.catalog.directoryBrowser?.clear();
+  }
+
+  private async replaceCatalogIdentityAuthority(): Promise<number> {
+    const current = this.dependencies.store.settings();
+    if (current.cloudVerificationGeneration >= Number.MAX_SAFE_INTEGER) {
+      throw new RangeError("cloud-verification-generation-overflow");
+    }
+    const nextGeneration = current.cloudVerificationGeneration + 1;
+    const batch = this.dependencies.catalog.hybrid?.snapshot().batch;
+    const currentWorkflowBatchId = batch !== undefined && batch.status !== "complete"
+      ? batch.batchId
+      : null;
+    const replacement: CloudVerificationSettings = {
+      boundCloudLibrary: null,
+      cloudVerificationGeneration: nextGeneration,
+      verificationBatchTombstones: repairVerificationBatchTombstones(
+        current.verificationBatchTombstones,
+        currentWorkflowBatchId,
+      ),
+      legacyVerificationAdoption: current.legacyVerificationAdoption.state === "pending"
+        || current.legacyVerificationAdoption.state === "invalid"
+        ? { schemaVersion: 1, state: "ineligible" }
+        : clone(current.legacyVerificationAdoption),
+    };
+    await this.dependencies.store.updateCloudVerificationSettings(replacement, {
+      kind: "identity-replacement",
+      currentWorkflowBatchId,
+    });
+    if (this.disposed) return nextGeneration;
+
+    this.disposeFolderSelection(true, false);
+    this.pendingCatalogTxt = null;
+    this.catalogAuthorizationAttempt = null;
+    this.lockedVerificationRoot = null;
+    const {
+      verificationDirectorySelection: _verificationDirectorySelection,
+      verificationActionMessageCode: _verificationActionMessageCode,
+      ...currentModel
+    } = this.model;
+    this.model = {
+      ...currentModel,
+      pendingCatalogTxt: null,
+      verificationRoot: "",
+      verificationRootLocked: false,
+      selectedVerificationGroupKeys: [],
+    };
+    this.installVerificationAuthority(null);
+    this.emit();
+    const hybrid = this.dependencies.catalog.hybrid;
+    if (hybrid !== undefined) await hybrid.rebuildVerificationProjection();
+    return nextGeneration;
+  }
+
+  private assertStartAuthority(rootPath: string, groupKeys: readonly string[]): void {
+    const normalized = this.validateCatalogScanRoot(rootPath);
+    const settings = this.dependencies.store.settings();
+    const active = this.dependencies.catalog.hybrid?.snapshot().active;
+    const binding = settings.boundCloudLibrary;
+    if (
+      active === undefined
+      || binding === null
+      || settings.cloudVerificationGeneration < 1
+      || binding.verificationGeneration !== settings.cloudVerificationGeneration
+      || binding.sourceImportSha256 !== active.sourceImportSha256
+      || this.validateCatalogScanRoot(binding.path) !== normalized
+      || settings.verificationBatchTombstones.state !== "valid"
+      || settings.legacyVerificationAdoption.state === "pending"
+      || settings.legacyVerificationAdoption.state === "invalid"
+      || groupKeys.length < 1
+      || groupKeys.length > LARGE_CATALOG_RUN_BUDGET.maxSelectedTopLevelGroups
+      || new Set(groupKeys).size !== groupKeys.length
+      || groupKeys.some((groupKey) => !active.groups.some((group) => group.groupKey === groupKey))
+    ) throw new HybridCatalogError("hybrid-batch-unavailable");
+  }
+
+  private assertResumeAuthority(rootPath: string, groupKeys: readonly string[]): void {
+    const normalized = this.validateCatalogScanRoot(rootPath);
+    const settings = this.dependencies.store.settings();
+    const hybrid = this.dependencies.catalog.hybrid?.snapshot();
+    const active = hybrid?.active;
+    const batch = hybrid?.batch;
+    const binding = settings.boundCloudLibrary;
+    if (
+      hybrid === undefined
+      || active === undefined
+      || batch === undefined
+      || batch.resumeAvailable !== true
+      || binding === null
+      || settings.cloudVerificationGeneration < 1
+      || binding.verificationGeneration !== settings.cloudVerificationGeneration
+      || binding.sourceImportSha256 !== active.sourceImportSha256
+      || this.validateCatalogScanRoot(binding.path) !== normalized
+      || settings.verificationBatchTombstones.state !== "valid"
+      || settings.verificationBatchTombstones.batchIds.includes(batch.batchId)
+      || settings.legacyVerificationAdoption.state === "pending"
+      || settings.legacyVerificationAdoption.state === "invalid"
+      || batch.selectedGroupCount !== groupKeys.length
+      || batch.selectedGroupKeys.length !== groupKeys.length
+      || groupKeys.some((groupKey, index) => batch.selectedGroupKeys[index] !== groupKey)
+      || groupKeys.some((groupKey) => !active.groups.some((group) => group.groupKey === groupKey))
+    ) throw new HybridCatalogError("hybrid-batch-unavailable");
+    const scope = deriveCloudVerificationScope(
+      binding,
+      this.dependencies.cloudVerificationRootHasher,
+    );
+    if (scope === null || !cloudVerificationScopesEqual(batch.verificationScope, scope)) {
+      throw new HybridCatalogError("hybrid-batch-unavailable");
+    }
+    if (!batch.legacyPromotionRequired) return;
+    const adoption = settings.legacyVerificationAdoption;
+    if (
+      adoption.state !== "adopted"
+      || adoption.verificationGeneration !== scope.generation
+      || adoption.sourceImportSha256 !== scope.sourceImportSha256
+      || adoption.cloudRootSha256 !== scope.cloudRootSha256
+      || adoption.resumableBatch === null
+      || adoption.resumableBatch.batchId !== batch.batchId
+      || adoption.resumableBatch.sourceImportSha256 !== scope.sourceImportSha256
+      || adoption.resumableBatch.cloudRootSha256 !== scope.cloudRootSha256
+    ) throw new HybridCatalogError("hybrid-batch-unavailable");
+  }
+
+  private taskProjectionSemanticKey(
+    settings: PluginSettings,
+    connection: CloudCatalogConnectionViewModel | undefined,
+    hybrid: HybridCatalogViewModel | undefined,
+    primaryAction: WorkbenchViewModel["workflow"]["primaryAction"],
+  ): string {
+    const batch = hybrid?.batch;
+    const tombstones = settings.verificationBatchTombstones;
+    const currentBatchSuperseded = batch !== undefined
+      && tombstones.state === "valid"
+      && tombstones.batchIds.includes(batch.batchId);
+    return JSON.stringify({
+      activeSourceImportSha256: hybrid?.active?.sourceImportSha256 ?? null,
+      pendingSourceImportSha256: this.pendingCatalogTxt?.sourceSha256 ?? null,
+      boundSourceImportSha256: settings.boundCloudLibrary?.sourceImportSha256 ?? null,
+      boundRoot: settings.boundCloudLibrary?.path ?? null,
+      authorityGeneration: settings.cloudVerificationGeneration,
+      legacyAdoptionStateAndFingerprint: settings.legacyVerificationAdoption,
+      primaryAction,
+      selectedGroupKeys: this.model?.selectedVerificationGroupKeys ?? [],
+      verificationRoot: this.model?.verificationRoot ?? "",
+      verificationDirectorySelection: this.model?.verificationDirectorySelection ?? null,
+      batchId: batch?.batchId ?? null,
+      runOrdinal: batch?.runOrdinal ?? null,
+      hybridMessageCode: hybrid?.messageCode ?? null,
+      connectionMessageCode: connection?.messageCode ?? null,
+      currentBatchSuperseded,
+      verificationBatchTombstoneState: tombstones,
+    });
+  }
+
+  private reconcileTaskProjection(): void {
+    const settings = this.dependencies.store.settings();
+    const connection = this.dependencies.catalog.connection?.snapshot();
+    const hybrid = this.dependencies.catalog.hybrid?.snapshot();
+    const executionKey = taskExecutionKey(hybrid);
+    if (
+      this.taskPauseExecutionKey !== null
+      && this.taskPauseExecutionKey !== executionKey
+    ) this.taskPauseExecutionKey = null;
+    const workflow = deriveLibraryWorkflowState({
+      connection,
+      hybrid,
+      boundCloudLibrary: settings.boundCloudLibrary,
+      cloudVerificationGeneration: settings.cloudVerificationGeneration,
+      verificationBatchTombstones: settings.verificationBatchTombstones,
+      legacyVerificationAdoption: settings.legacyVerificationAdoption,
+      pendingCatalogTxt: this.pendingCatalogTxt,
+      cloudVerificationRootHasher: this.dependencies.cloudVerificationRootHasher,
+      capabilityAvailable: hybrid !== undefined && hybrid.status !== "unavailable",
+    });
+    const semanticKey = this.taskProjectionSemanticKey(
+      settings,
+      connection,
+      hybrid,
+      workflow.primaryAction,
+    );
+    const taskActionRevision = semanticKey === this.taskSemanticKey
+      ? this.model.taskActionRevision
+      : this.model.taskActionRevision >= Number.MAX_SAFE_INTEGER
+        ? 1
+        : this.model.taskActionRevision + 1;
+    this.taskSemanticKey = semanticKey;
+    this.model = {
+      ...this.model,
+      pendingCatalogTxt: this.pendingCatalogTxt === null ? null : clone(this.pendingCatalogTxt),
+      taskActionPending: this.taskActionNonce !== null,
+      taskActionRevision,
+      taskPauseRequested: this.taskPauseExecutionKey !== null,
+      boundLibraryPath: settings.boundCloudLibrary?.path ?? null,
+      workflow,
+    };
+  }
+
+  private installVerificationAuthority(authority: CloudVerificationAuthority | null): void {
+    if (this.dependencies.catalog.setVerificationAuthority !== undefined) {
+      this.dependencies.catalog.setVerificationAuthority(authority);
+      return;
+    }
+    this.dependencies.catalog.hybrid?.setVerificationAuthority(authority);
+  }
+
   private emit(): void {
     if (this.disposed) return;
+    this.reconcileTaskProjection();
     for (const listener of this.listeners) {
       try {
         listener();

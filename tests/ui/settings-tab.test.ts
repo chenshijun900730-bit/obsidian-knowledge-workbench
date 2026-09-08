@@ -14,6 +14,18 @@ import {
 } from "../../src/ui/settings-tab";
 import { presentCatalogProgress } from "../../src/ui/catalog-progress-presenter";
 import { EMPTY_RECENT_CLOUD_DIRECTORIES } from "../../src/storage/recent-cloud-directories";
+import { LARGE_CATALOG_AUTO_CHAIN_MAX_SEGMENTS } from "../../src/catalog/hybrid-catalog-types";
+import {
+  TEST_HYBRID_ACTIVE_AUTHORITY,
+  TEST_INACTIVE_HYBRID_EXECUTION,
+  TEST_LARGE_BATCH_AUTHORITY,
+} from "../helpers/ui-fixtures";
+
+const INACTIVE_AUTO_RESUME = {
+  autoResumeState: "inactive" as const,
+  autoSegmentIndex: 0,
+  autoSegmentLimit: LARGE_CATALOG_AUTO_CHAIN_MAX_SEGMENTS,
+};
 
 class SettingsSurface {
   readonly containerEl = document.createElementNS("http://www.w3.org/1999/xhtml", "div") as HTMLDivElement;
@@ -38,6 +50,12 @@ const deferred = () => {
   return { promise, resolve };
 };
 
+const rejectedDeferred = () => {
+  let reject!: (error: Error) => void;
+  const promise = new Promise<void>((_resolve, fail) => { reject = fail; });
+  return { promise, reject };
+};
+
 const makeTab = (options: Readonly<{ fail?: Error }> = {}) => {
   const saves: unknown[] = [];
   const sessions: boolean[] = [];
@@ -47,6 +65,10 @@ const makeTab = (options: Readonly<{ fail?: Error }> = {}) => {
       folderRules: [], excludedPrefixes: [], aiEnabled: true,
       aiEndpoint: "https://example.test/v1", aiModel: "model", secretId: "",
       recentCloudDirectories: EMPTY_RECENT_CLOUD_DIRECTORIES,
+      boundCloudLibrary: null,
+      cloudVerificationGeneration: 0,
+      verificationBatchTombstones: { schemaVersion: 1, state: "valid", batchIds: [] } as const,
+      legacyVerificationAdoption: { schemaVersion: 1, state: "none" } as const,
     }),
     folderRuleProposals: () => [],
     previewSampleChange: () => undefined,
@@ -94,6 +116,10 @@ describe("AI settings", () => {
         aiModel: "",
         secretId: "",
         recentCloudDirectories: EMPTY_RECENT_CLOUD_DIRECTORIES,
+        boundCloudLibrary: null,
+        cloudVerificationGeneration: 0,
+        verificationBatchTombstones: { schemaVersion: 1, state: "valid", batchIds: [] } as const,
+        legacyVerificationAdoption: { schemaVersion: 1, state: "none" } as const,
       }),
       folderRuleProposals: () => [],
       previewSampleChange: () => undefined,
@@ -159,6 +185,10 @@ describe("AI settings", () => {
         folderRules: [], excludedPrefixes: [], aiEnabled: true,
         aiEndpoint: "https://example.test/v1", aiModel: "model", secretId: "secret-id",
         recentCloudDirectories: EMPTY_RECENT_CLOUD_DIRECTORIES,
+        boundCloudLibrary: null,
+        cloudVerificationGeneration: 0,
+        verificationBatchTombstones: { schemaVersion: 1, state: "valid", batchIds: [] } as const,
+        legacyVerificationAdoption: { schemaVersion: 1, state: "none" } as const,
       }),
       folderRuleProposals: () => [],
       previewSampleChange: calls.sample,
@@ -267,454 +297,190 @@ describe("AI settings", () => {
   });
 });
 
-describe("hybrid catalog settings", () => {
+describe("native task handoff", () => {
+  it("uses one enabled task action instead of rendering category controls", () => {
+    const openTaskOverview = vi.fn(async () => undefined);
+    const SettingsTab = createSettingsTabClass(
+      SettingsSurface as unknown as PluginSettingTabConstructor,
+      SecretSurface,
+      NORMAL_RUNTIME_POLICY,
+    );
+    const controller = {
+      settings: () => ({
+        writeEnabled: false, writePreviewAcknowledged: false, locale: "zh-CN" as const,
+        openAtStartup: false, folderRules: [], excludedPrefixes: [], aiEnabled: false,
+        aiEndpoint: "", aiModel: "", secretId: "", recentCloudDirectories: EMPTY_RECENT_CLOUD_DIRECTORIES,
+        boundCloudLibrary: null, cloudVerificationGeneration: 0,
+        verificationBatchTombstones: { schemaVersion: 1, state: "valid", batchIds: [] } as const,
+        legacyVerificationAdoption: { schemaVersion: 1, state: "none" } as const,
+      }),
+      folderRuleProposals: () => [], previewSampleChange: () => undefined,
+      setOpenAtStartup: async () => undefined, setLocale: async () => undefined,
+      setWriteEnabled: async () => undefined, applyFolderRules: async () => undefined,
+      setExcludedPrefixes: async () => undefined,
+    };
+    const tab = new SettingsTab({} as App, {} as never, controller, openTaskOverview);
+    (tab as unknown as { display(): void }).display();
+
+    expect(tab.containerEl.querySelector('[data-catalog-group-key]')).toBeNull();
+    expect(tab.containerEl.querySelector('[data-action="catalog-start-large-verification"]')).toBeNull();
+    expect(tab.containerEl.querySelector('[data-action="catalog-resume-large-verification"]')).toBeNull();
+    const action = tab.containerEl.querySelector<HTMLButtonElement>('[data-action="open-task-overview"]')!;
+    expect(action.disabled).toBe(false);
+    action.click();
+    expect(openTaskOverview).toHaveBeenCalledOnce();
+  });
+
+  it.each(["Settings close", "Workbench reveal", "Workbench activation"])(
+    "contains a rejected %s handoff with fixed local feedback",
+    async (failure) => {
+    const SettingsTab = createSettingsTabClass(
+      SettingsSurface as unknown as PluginSettingTabConstructor,
+      SecretSurface,
+      NORMAL_RUNTIME_POLICY,
+    );
+    const controller = {
+      settings: () => ({
+        writeEnabled: false, writePreviewAcknowledged: false, locale: "zh-CN" as const,
+        openAtStartup: false, folderRules: [], excludedPrefixes: [], aiEnabled: false,
+        aiEndpoint: "", aiModel: "", secretId: "", recentCloudDirectories: EMPTY_RECENT_CLOUD_DIRECTORIES,
+        boundCloudLibrary: null, cloudVerificationGeneration: 0,
+        verificationBatchTombstones: { schemaVersion: 1, state: "valid", batchIds: [] } as const,
+        legacyVerificationAdoption: { schemaVersion: 1, state: "none" } as const,
+      }),
+      folderRuleProposals: () => [], previewSampleChange: () => undefined,
+      setOpenAtStartup: async () => undefined, setLocale: async () => undefined,
+      setWriteEnabled: async () => undefined, applyFolderRules: async () => undefined,
+      setExcludedPrefixes: async () => undefined,
+    };
+    const tab = new SettingsTab({} as App, {} as never, controller, async () => {
+      throw new Error(`${failure} failed`);
+    });
+    (tab as unknown as { display(): void }).display();
+    tab.containerEl.querySelector<HTMLButtonElement>('[data-action="open-task-overview"]')?.click();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(tab.containerEl.querySelector('[data-task-handoff-error="true"]')?.textContent)
+      .toBe("任务页未能打开；设置仍可用，请重试。");
+    },
+  );
+
+  it("ignores an old rejected handoff after redisplay and disposes the new surface once on hide", async () => {
+    const handoff = rejectedDeferred();
+    const firstUnsubscribe = vi.fn();
+    const secondUnsubscribe = vi.fn();
+    const unsubscribes = [firstUnsubscribe, secondUnsubscribe];
+    const subscribe = vi.fn(() => unsubscribes.shift()!);
+    const SettingsTab = createSettingsTabClass(
+      SettingsSurface as unknown as PluginSettingTabConstructor,
+      SecretSurface,
+      NORMAL_RUNTIME_POLICY,
+    );
+    const controller = {
+      settings: () => ({
+        writeEnabled: false, writePreviewAcknowledged: false, locale: "zh-CN" as const,
+        openAtStartup: false, folderRules: [], excludedPrefixes: [], aiEnabled: false,
+        aiEndpoint: "", aiModel: "", secretId: "", recentCloudDirectories: EMPTY_RECENT_CLOUD_DIRECTORIES,
+        boundCloudLibrary: null, cloudVerificationGeneration: 0,
+        verificationBatchTombstones: { schemaVersion: 1, state: "valid", batchIds: [] } as const,
+        legacyVerificationAdoption: { schemaVersion: 1, state: "none" } as const,
+      }),
+      folderRuleProposals: () => [], previewSampleChange: () => undefined,
+      setOpenAtStartup: async () => undefined, setLocale: async () => undefined,
+      setWriteEnabled: async () => undefined, applyFolderRules: async () => undefined,
+      setExcludedPrefixes: async () => undefined,
+      catalogConnection: () => ({ status: "authorized" as const }),
+      subscribeCatalogConnection: subscribe,
+      connectCatalog: async () => undefined, submitCatalogAuthorizationCode: async () => undefined,
+      cancelCatalogAuthorization: () => undefined, revokeCatalog: async () => undefined,
+      validateCatalogScanRoot: (path: string) => path,
+      requestCatalogScan: async () => undefined,
+    };
+    const tab = new SettingsTab({} as App, {} as never, controller, () => handoff.promise);
+    (tab as unknown as { display(): void; hide(): void }).display();
+    tab.containerEl.querySelector<HTMLButtonElement>('[data-action="open-task-overview"]')?.click();
+    expect(firstUnsubscribe).toHaveBeenCalledOnce();
+
+    (tab as unknown as { display(): void }).display();
+    expect(subscribe).toHaveBeenCalledTimes(2);
+    handoff.reject(new Error("stale host failure"));
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(tab.containerEl.querySelector('[data-task-handoff-error="true"]')).toBeNull();
+    expect(tab.containerEl.querySelector('[data-catalog-app-key="true"]')).not.toBeNull();
+
+    (tab as unknown as { hide(): void }).hide();
+    expect(secondUnsubscribe).toHaveBeenCalledOnce();
+  });
+});
+
+describe("native catalog settings", () => {
   const baseSettings = {
     writeEnabled: false, writePreviewAcknowledged: false, locale: "zh-CN" as const, openAtStartup: false,
     folderRules: [], excludedPrefixes: [], aiEnabled: false,
     aiEndpoint: "", aiModel: "", secretId: "",
     recentCloudDirectories: EMPTY_RECENT_CLOUD_DIRECTORIES,
+    boundCloudLibrary: null,
+    cloudVerificationGeneration: 0,
+    verificationBatchTombstones: { schemaVersion: 1, state: "valid", batchIds: [] } as const,
+    legacyVerificationAdoption: { schemaVersion: 1, state: "none" } as const,
   };
-  const group = (index: number) => ({
-    groupKey: `group:${String(index).repeat(64)}`,
-    label: `Category ${index}`,
-    pdfCount: index + 1,
-    mode: "recursive" as const,
-    verificationStatus: "unverified" as const,
-  });
-
-  it("previews and imports a session-only TXT path, then starts at most five categories", async () => {
-    const importGate = deferred();
-    const scanGate = deferred();
-    let hybrid: HybridCatalogViewModel = {
-      status: "ready" as const,
-      active: {
-        importedAt: 100,
-        pdfCount: 21,
-        unverifiedCount: 21,
-        verifiedCount: 0,
-        differenceCount: 0,
-        cloudMissingCount: 0,
-        groupCount: 6,
-        verifiedGroupCount: 0,
-        groups: Array.from({ length: 6 }, (_, index) => group(index + 1)),
-      },
-    };
-    let notify = (): void => undefined;
-    const calls = {
-      preview: [] as string[],
-      imported: [] as string[],
-      scans: [] as Array<Readonly<{ rootPath: string; groupKeys: readonly string[] }>>,
-      cancel: 0,
-    };
-    const controller = {
-      settings: () => structuredClone(baseSettings),
-      folderRuleProposals: () => [],
-      previewSampleChange: () => undefined,
-      setOpenAtStartup: async () => undefined,
-      setLocale: async () => undefined,
-      setWriteEnabled: async () => undefined,
-      applyFolderRules: async () => undefined,
-      setExcludedPrefixes: async () => undefined,
-      catalogConnection: () => ({ status: "authorized" as const }),
-      connectCatalog: async () => undefined,
-      submitCatalogAuthorizationCode: async () => undefined,
-      cancelCatalogAuthorization: () => undefined,
-      revokeCatalog: async () => undefined,
-      validateCatalogScanRoot: (root: string) => root,
-      requestCatalogScan: async () => undefined,
-      hybridCatalog: () => structuredClone(hybrid),
-      subscribeHybridCatalog: (listener: () => void) => {
-        notify = listener;
-        return () => undefined;
-      },
-      previewCatalogTxt: async (path: string) => {
-        calls.preview.push(path);
-        hybrid = {
-          ...hybrid,
-          status: "previewed",
-          candidate: {
-            sourceSha256: "a".repeat(64), byteSize: 10, nonEmptyLineCount: 3,
-            pdfCount: 2, directoryCount: 1, ignoredLeafCount: 0,
-            normalizedWhitespaceCount: 0, maxDepth: 2,
-          },
-        };
-        notify();
-      },
-      requestCatalogTxtImport: async (path: string, onConfirmed?: () => void) => {
-        calls.imported.push(path);
-        onConfirmed?.();
-        await importGate.promise;
-      },
-      requestLargeCatalogVerification: async (
-        rootPath: string,
-        groupKeys: readonly string[],
-        onConfirmed?: () => void,
-      ) => {
-        calls.scans.push({ rootPath, groupKeys: [...groupKeys] });
-        onConfirmed?.();
-        await scanGate.promise;
-      },
-      requestResumeLargeCatalogVerification: async () => undefined,
-      cancelLargeCatalogVerification: () => { calls.cancel += 1; },
-    };
+  it("keeps TXT preview/import session-only while category controls stay absent", async () => {
+    const preview = vi.fn(async () => undefined);
+    const imported = vi.fn(async (_path: string, confirmed?: () => void) => { confirmed?.(); });
     const SettingsTab = createSettingsTabClass(
       SettingsSurface as unknown as PluginSettingTabConstructor,
       SecretSurface,
       NORMAL_RUNTIME_POLICY,
-      presentCatalogProgress,
     );
-    const tab = new SettingsTab({} as App, {} as never, controller);
-    (tab as unknown as { display(): void }).display();
-
-    const txtPath = tab.containerEl.querySelector<HTMLInputElement>(
-      '[data-catalog-txt-path="true"]',
-    )!;
-    txtPath.value = "/synthetic/private-inventory.txt";
-    tab.containerEl.querySelector<HTMLButtonElement>(
-      '[data-action="catalog-preview-txt"]',
-    )!.click();
-    await Promise.resolve();
-    await Promise.resolve();
-    expect(calls.preview).toEqual(["/synthetic/private-inventory.txt"]);
-    expect(txtPath.value).toBe("/synthetic/private-inventory.txt");
-    expect(tab.containerEl.textContent).toContain("预览 PDF：2 / 70,000");
-
-    tab.containerEl.querySelector<HTMLButtonElement>(
-      '[data-action="catalog-import-txt"]',
-    )!.click();
-    await Promise.resolve();
-    expect(calls.imported).toEqual(["/synthetic/private-inventory.txt"]);
-    expect(txtPath.value).toBe("");
-    importGate.resolve();
-
-    const choices = Array.from(tab.containerEl.querySelectorAll<HTMLInputElement>(
-      '[data-catalog-group-key]',
-    ));
-    expect(choices).toHaveLength(6);
-    for (const choice of choices.slice(0, 5)) {
-      choice.checked = true;
-      choice.dispatchEvent(new Event("change", { bubbles: true }));
-    }
-    choices[5]!.checked = true;
-    choices[5]!.dispatchEvent(new Event("change", { bubbles: true }));
-    expect(choices[5]!.checked).toBe(false);
-    expect(tab.containerEl.querySelector('[role="status"]')?.textContent)
-      .toContain("最多选择 5 个分类");
-
-    const cloudRoot = tab.containerEl.querySelector<HTMLInputElement>(
-      '[data-catalog-large-scan-root="true"]',
-    )!;
-    cloudRoot.value = "/Synthetic";
-    cloudRoot.dispatchEvent(new Event("input", { bubbles: true }));
-    tab.containerEl.querySelector<HTMLButtonElement>(
-      '[data-action="catalog-start-large-verification"]',
-    )!.click();
-    await Promise.resolve();
-    expect(cloudRoot.value).toBe("");
-    expect(calls.scans).toEqual([{
-      rootPath: "/Synthetic",
-      groupKeys: choices.slice(0, 5).map((choice) => choice.dataset.catalogGroupKey!),
-    }]);
-    scanGate.resolve();
-  });
-
-  it("keeps a selected category and cloud parent root for the current settings session", () => {
-    const hybrid: HybridCatalogViewModel = {
-      status: "ready",
-      active: {
-        importedAt: 100,
-        pdfCount: 2,
-        unverifiedCount: 2,
-        verifiedCount: 0,
-        differenceCount: 0,
-        cloudMissingCount: 0,
-        groupCount: 1,
-        verifiedGroupCount: 0,
-        groups: [group(1)],
-      },
-    };
     const controller = {
-      settings: () => structuredClone(baseSettings),
-      folderRuleProposals: () => [],
-      previewSampleChange: () => undefined,
-      setOpenAtStartup: async () => undefined,
-      setLocale: async () => undefined,
-      setWriteEnabled: async () => undefined,
-      applyFolderRules: async () => undefined,
-      setExcludedPrefixes: async () => undefined,
+      settings: () => structuredClone(baseSettings), folderRuleProposals: () => [],
+      previewSampleChange: () => undefined, setOpenAtStartup: async () => undefined,
+      setLocale: async () => undefined, setWriteEnabled: async () => undefined,
+      applyFolderRules: async () => undefined, setExcludedPrefixes: async () => undefined,
       catalogConnection: () => ({ status: "authorized" as const }),
-      connectCatalog: async () => undefined,
-      submitCatalogAuthorizationCode: async () => undefined,
-      cancelCatalogAuthorization: () => undefined,
-      revokeCatalog: async () => undefined,
-      validateCatalogScanRoot: (root: string) => root,
-      requestCatalogScan: async () => undefined,
-      hybridCatalog: () => structuredClone(hybrid),
+      connectCatalog: async () => undefined, submitCatalogAuthorizationCode: async () => undefined,
+      cancelCatalogAuthorization: () => undefined, revokeCatalog: async () => undefined,
+      validateCatalogScanRoot: (path: string) => path, requestCatalogScan: async () => undefined,
+      hybridCatalog: () => ({
+        ...TEST_INACTIVE_HYBRID_EXECUTION,
+        status: "previewed" as const,
+        candidate: {
+          sourceSha256: "a".repeat(64), byteSize: 12, nonEmptyLineCount: 1,
+          pdfCount: 1, directoryCount: 1, ignoredLeafCount: 0,
+          normalizedWhitespaceCount: 0, maxDepth: 1,
+        },
+      }),
       subscribeHybridCatalog: () => () => undefined,
-      previewCatalogTxt: async () => undefined,
-      requestCatalogTxtImport: async () => undefined,
-      requestLargeCatalogVerification: async () => undefined,
-      requestResumeLargeCatalogVerification: async () => undefined,
-      cancelLargeCatalogVerification: () => undefined,
+      previewCatalogTxt: preview,
+      requestCatalogTxtImport: imported,
     };
-    const SettingsTab = createSettingsTabClass(
-      SettingsSurface as unknown as PluginSettingTabConstructor,
-      SecretSurface,
-      NORMAL_RUNTIME_POLICY,
-      presentCatalogProgress,
-    );
     const tab = new SettingsTab({} as App, {} as never, controller);
     (tab as unknown as { display(): void }).display();
-
-    const root = tab.containerEl.querySelector<HTMLInputElement>(
-      '[data-catalog-large-scan-root="true"]',
-    )!;
-    root.value = "/Synthetic";
-    root.dispatchEvent(new Event("input", { bubbles: true }));
-    const choice = tab.containerEl.querySelector<HTMLInputElement>('[data-catalog-group-key]')!;
-    choice.checked = true;
-    choice.dispatchEvent(new Event("change", { bubbles: true }));
-
-    (tab as unknown as { display(): void }).display();
-
-    expect(tab.containerEl.querySelector<HTMLInputElement>(
-      '[data-catalog-large-scan-root="true"]',
-    )?.value).toBe("/Synthetic");
-    expect(tab.containerEl.querySelector<HTMLInputElement>('[data-catalog-group-key]')?.checked).toBe(true);
-  });
-
-  it("blocks a selected category used as its own verification root before a request", async () => {
-    const scans: Array<Readonly<{ rootPath: string; groupKeys: readonly string[] }>> = [];
-    const hybrid: HybridCatalogViewModel = {
-      status: "ready",
-      active: {
-        importedAt: 100,
-        pdfCount: 2,
-        unverifiedCount: 2,
-        verifiedCount: 0,
-        differenceCount: 0,
-        cloudMissingCount: 0,
-        groupCount: 1,
-        verifiedGroupCount: 0,
-        groups: [group(1)],
-      },
-    };
-    const controller = {
-      settings: () => structuredClone(baseSettings),
-      folderRuleProposals: () => [],
-      previewSampleChange: () => undefined,
-      setOpenAtStartup: async () => undefined,
-      setLocale: async () => undefined,
-      setWriteEnabled: async () => undefined,
-      applyFolderRules: async () => undefined,
-      setExcludedPrefixes: async () => undefined,
-      catalogConnection: () => ({ status: "authorized" as const }),
-      connectCatalog: async () => undefined,
-      submitCatalogAuthorizationCode: async () => undefined,
-      cancelCatalogAuthorization: () => undefined,
-      revokeCatalog: async () => undefined,
-      validateCatalogScanRoot: (root: string) => root,
-      requestCatalogScan: async () => undefined,
-      hybridCatalog: () => structuredClone(hybrid),
-      subscribeHybridCatalog: () => () => undefined,
-      previewCatalogTxt: async () => undefined,
-      requestCatalogTxtImport: async () => undefined,
-      requestLargeCatalogVerification: async (
-        rootPath: string,
-        groupKeys: readonly string[],
-      ) => { scans.push({ rootPath, groupKeys: [...groupKeys] }); },
-      requestResumeLargeCatalogVerification: async () => undefined,
-      cancelLargeCatalogVerification: () => undefined,
-    };
-    const SettingsTab = createSettingsTabClass(
-      SettingsSurface as unknown as PluginSettingTabConstructor,
-      SecretSurface,
-      NORMAL_RUNTIME_POLICY,
-      presentCatalogProgress,
-    );
-    const tab = new SettingsTab({} as App, {} as never, controller);
-    (tab as unknown as { display(): void }).display();
-
-    const choice = tab.containerEl.querySelector<HTMLInputElement>('[data-catalog-group-key]')!;
-    choice.checked = true;
-    choice.dispatchEvent(new Event("change", { bubbles: true }));
-    const root = tab.containerEl.querySelector<HTMLInputElement>(
-      '[data-catalog-large-scan-root="true"]',
-    )!;
-    root.value = "/Category 1";
-    root.dispatchEvent(new Event("input", { bubbles: true }));
-    expect(tab.containerEl.querySelector<HTMLButtonElement>(
-      '[data-action="catalog-start-large-verification"]',
-    )?.disabled).toBe(true);
-    tab.containerEl.querySelector<HTMLButtonElement>(
-      '[data-action="catalog-start-large-verification"]',
-    )!.click();
+    const input = tab.containerEl.querySelector<HTMLInputElement>('[data-catalog-txt-path="true"]')!;
+    input.value = "/session/catalog.txt";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    tab.containerEl.querySelector<HTMLButtonElement>('[data-action="catalog-preview-txt"]')?.click();
     await Promise.resolve();
-
-    expect(scans).toEqual([]);
-    expect(tab.containerEl.querySelector('[data-catalog-parent-root-error="true"]')?.textContent)
-      .toBe("核验根目录必须是所选分类的 API 父目录");
-    expect(root.value).toBe("/Category 1");
-  });
-
-  it("renders a paused aggregate with explicit resume and cancellation controls", async () => {
-    const calls = { resume: [] as string[], cancel: 0 };
-    let notify = (): void => undefined;
-    let hybrid: HybridCatalogViewModel = {
-      status: "paused",
-      active: {
-        importedAt: 100, pdfCount: 1, unverifiedCount: 1, verifiedCount: 0,
-        differenceCount: 0, cloudMissingCount: 0, groupCount: 1,
-        verifiedGroupCount: 0, groups: [group(1)],
-      },
-      batch: {
-        batchId: "batch-settings-paused",
-        status: "paused" as const,
-        stopReason: "time-limit" as const,
-        resumeAvailable: true,
-        runOrdinal: 2,
-        remainingGroupCount: 1,
-        pdfCount: 10,
-        directoryCount: 2,
-        ignoredFileCount: 0,
-        listRequestCount: 12,
-        cumulativeListRequestCount: 312,
-      },
-    };
-    const controller = {
-      settings: () => structuredClone(baseSettings),
-      folderRuleProposals: () => [],
-      previewSampleChange: () => undefined,
-      setOpenAtStartup: async () => undefined,
-      setLocale: async () => undefined,
-      setWriteEnabled: async () => undefined,
-      applyFolderRules: async () => undefined,
-      setExcludedPrefixes: async () => undefined,
-      catalogConnection: () => ({ status: "authorized" as const }),
-      connectCatalog: async () => undefined,
-      submitCatalogAuthorizationCode: async () => undefined,
-      cancelCatalogAuthorization: () => undefined,
-      revokeCatalog: async () => undefined,
-      validateCatalogScanRoot: (root: string) => root,
-      requestCatalogScan: async () => undefined,
-      hybridCatalog: () => structuredClone(hybrid),
-      subscribeHybridCatalog: (listener: () => void) => {
-        notify = listener;
-        return () => undefined;
-      },
-      previewCatalogTxt: async () => undefined,
-      requestCatalogTxtImport: async () => undefined,
-      requestLargeCatalogVerification: async () => undefined,
-      requestResumeLargeCatalogVerification: async (root: string, onConfirmed?: () => void) => {
-        calls.resume.push(root);
-        onConfirmed?.();
-        hybrid = { ...hybrid, status: "scanning" };
-        notify();
-      },
-      cancelLargeCatalogVerification: () => { calls.cancel += 1; },
-    };
-    const SettingsTab = createSettingsTabClass(
-      SettingsSurface as unknown as PluginSettingTabConstructor,
-      SecretSurface,
-      NORMAL_RUNTIME_POLICY,
-      presentCatalogProgress,
-    );
-    const tab = new SettingsTab({} as App, {} as never, controller);
-    (tab as unknown as { display(): void }).display();
-
-    expect(tab.containerEl.textContent).toContain("核验状态：已暂停");
-    expect(tab.containerEl.textContent).toContain("本次运行片段的列表请求：12");
-    expect(tab.containerEl.textContent).toContain("当前批次累计列表请求：312");
-    const root = tab.containerEl.querySelector<HTMLInputElement>(
-      '[data-catalog-large-scan-root="true"]',
-    )!;
-    root.value = "/Synthetic";
-    root.dispatchEvent(new Event("input", { bubbles: true }));
-    tab.containerEl.querySelector<HTMLButtonElement>(
-      '[data-action="catalog-resume-large-verification"]',
-    )!.click();
+    tab.containerEl.querySelector<HTMLButtonElement>('[data-action="catalog-import-txt"]')?.click();
     await Promise.resolve();
-    expect(calls.resume).toEqual(["/Synthetic"]);
-    expect(root.value).toBe("");
-
-    tab.containerEl.querySelector<HTMLButtonElement>(
-      '[data-action="catalog-cancel-large-verification"]',
-    )!.click();
-    expect(calls.cancel).toBe(1);
+    expect(preview).toHaveBeenCalledWith("/session/catalog.txt");
+    expect(imported).toHaveBeenCalledWith("/session/catalog.txt", expect.any(Function));
+    expect(input.value).toBe("");
+    expect(tab.containerEl.querySelector('[data-catalog-group-key]')).toBeNull();
   });
 
-  it("does not offer resume after a path-not-found verification failure", () => {
-    const hybrid: HybridCatalogViewModel = {
-      status: "partial",
-      active: {
-        importedAt: 100, pdfCount: 1, unverifiedCount: 1, verifiedCount: 0,
-        differenceCount: 0, cloudMissingCount: 0, groupCount: 1,
-        verifiedGroupCount: 0, groups: [group(1)],
-      },
-      batch: {
-        batchId: "batch-settings-partial",
-        status: "partial",
-        stopReason: "baidu-not-found",
-        resumeAvailable: false,
-        runOrdinal: 1,
-        remainingGroupCount: 1,
-        pdfCount: 0,
-        directoryCount: 0,
-        ignoredFileCount: 0,
-        listRequestCount: 1,
-        cumulativeListRequestCount: 1,
-      },
-    };
-    const controller = {
-      settings: () => structuredClone(baseSettings),
-      folderRuleProposals: () => [],
-      previewSampleChange: () => undefined,
-      setOpenAtStartup: async () => undefined,
-      setLocale: async () => undefined,
-      setWriteEnabled: async () => undefined,
-      applyFolderRules: async () => undefined,
-      setExcludedPrefixes: async () => undefined,
-      catalogConnection: () => ({ status: "authorized" as const }),
-      connectCatalog: async () => undefined,
-      submitCatalogAuthorizationCode: async () => undefined,
-      cancelCatalogAuthorization: () => undefined,
-      revokeCatalog: async () => undefined,
-      validateCatalogScanRoot: (root: string) => root,
-      requestCatalogScan: async () => undefined,
-      hybridCatalog: () => structuredClone(hybrid),
-      subscribeHybridCatalog: () => () => undefined,
-      previewCatalogTxt: async () => undefined,
-      requestCatalogTxtImport: async () => undefined,
-      requestLargeCatalogVerification: async () => undefined,
-      requestResumeLargeCatalogVerification: async () => undefined,
-      cancelLargeCatalogVerification: () => undefined,
-    };
-    const SettingsTab = createSettingsTabClass(
-      SettingsSurface as unknown as PluginSettingTabConstructor,
-      SecretSurface,
-      NORMAL_RUNTIME_POLICY,
-      presentCatalogProgress,
-    );
-    const tab = new SettingsTab({} as App, {} as never, controller);
-    (tab as unknown as { display(): void }).display();
 
-    expect(tab.containerEl.querySelector<HTMLButtonElement>(
-      '[data-action="catalog-resume-large-verification"]',
-    )?.hidden).toBe(true);
-    expect(tab.containerEl.textContent).toContain(
-      "云端 API 无法识别上次核验路径",
-    );
-    expect(tab.containerEl.textContent).not.toContain("/Synthetic");
-  });
-});
-
-describe("cloud catalog settings", () => {
   it("keeps credentials and scan root session-only and delegates explicit controls", async () => {
     const settings = {
       writeEnabled: false, writePreviewAcknowledged: false, locale: "zh-CN" as const, openAtStartup: false,
       folderRules: [], excludedPrefixes: [], aiEnabled: false,
       aiEndpoint: "", aiModel: "", secretId: "",
       recentCloudDirectories: EMPTY_RECENT_CLOUD_DIRECTORIES,
+      boundCloudLibrary: null,
+      cloudVerificationGeneration: 0,
+      verificationBatchTombstones: { schemaVersion: 1, state: "valid", batchIds: [] } as const,
+      legacyVerificationAdoption: { schemaVersion: 1, state: "none" } as const,
     };
     const calls = {
       connect: [] as Array<Readonly<{ appKey: string; secretKey: string }>>,
@@ -820,6 +586,10 @@ describe("cloud catalog settings", () => {
       folderRules: [], excludedPrefixes: [], aiEnabled: false,
       aiEndpoint: "", aiModel: "", secretId: "",
       recentCloudDirectories: EMPTY_RECENT_CLOUD_DIRECTORIES,
+      boundCloudLibrary: null,
+      cloudVerificationGeneration: 0,
+      verificationBatchTombstones: { schemaVersion: 1, state: "valid", batchIds: [] } as const,
+      legacyVerificationAdoption: { schemaVersion: 1, state: "none" } as const,
     };
     let connection: CloudCatalogConnectionViewModel = { status: "authorized" };
     let notify = (): void => undefined;
@@ -933,6 +703,10 @@ describe("cloud catalog settings", () => {
         folderRules: [], excludedPrefixes: [], aiEnabled: false,
         aiEndpoint: "", aiModel: "", secretId: "",
         recentCloudDirectories: EMPTY_RECENT_CLOUD_DIRECTORIES,
+        boundCloudLibrary: null,
+        cloudVerificationGeneration: 0,
+        verificationBatchTombstones: { schemaVersion: 1, state: "valid", batchIds: [] } as const,
+        legacyVerificationAdoption: { schemaVersion: 1, state: "none" } as const,
       };
       const cancelAuthorization = vi.fn();
       let connection: Readonly<{

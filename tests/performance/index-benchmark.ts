@@ -204,6 +204,7 @@ export async function benchmarkIndex(fixture: GeneratedFixture): Promise<Benchma
       clock,
       projectionScheduler: measuredScheduler,
       catalog: DISABLED_CLOUD_CATALOG_RUNTIME,
+      cloudVerificationRootHasher: () => null,
       catalogConfirmation: { request: async () => false },
     });
 

@@ -66,8 +66,11 @@ export function renderStartPage(root: HTMLElement, options: StartPageOptions): v
   const nextTitle = root.ownerDocument.createElement("h2");
   nextTitle.textContent = i18n.t("start.next");
   next.append(nextTitle);
-  appendButton(next, i18n.t("start.step.search"), () => actions.onSelectTab("cloud-catalog"));
-  appendButton(next, i18n.t("start.step.verify"), () => actions.onSelectTab("verification"));
+  appendButton(next, i18n.t("start.step.search"), () => actions.onSelectRoute({ tab: "library" }));
+  appendButton(next, i18n.t("start.step.verify"), () => actions.onSelectRoute({
+    tab: "task",
+    page: "overview",
+  }));
   page.append(next);
 
   const sections = root.ownerDocument.createElement("div");

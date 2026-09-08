@@ -15,6 +15,7 @@ import {
   initializeRecoveredLayout,
   LifecycleEpoch,
   ObsidianWorkspaceAdapter,
+  handoffFromObsidianSettings,
   requireActivatedWorkbench,
   RetryableAsyncGate,
   runVisibleHostAction,
@@ -128,6 +129,11 @@ export function createKnowledgeWorkbenchPluginClass(runtime: RuntimeComposition)
       const workspace = new ObsidianWorkspaceAdapter(this.app);
       const quickCapture = runtime.createQuickCapture(this.app, getLocale);
       const catalog = runtime.createCatalog(this.app);
+      const folderSelection = runtime.createFolderSelection({
+        store,
+        catalog,
+        clock: systemClock,
+      });
       const catalogConfirmation = runtime.createCatalogConfirmation(this.app, getLocale);
       const catalogTxtImportConfirmation = runtime.createCatalogTxtImportConfirmation?.(
         this.app,
@@ -184,6 +190,8 @@ export function createKnowledgeWorkbenchPluginClass(runtime: RuntimeComposition)
         clock: systemClock,
         ai: runtime.createAi?.(this.app, getLocale),
         catalog,
+        folderSelectionSessionFactory: folderSelection.sessionFactory,
+        cloudVerificationRootHasher: runtime.cloudVerificationRootHasher,
         catalogConfirmation,
         ...(catalogTxtImportConfirmation === undefined
           ? {}
@@ -192,6 +200,12 @@ export function createKnowledgeWorkbenchPluginClass(runtime: RuntimeComposition)
           ? {}
           : { catalogLargeScanConfirmation }),
         ...(catalogDirectoryPicker === undefined ? {} : { catalogDirectoryPicker }),
+        ...(runtime.catalogDirectorySelectionValidator === undefined
+          ? {}
+          : {
+              catalogDirectorySelectionValidator:
+                runtime.catalogDirectorySelectionValidator,
+            }),
       });
       this.controller = controller;
       this.vaultAdapter = vaultAdapter;
@@ -202,7 +216,7 @@ export function createKnowledgeWorkbenchPluginClass(runtime: RuntimeComposition)
       this.recoveryAudit = recoveryAudit;
       this.recoveryReadiness = recoveryReadiness;
 
-      startCatalogInitialization(catalog, (code) => {
+      startCatalogInitialization(controller, (code) => {
         if (this.lifecycle.owns(epoch)) controller.reportCatalogError(code);
       });
 
@@ -212,6 +226,7 @@ export function createKnowledgeWorkbenchPluginClass(runtime: RuntimeComposition)
         leaf,
         controller,
         runtime.createWorkbenchSettingsSurface?.(this.app, controller, getLocale),
+        folderSelection.hostCapability,
       ));
       const loadI18n = createWorkbenchI18n(getLocale());
       this.addRibbonIcon(
@@ -224,7 +239,28 @@ export function createKnowledgeWorkbenchPluginClass(runtime: RuntimeComposition)
         name: loadI18n.t("host.command.open"),
         callback: () => this.requestOpenWorkbench(),
       });
-      this.addSettingTab(runtime.createSettingsTab(this.app, this, controller, getLocale));
+      this.addSettingTab(runtime.createSettingsTab(
+        this.app,
+        this,
+        controller,
+        getLocale,
+        async () => {
+          controller.selectRoute({ tab: "task", page: "overview" });
+          const i18n = createWorkbenchI18n(getLocale());
+          await handoffFromObsidianSettings({
+            app: this.app,
+            isExpectedView: (view) => view instanceof ConcreteWorkbenchView,
+            reportUnavailable: () => controller.reportError(
+              "host.action.openWorkbenchFailed" satisfies HostActionMessageKey,
+            ),
+            notify: (message) => new Notice(i18n.t(
+              message === "handoff-failed"
+                ? "host.settings.handoffFailed"
+                : "host.settings.closeGuidance",
+            )),
+          });
+        },
+      ));
       this.app.workspace.onLayoutReady(() => {
         if (!this.lifecycle.owns(epoch)) return;
         this.layoutReady = true;
@@ -300,7 +336,7 @@ export function createKnowledgeWorkbenchPluginClass(runtime: RuntimeComposition)
         auditRecovery: () => recoveryAudit.auditInFlight(),
         refreshHistory: () => controller.refreshHistory(),
         initializeIndex: () => initializeIndexForLayout({
-          hasActiveIndex: () => store.activeIndex() !== null,
+          hasActiveIndex: () => store.hasActiveIndex(),
           startInitialScan: () => controller.startInitialScan(),
           reconcileInventory: () => index.reconcileInventory(),
           resumeAndFlush: () => queue.resumeAndFlush(),

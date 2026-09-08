@@ -4,16 +4,25 @@ import {
   type CloudCatalogConnectionRuntime,
 } from "../../../src/catalog/cloud-catalog-runtime";
 import type { CloudDirectoryDiscoveryRuntime } from "../../../src/catalog/cloud-directory-discovery-service";
+import type { CloudDirectoryBrowserRuntime } from "../../../src/catalog/cloud-directory-browser";
 import type { CloudDirectoryLocatorRuntime } from "../../../src/catalog/cloud-directory-locator";
 import type { HybridCatalogRuntime } from "../../../src/catalog/hybrid-catalog-runtime";
 import type { CatalogSnapshotPort } from "../../../src/catalog/catalog-ports";
 import { assertRuntimeCompositionCoherence } from "../../../src/runtime/runtime-composition";
+import { createOfflineCloudCatalogRuntime } from "../../../src/catalog/offline-cloud-catalog-runtime";
+import { DISABLED_CLOUD_CATALOG_RUNTIME } from "../../../src/catalog/disabled-cloud-catalog-runtime";
 import {
   NORMAL_RUNTIME_POLICY,
   READ_ONLY_ACCEPTANCE_POLICY,
 } from "../../../src/runtime/safety-policy";
+import { hashNormalCloudVerificationRoot } from "../../../src/runtime/normal-cloud-catalog-composition";
 
 describe("runtime composition", () => {
+  it("provides the normal-only SHA-256 root hashing capability", () => {
+    expect(hashNormalCloudVerificationRoot("/科学文库"))
+      .toBe("7d5d019db88e67493bc4415a5885bd32fe67d6c716346eba047d79ecca6da029");
+  });
+
   it("accepts matching policy and artifact modes", () => {
     expect(() => assertRuntimeCompositionCoherence(
       NORMAL_RUNTIME_POLICY,
@@ -32,6 +41,15 @@ describe("runtime composition", () => {
     )).toThrow("Runtime policy and artifact mode do not match");
   });
 
+  it("keeps the browser absent from offline, disabled, and acceptance-safe runtimes", () => {
+    const offline = createOfflineCloudCatalogRuntime();
+
+    expect(offline.directoryBrowser).toBeUndefined();
+    expect(DISABLED_CLOUD_CATALOG_RUNTIME.directoryBrowser).toBeUndefined();
+
+    offline.dispose();
+  });
+
   it("exposes and disposes directory consumers before their shared providers exactly once", () => {
     const order: string[] = [];
     const connection = {
@@ -44,6 +62,11 @@ describe("runtime composition", () => {
     const discovery = {
       dispose: () => { order.push("discovery"); },
     } as unknown as CloudDirectoryDiscoveryRuntime;
+    const browser = {
+      rootAccessGranted: () => false,
+      snapshot: () => null,
+      dispose: () => { order.push("browser"); },
+    } as unknown as CloudDirectoryBrowserRuntime;
     const locator = {
       dispose: () => { order.push("locator"); },
     } as unknown as CloudDirectoryLocatorRuntime;
@@ -54,13 +77,17 @@ describe("runtime composition", () => {
       hybrid,
       undefined,
       discovery,
+      browser,
       locator,
     );
 
+    expect(runtime.directoryBrowser).toBe(browser);
+    expect(runtime.directoryBrowser?.rootAccessGranted()).toBe(false);
+    expect(runtime.directoryBrowser?.snapshot("/")).toBeNull();
     expect(runtime.directoryLocator).toBe(locator);
     runtime.dispose();
     runtime.dispose();
 
-    expect(order).toEqual(["locator", "discovery", "hybrid", "connection"]);
+    expect(order).toEqual(["locator", "browser", "discovery", "hybrid", "connection"]);
   });
 });

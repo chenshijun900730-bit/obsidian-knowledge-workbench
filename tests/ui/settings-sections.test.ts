@@ -14,6 +14,22 @@ import { SMALL_ACCEPTANCE_CATALOG_SCAN_BUDGET } from "../../src/catalog/catalog-
 import { createWorkbenchI18n } from "../../src/i18n/workbench-i18n";
 import { presentCatalogProgress } from "../../src/ui/catalog-progress-presenter";
 import { EMPTY_RECENT_CLOUD_DIRECTORIES } from "../../src/storage/recent-cloud-directories";
+import { LARGE_CATALOG_AUTO_CHAIN_MAX_SEGMENTS } from "../../src/catalog/hybrid-catalog-types";
+import type {
+  CloudDirectoryPickerPurpose,
+  CloudDirectorySelection,
+} from "../../src/catalog/cloud-directory-selection";
+import {
+  TEST_HYBRID_ACTIVE_AUTHORITY,
+  TEST_INACTIVE_HYBRID_EXECUTION,
+  TEST_LARGE_BATCH_AUTHORITY,
+} from "../helpers/ui-fixtures";
+
+const INACTIVE_AUTO_RESUME = {
+  autoResumeState: "inactive" as const,
+  autoSegmentIndex: 0,
+  autoSegmentLimit: LARGE_CATALOG_AUTO_CHAIN_MAX_SEGMENTS,
+};
 
 const createTestDiv = (): HTMLDivElement => document.createElementNS(
   "http://www.w3.org/1999/xhtml",
@@ -33,6 +49,10 @@ const settingsControllerFixture = (): SettingsController => ({
     aiModel: "",
     secretId: "",
     recentCloudDirectories: EMPTY_RECENT_CLOUD_DIRECTORIES,
+    boundCloudLibrary: null,
+    cloudVerificationGeneration: 0,
+    verificationBatchTombstones: { schemaVersion: 1, state: "valid", batchIds: [] } as const,
+    legacyVerificationAdoption: { schemaVersion: 1, state: "none" } as const,
   }),
   folderRuleProposals: () => [],
   previewSampleChange: () => undefined,
@@ -54,7 +74,7 @@ const deferred = () => {
 };
 
 const connectedControllerFixture = (
-  overrides: Partial<SettingsController> = {},
+  overrides: Partial<SettingsController> & Record<string, unknown> = {},
 ): SettingsController => ({
   ...settingsControllerFixture(),
   settings: () => ({
@@ -95,9 +115,147 @@ describe("shared grouped settings surface", () => {
     workbench.render(workbenchRoot, "zh-CN");
 
     expect(sectionNames(nativeRoot)).toEqual([
-      "language", "baidu", "large-catalog", "verification", "privacy-ai",
+      "language", "baidu", "catalog-data", "cloud-scan-advanced", "privacy-ai",
     ]);
     expect(sectionNames(workbenchRoot)).toEqual(sectionNames(nativeRoot));
+  });
+
+  it("renders one requested subsection and delegates category checking to Task", () => {
+    const openTaskOverview = vi.fn();
+    const root = createTestDiv();
+    const active = {
+      ...TEST_HYBRID_ACTIVE_AUTHORITY,
+      importedAt: 1,
+      pdfCount: 1,
+      unverifiedCount: 1,
+      verifiedCount: 0,
+      differenceCount: 0,
+      cloudMissingCount: 0,
+      groupCount: 1,
+      verifiedGroupCount: 0,
+      coveredCandidatePdfCount: 0,
+      groups: [{
+        groupKey: `group:${"a".repeat(64)}`,
+        rootRelativePath: "文学",
+        label: "文学",
+        pdfCount: 1,
+        mode: "recursive" as const,
+        verificationStatus: "unverified" as const,
+      }],
+    };
+    createSettingsSectionsSurface({
+      app: {} as App,
+      controller: connectedControllerFixture({
+        hybridCatalog: () => ({ ...TEST_INACTIVE_HYBRID_EXECUTION, status: "ready", active }),
+        subscribeHybridCatalog: () => () => undefined,
+        previewCatalogTxt: async () => undefined,
+        requestCatalogTxtImport: async () => undefined,
+      }),
+      policy: NORMAL_RUNTIME_POLICY,
+      onOpenTaskOverview: openTaskOverview,
+    }).render(root, "zh-CN");
+
+    expect(sectionNames(root)).toEqual([
+      "language", "baidu", "catalog-data", "cloud-scan-advanced", "privacy-ai",
+    ]);
+    expect(root.querySelector('[data-catalog-group-key]')).toBeNull();
+    expect(root.querySelector('[data-action="catalog-start-large-verification"]')).toBeNull();
+    expect(root.querySelector('[data-action="catalog-resume-large-verification"]')).toBeNull();
+    const action = root.querySelector<HTMLButtonElement>('[data-action="open-task-overview"]')!;
+    expect(action.disabled).toBe(false);
+    action.click();
+    expect(openTaskOverview).toHaveBeenCalledOnce();
+  });
+
+  it("constructs only a requested scan section and returns to More", () => {
+    const root = createTestDiv();
+    const back = vi.fn();
+    const secret = vi.fn();
+    createSettingsSectionsSurface({
+      app: {} as App,
+      controller: connectedControllerFixture(),
+      policy: NORMAL_RUNTIME_POLICY,
+      createSecretComponent: secret,
+    }).render(root, "zh-CN", { section: "cloud-scan-advanced", onBackToMore: back });
+
+    expect(sectionNames(root)).toEqual(["cloud-scan-advanced"]);
+    expect(root.querySelector('[data-catalog-app-key]')).toBeNull();
+    expect(root.querySelector('[data-catalog-authorization-code]')).toBeNull();
+    expect(secret).not.toHaveBeenCalled();
+    root.querySelector<HTMLButtonElement>('[data-action="more-back"]')?.click();
+    expect(back).toHaveBeenCalledOnce();
+  });
+
+  it("validates and de-duplicates a pending scan while retaining the draft across language rerender", async () => {
+    const root = createTestDiv();
+    const pending = deferred();
+    const requestCatalogScan = vi.fn(async () => pending.promise);
+    const surface = createSettingsSectionsSurface({
+      app: {} as App,
+      controller: connectedControllerFixture({ requestCatalogScan }),
+      policy: NORMAL_RUNTIME_POLICY,
+    });
+
+    surface.render(root, "zh-CN", { section: "cloud-scan-advanced" });
+    let input = root.querySelector<HTMLInputElement>('[data-catalog-scan-root="true"]')!;
+    let start = root.querySelector<HTMLButtonElement>('[data-action="catalog-start-scan"]')!;
+    input.value = "/";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    expect(start.disabled).toBe(true);
+
+    input.value = "/session/library";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    expect(start.disabled).toBe(false);
+    surface.render(root, "en", { section: "cloud-scan-advanced" });
+    input = root.querySelector<HTMLInputElement>('[data-catalog-scan-root="true"]')!;
+    start = root.querySelector<HTMLButtonElement>('[data-action="catalog-start-scan"]')!;
+    expect(input.value).toBe("/session/library");
+
+    start.click();
+    start.click();
+    expect(requestCatalogScan).toHaveBeenCalledOnce();
+    expect(requestCatalogScan).toHaveBeenCalledWith("/session/library", expect.any(Function));
+    pending.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+
+  it("ignores a stale scan confirmation after a rerender and preserves the newer draft", async () => {
+    const root = createTestDiv();
+    const pending = deferred();
+    let confirmOldScan: (() => void) | undefined;
+    const requestCatalogScan = vi.fn(async (
+      _rootPath: string,
+      onConfirmed?: () => void,
+    ) => {
+      confirmOldScan = onConfirmed;
+      await pending.promise;
+    });
+    const surface = createSettingsSectionsSurface({
+      app: {} as App,
+      controller: connectedControllerFixture({ requestCatalogScan }),
+      policy: NORMAL_RUNTIME_POLICY,
+    });
+
+    surface.render(root, "zh-CN", { section: "cloud-scan-advanced" });
+    let input = root.querySelector<HTMLInputElement>('[data-catalog-scan-root="true"]')!;
+    input.value = "/old-session-library";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    root.querySelector<HTMLButtonElement>('[data-action="catalog-start-scan"]')!.click();
+
+    surface.render(root, "en", { section: "cloud-scan-advanced" });
+    input = root.querySelector<HTMLInputElement>('[data-catalog-scan-root="true"]')!;
+    input.value = "/new-session-library";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    expect(confirmOldScan).toBeTypeOf("function");
+    confirmOldScan!();
+
+    surface.render(root, "zh-CN", { section: "cloud-scan-advanced" });
+    expect(root.querySelector<HTMLInputElement>('[data-catalog-scan-root="true"]')?.value)
+      .toBe("/new-session-library");
+
+    pending.resolve();
+    await Promise.resolve();
   });
 
   it("keeps cards collapsed while language remains directly usable", () => {
@@ -159,6 +317,111 @@ describe("shared grouped settings surface", () => {
     expect(root.querySelector('[data-ai-enabled="true"]')).toBeNull();
   });
 
+  it("dispatches repair and identity replacement as distinct authorization intents", async () => {
+    const connectCatalog = vi.fn(async () => undefined);
+    const submitCatalogAuthorizationCode = vi.fn(async () => undefined);
+    const revokeCatalog = vi.fn(async () => undefined);
+    const controller = connectedControllerFixture({
+      catalogConnection: () => ({ status: "configured" }),
+      connectCatalog,
+      submitCatalogAuthorizationCode,
+      revokeCatalog,
+    });
+    const root = createTestDiv();
+    createSettingsSectionsSurface({
+      app: {} as App, controller, policy: NORMAL_RUNTIME_POLICY,
+    }).render(root, "zh-CN");
+
+    expect(connectCatalog).not.toHaveBeenCalled();
+    expect(submitCatalogAuthorizationCode).not.toHaveBeenCalled();
+    expect(revokeCatalog).not.toHaveBeenCalled();
+    const replacement = root.querySelector<HTMLDetailsElement>("[data-settings-replace-identity=\"true\"]");
+    expect(replacement?.textContent).toContain("更换账号或凭据");
+    expect(replacement?.textContent).toContain("需要重新选择书库；旧核验结果仅保留为历史");
+
+    const appKey = root.querySelector<HTMLInputElement>('[data-catalog-app-key="true"]')!;
+    const secretKey = root.querySelector<HTMLInputElement>('[data-catalog-secret-key="true"]')!;
+    appKey.value = "repair-app";
+    secretKey.value = "repair-secret";
+    root.querySelector<HTMLButtonElement>('[data-action="catalog-connect"]')!.click();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(connectCatalog).toHaveBeenNthCalledWith(
+      1,
+      { appKey: "repair-app", secretKey: "repair-secret" },
+      "repair-same-account",
+    );
+    const code = root.querySelector<HTMLInputElement>(
+      '[data-catalog-authorization-code="true"]',
+    )!;
+    code.value = "repair-code";
+    root.querySelector<HTMLButtonElement>(
+      '[data-action="catalog-submit-authorization-code"]',
+    )!.click();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(submitCatalogAuthorizationCode).toHaveBeenNthCalledWith(
+      1,
+      "repair-code",
+      "repair-same-account",
+    );
+
+    appKey.value = "replacement-app";
+    secretKey.value = "replacement-secret";
+    root.querySelector<HTMLButtonElement>(
+      '[data-action="catalog-replace-identity"]',
+    )!.click();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(connectCatalog).toHaveBeenNthCalledWith(
+      2,
+      { appKey: "replacement-app", secretKey: "replacement-secret" },
+      "replace-identity",
+    );
+    code.value = "replacement-code";
+    root.querySelector<HTMLButtonElement>(
+      '[data-action="catalog-submit-authorization-code"]',
+    )!.click();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(submitCatalogAuthorizationCode).toHaveBeenNthCalledWith(
+      2,
+      "replacement-code",
+      "replace-identity",
+    );
+
+    root.querySelector<HTMLButtonElement>('[data-action="catalog-revoke"]')!.click();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(revokeCatalog).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    ["verification-must-pause", "请先暂停当前核验，再修改百度网盘授权。"],
+    ["scan-must-cancel", "请先取消当前云端扫描，再修改百度网盘授权。"],
+    ["cloud-authority-operation-busy", "另一项百度网盘权限操作正在进行，请稍后再试。"],
+  ] as const)("maps native Settings authorization error %s to safe guidance", async (
+    errorCode,
+    expected,
+  ) => {
+    const controller = connectedControllerFixture({
+      catalogConnection: () => ({ status: "configured" }),
+      connectCatalog: async () => { throw new Error(errorCode); },
+    });
+    const root = createTestDiv();
+    createSettingsSectionsSurface({
+      app: {} as App, controller, policy: NORMAL_RUNTIME_POLICY,
+    }).render(root, "zh-CN");
+
+    root.querySelector<HTMLButtonElement>('[data-action="catalog-connect"]')!.click();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(root.querySelector<HTMLElement>('[role="status"]')?.textContent).toBe(expected);
+    expect(root.textContent).not.toContain(errorCode);
+  });
+
   it("routes both hosts through the same controller contract", async () => {
     const startup = vi.fn(async () => undefined);
     let activeLocale: "zh-CN" | "en" = "zh-CN";
@@ -201,7 +464,12 @@ describe("shared grouped settings surface", () => {
   });
 
   it("fills the session-only cloud root from the directory picker without saving settings", async () => {
-    const chooseCatalogRoot = vi.fn(async () => "/Synthetic/9-文学253册");
+    const selection: CloudDirectorySelection = {
+      kind: "directory",
+      selectedPath: "/Synthetic/9-文学253册",
+      effectiveRoot: "/Synthetic/9-文学253册",
+    };
+    const chooseCatalogRoot = vi.fn(async () => selection);
     const setOpenAtStartup = vi.fn(async () => undefined);
     const setLocale = vi.fn(async () => undefined);
     const requestCatalogScan = vi.fn(async () => undefined);
@@ -235,12 +503,16 @@ describe("shared grouped settings surface", () => {
     await Promise.resolve();
     await Promise.resolve();
 
-    expect(chooseCatalogRoot).toHaveBeenCalledWith("");
+    expect(chooseCatalogRoot).toHaveBeenCalledWith({
+      initialRoot: "",
+      purpose: { kind: "scan" },
+    });
     expect(input.value).toBe("/Synthetic/9-文学253册");
     expect(root.querySelector('[data-cloud-directory-current="true"]')?.textContent)
       .toContain("/Synthetic/9-文学253册");
-    expect(root.querySelector<HTMLButtonElement>('[data-action="catalog-start-scan"]')?.disabled)
-      .toBe(false);
+    await vi.waitFor(() => expect(
+      root.querySelector<HTMLButtonElement>('[data-action="catalog-start-scan"]')?.disabled,
+    ).toBe(false));
     expect(setOpenAtStartup).not.toHaveBeenCalled();
     expect(setLocale).not.toHaveBeenCalled();
     expect(requestCatalogScan).not.toHaveBeenCalled();
@@ -249,267 +521,33 @@ describe("shared grouped settings surface", () => {
       .toBe("/Synthetic/9-文学253册");
   });
 
-  it("keeps scan and category verification gated by a valid non-root draft and busy state", () => {
-    const groupKey = `group:${"c".repeat(64)}`;
-    let connectionListener = (): void => undefined;
-    let hybridListener = (): void => undefined;
-    let connectionStatus: "authorized" | "scanning" = "authorized";
-    let hybridStatus: "ready" | "scanning" = "ready";
-    const controller = connectedControllerFixture({
-      catalogConnection: () => ({ status: connectionStatus }),
-      subscribeCatalogConnection: (listener) => {
-        connectionListener = listener;
-        return () => { connectionListener = (): void => undefined; };
-      },
-      hybridCatalog: () => ({
-        status: hybridStatus,
-        active: {
-          importedAt: 1,
-          pdfCount: 1,
-          unverifiedCount: 1,
-          verifiedCount: 0,
-          differenceCount: 0,
-          cloudMissingCount: 0,
-          groupCount: 1,
-          verifiedGroupCount: 0,
-          groups: [{
-            groupKey,
-            label: "Science",
-            pdfCount: 1,
-            mode: "recursive",
-            verificationStatus: "unverified",
-          }],
-        },
-      }),
-      subscribeHybridCatalog: (listener) => {
-        hybridListener = listener;
-        return () => { hybridListener = (): void => undefined; };
-      },
-      previewCatalogTxt: async () => undefined,
-      requestCatalogTxtImport: async () => undefined,
-      requestLargeCatalogVerification: async () => undefined,
-      requestResumeLargeCatalogVerification: async () => undefined,
-      cancelLargeCatalogVerification: () => undefined,
-      validateCatalogScanRoot: (value) => {
-        if (!value.startsWith("/") || value === "/" || value.includes("//")) {
-          throw new Error("invalid-root");
-        }
-        return value;
-      },
-    });
+
+  it("rejects a category result from the scan-purpose chooser", async () => {
+    const requestCatalogScan = vi.fn(async () => undefined);
+    const chooseCatalogRoot = vi.fn(async (): Promise<CloudDirectorySelection> => ({
+      kind: "category",
+      selectedPath: "/科学文库/分类",
+      effectiveRoot: "/科学文库",
+      groupKey: `group:${"c".repeat(64)}`,
+    }));
     const root = createTestDiv();
     createSettingsSectionsSurface({
       app: {} as App,
-      controller,
-      policy: NORMAL_RUNTIME_POLICY,
-    }).render(root, "zh-CN");
-    const scanInput = root.querySelector<HTMLInputElement>('[data-catalog-scan-root="true"]')!;
-    const scanStart = root.querySelector<HTMLButtonElement>('[data-action="catalog-start-scan"]')!;
-    const verificationInput = root.querySelector<HTMLInputElement>(
-      '[data-catalog-large-scan-root="true"]',
-    )!;
-    const verificationStart = root.querySelector<HTMLButtonElement>(
-      '[data-action="catalog-start-large-verification"]',
-    )!;
-    const group = root.querySelector<HTMLInputElement>(`[data-catalog-group-key="${groupKey}"]`)!;
-
-    expect(root.querySelector<HTMLButtonElement>('[data-action="browse-catalog-scan-root"]')?.hidden)
-      .toBe(true);
-    expect(root.querySelector<HTMLButtonElement>(
-      '[data-action="browse-catalog-large-scan-root"]',
-    )?.hidden).toBe(true);
-
-    expect(scanStart.disabled).toBe(true);
-    for (const invalid of ["/", "relative", "/Synthetic//Science"]) {
-      scanInput.value = invalid;
-      scanInput.dispatchEvent(new Event("input", { bubbles: true }));
-      expect(scanStart.disabled).toBe(true);
-    }
-    scanInput.value = "/Synthetic";
-    scanInput.dispatchEvent(new Event("input", { bubbles: true }));
-    expect(scanStart.disabled).toBe(false);
-
-    group.checked = true;
-    group.dispatchEvent(new Event("change", { bubbles: true }));
-    expect(verificationStart.disabled).toBe(true);
-    verificationInput.value = "/Synthetic";
-    verificationInput.dispatchEvent(new Event("input", { bubbles: true }));
-    expect(verificationStart.disabled).toBe(false);
-
-    connectionStatus = "scanning";
-    hybridStatus = "scanning";
-    connectionListener();
-    hybridListener();
-    expect(scanStart.disabled).toBe(true);
-    expect(verificationStart.disabled).toBe(true);
-    expect(scanInput.disabled).toBe(true);
-    expect(verificationInput.disabled).toBe(true);
-  });
-
-  it("admits only one pending scan or category verification action", async () => {
-    const groupKey = `group:${"e".repeat(64)}`;
-    const scanGate = deferred();
-    const verificationGate = deferred();
-    const resumeGate = deferred();
-    const requestCatalogScan = vi.fn(async () => scanGate.promise);
-    const requestLargeCatalogVerification = vi.fn(async () => verificationGate.promise);
-    const requestResumeLargeCatalogVerification = vi.fn(async () => resumeGate.promise);
-    const controller = connectedControllerFixture({
-      requestCatalogScan,
-      hybridCatalog: () => ({
-        status: "paused",
-        active: {
-          importedAt: 1,
-          pdfCount: 1,
-          unverifiedCount: 1,
-          verifiedCount: 0,
-          differenceCount: 0,
-          cloudMissingCount: 0,
-          groupCount: 1,
-          verifiedGroupCount: 0,
-          groups: [{
-            groupKey,
-            label: "Science",
-            pdfCount: 1,
-            mode: "recursive",
-            verificationStatus: "unverified",
-          }],
-        },
-        batch: {
-          batchId: "batch-settings-pending-gate",
-          status: "paused",
-          stopReason: "time-limit",
-          resumeAvailable: true,
-          runOrdinal: 1,
-          remainingGroupCount: 1,
-          pdfCount: 1,
-          directoryCount: 1,
-          ignoredFileCount: 0,
-          listRequestCount: 1,
-          cumulativeListRequestCount: 1,
-        },
-      }),
-      subscribeHybridCatalog: () => () => undefined,
-      previewCatalogTxt: async () => undefined,
-      requestCatalogTxtImport: async () => undefined,
-      requestLargeCatalogVerification,
-      requestResumeLargeCatalogVerification,
-      cancelLargeCatalogVerification: () => undefined,
-      validateCatalogScanRoot: (value) => {
-        if (!value.startsWith("/") || value === "/" || value.includes("//")) {
-          throw new Error("invalid-root");
-        }
-        return value;
-      },
-    });
-    const root = createTestDiv();
-    createSettingsSectionsSurface({
-      app: {} as App,
-      controller,
+      controller: connectedControllerFixture({ chooseCatalogRoot, requestCatalogScan }),
       policy: NORMAL_RUNTIME_POLICY,
     }).render(root, "zh-CN");
 
-    const scanInput = root.querySelector<HTMLInputElement>('[data-catalog-scan-root="true"]')!;
-    const scanStart = root.querySelector<HTMLButtonElement>('[data-action="catalog-start-scan"]')!;
-    scanInput.value = "/Synthetic/Scan";
-    scanInput.dispatchEvent(new Event("input", { bubbles: true }));
-    scanStart.click();
-    scanStart.click();
-    expect(requestCatalogScan).toHaveBeenCalledOnce();
-    expect(scanStart.disabled).toBe(true);
-    scanGate.resolve();
-    await vi.waitFor(() => expect(scanStart.disabled).toBe(false));
+    root.querySelector<HTMLButtonElement>('[data-action="browse-catalog-scan-root"]')?.click();
+    await Promise.resolve();
+    await Promise.resolve();
 
-    const group = root.querySelector<HTMLInputElement>(`[data-catalog-group-key="${groupKey}"]`)!;
-    const verificationInput = root.querySelector<HTMLInputElement>(
-      '[data-catalog-large-scan-root="true"]',
-    )!;
-    const verificationStart = root.querySelector<HTMLButtonElement>(
-      '[data-action="catalog-start-large-verification"]',
-    )!;
-    const verificationResume = root.querySelector<HTMLButtonElement>(
-      '[data-action="catalog-resume-large-verification"]',
-    )!;
-    group.checked = true;
-    group.dispatchEvent(new Event("change", { bubbles: true }));
-    verificationInput.value = "/Synthetic/Parent";
-    verificationInput.dispatchEvent(new Event("input", { bubbles: true }));
-
-    verificationStart.click();
-    verificationStart.click();
-    expect(requestLargeCatalogVerification).toHaveBeenCalledOnce();
-    expect(verificationStart.disabled).toBe(true);
-    expect(verificationResume.disabled).toBe(true);
-    verificationGate.resolve();
-    await vi.waitFor(() => expect(verificationResume.disabled).toBe(false));
-
-    verificationResume.click();
-    verificationResume.click();
-    expect(requestResumeLargeCatalogVerification).toHaveBeenCalledOnce();
-    expect(verificationStart.disabled).toBe(true);
-    expect(verificationResume.disabled).toBe(true);
-    resumeGate.resolve();
+    expect(root.querySelector<HTMLInputElement>('[data-catalog-scan-root="true"]')?.value).toBe("");
+    expect(requestCatalogScan).not.toHaveBeenCalled();
   });
 
-  it("preserves independent scan and verification drafts plus groups across a language rerender", () => {
-    const groupKey = `group:${"b".repeat(64)}`;
-    const controller = connectedControllerFixture({
-      hybridCatalog: () => ({
-        status: "ready",
-        active: {
-          importedAt: 1,
-          pdfCount: 1,
-          unverifiedCount: 1,
-          verifiedCount: 0,
-          differenceCount: 0,
-          cloudMissingCount: 0,
-          groupCount: 1,
-          verifiedGroupCount: 0,
-          groups: [{
-            groupKey,
-            label: "Science",
-            pdfCount: 1,
-            mode: "recursive",
-            verificationStatus: "unverified",
-          }],
-        },
-      }),
-      subscribeHybridCatalog: () => () => undefined,
-      previewCatalogTxt: async () => undefined,
-      requestCatalogTxtImport: async () => undefined,
-      requestLargeCatalogVerification: async () => undefined,
-      requestResumeLargeCatalogVerification: async () => undefined,
-      cancelLargeCatalogVerification: () => undefined,
-    });
-    const root = createTestDiv();
-    const surface = createSettingsSectionsSurface({
-      app: {} as App,
-      controller,
-      policy: NORMAL_RUNTIME_POLICY,
-    });
-    surface.render(root, "zh-CN");
-    const scan = root.querySelector<HTMLInputElement>('[data-catalog-scan-root="true"]')!;
-    const verification = root.querySelector<HTMLInputElement>(
-      '[data-catalog-large-scan-root="true"]',
-    )!;
-    const group = root.querySelector<HTMLInputElement>(`[data-catalog-group-key="${groupKey}"]`)!;
-    scan.value = "/Synthetic/Scan";
-    scan.dispatchEvent(new Event("input", { bubbles: true }));
-    verification.value = "/Synthetic/Verification";
-    verification.dispatchEvent(new Event("input", { bubbles: true }));
-    group.checked = true;
-    group.dispatchEvent(new Event("change", { bubbles: true }));
 
-    surface.render(root, "en");
 
-    expect(root.querySelector<HTMLInputElement>('[data-catalog-scan-root="true"]')?.value)
-      .toBe("/Synthetic/Scan");
-    expect(root.querySelector<HTMLInputElement>('[data-catalog-large-scan-root="true"]')?.value)
-      .toBe("/Synthetic/Verification");
-    expect(root.querySelector<HTMLInputElement>(`[data-catalog-group-key="${groupKey}"]`)?.checked)
-      .toBe(true);
-    expect(root.textContent).toContain("Current directory");
-  });
+
 
   it("rolls persistent controls back when saving fails", async () => {
     const privateFailure = new Error("private-credential-detail");
@@ -651,94 +689,6 @@ describe("shared grouped settings surface", () => {
     ]);
   });
 
-  it("localizes save, connection, scan, batch, and verification states", async () => {
-    const controller = connectedControllerFixture({
-      catalogConnection: () => ({ status: "paused" }),
-      hybridCatalog: () => ({
-        status: "paused",
-        active: {
-          importedAt: 1,
-          pdfCount: 1,
-          unverifiedCount: 1,
-          verifiedCount: 0,
-          differenceCount: 1,
-          cloudMissingCount: 0,
-          groupCount: 1,
-          verifiedGroupCount: 0,
-          groups: [{
-            groupKey: `group:${"a".repeat(64)}`,
-            label: "A",
-            pdfCount: 1,
-            mode: "recursive",
-            verificationStatus: "difference",
-          }],
-        },
-        batch: {
-          batchId: "batch-settings-sections",
-          status: "paused",
-          stopReason: "pdf-limit",
-          resumeAvailable: true,
-          runOrdinal: 1,
-          remainingGroupCount: 1,
-          pdfCount: 1,
-          directoryCount: 1,
-          ignoredFileCount: 0,
-          listRequestCount: 1,
-          cumulativeListRequestCount: 1,
-        },
-      }),
-      subscribeHybridCatalog: () => () => undefined,
-      previewCatalogTxt: async () => undefined,
-      requestCatalogTxtImport: async () => undefined,
-      requestLargeCatalogVerification: async () => undefined,
-      requestResumeLargeCatalogVerification: async () => undefined,
-      cancelLargeCatalogVerification: () => undefined,
-    });
-    const zhRoot = createTestDiv();
-    createSettingsSectionsSurface({
-      app: {} as App, controller, policy: NORMAL_RUNTIME_POLICY,
-    }).render(zhRoot, "zh-CN");
-    const startup = zhRoot.querySelector<HTMLInputElement>('input[type="checkbox"]')!;
-    startup.checked = true;
-    startup.dispatchEvent(new Event("change", { bubbles: true }));
-    await Promise.resolve();
-    await Promise.resolve();
-
-    expect(zhRoot.textContent).not.toMatch(
-      /Startup preference|Folder rules|paused|scanning|unverified|difference|pdf limit/u,
-    );
-    expect(zhRoot.textContent).toContain("已暂停");
-    expect(zhRoot.textContent).toContain("存在差异");
-
-    const enRoot = createTestDiv();
-    createSettingsSectionsSurface({
-      app: {} as App, controller, policy: NORMAL_RUNTIME_POLICY,
-    }).render(enRoot, "en");
-    expect(enRoot.textContent).toContain("paused");
-    expect(enRoot.textContent).toContain("difference");
-  });
-
-  it.each([
-    ["zh-CN", "授权码无效"],
-    ["en", "The authorization code is invalid"],
-  ] as const)("shows a safe localized OAuth failure in %s", (locale, expected) => {
-    const controller = connectedControllerFixture({
-      settings: () => ({ ...settingsControllerFixture().settings(), locale }),
-      catalogConnection: () => ({
-        status: "configured",
-        messageCode: "authorization-code-invalid",
-      }),
-    });
-    const root = createTestDiv();
-
-    createSettingsSectionsSurface({
-      app: {} as App, controller, policy: NORMAL_RUNTIME_POLICY,
-    }).render(root, locale);
-
-    expect(root.querySelector('[data-catalog-connection-message="true"]')?.textContent)
-      .toBe(expected);
-    expect(root.textContent).not.toContain("SECRET-RUNTIME-DETAIL");
-  });
 
   it("localizes progress without losing exact requests, elapsed time, or stop reason", () => {
     const progress = presentCatalogProgress({
@@ -794,10 +744,57 @@ describe("shared grouped settings surface", () => {
       app: {} as App,
       controller,
       policy: NORMAL_RUNTIME_POLICY,
-    }, presentCatalogProgress).render(root, locale);
+    }, presentCatalogProgress).render(root, locale, { section: "cloud-scan-advanced" });
 
     expect(root.querySelector('[data-catalog-scan-status="true"]')?.textContent).toBe(expectedStatus);
     expect(root.querySelector('[data-catalog-pdf-progress="true"]')?.textContent).toBe(expectedPdf);
     expect(root.querySelector('[data-catalog-time-progress="true"]')?.textContent).toBe(expectedTime);
+  });
+
+  it("keeps the shared scan lifecycle visible in More while scanning and exposes cancel", () => {
+    let connection: ReturnType<NonNullable<SettingsController["catalogConnection"]>> = {
+      status: "authorized",
+    };
+    let notifyConnection: (() => void) | undefined;
+    const cancelCatalogScan = vi.fn();
+    const controller = connectedControllerFixture({
+      catalogConnection: () => connection,
+      subscribeCatalogConnection: (listener) => {
+        notifyConnection = listener;
+        return () => undefined;
+      },
+      cancelCatalogScan,
+    });
+    const root = createTestDiv();
+    createSettingsSectionsSurface({
+      app: {} as App,
+      controller,
+      policy: NORMAL_RUNTIME_POLICY,
+    }, presentCatalogProgress).render(root, "zh-CN", { section: "cloud-scan-advanced" });
+
+    const input = root.querySelector<HTMLInputElement>('[data-catalog-scan-root="true"]')!;
+    const start = root.querySelector<HTMLButtonElement>('[data-action="catalog-start-scan"]')!;
+    const cancel = root.querySelector<HTMLButtonElement>('[data-action="catalog-cancel-scan"]')!;
+    input.value = "/session/library";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    expect(start.disabled).toBe(false);
+    expect(cancel.hidden).toBe(true);
+
+    connection = {
+      status: "scanning",
+      scanProgress: {
+        status: "scanning", directoryCount: 2, completedDirectoryCount: 1,
+        pdfCount: 3, ignoredFileCount: 0, pendingDirectoryCount: 1,
+        listRequestCount: 2, elapsedMs: 10, budget: SMALL_ACCEPTANCE_CATALOG_SCAN_BUDGET,
+        stopReason: undefined,
+      },
+    };
+    notifyConnection?.();
+    expect(root.querySelector('[data-catalog-scan-status="true"]')?.textContent).toContain("扫描");
+    expect(input.disabled).toBe(true);
+    expect(start.disabled).toBe(true);
+    expect(cancel.hidden).toBe(false);
+    cancel.click();
+    expect(cancelCatalogScan).toHaveBeenCalledOnce();
   });
 });

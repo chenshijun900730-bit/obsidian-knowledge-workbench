@@ -6,6 +6,7 @@ import {
   decodeTxtCandidateRecord,
   decodeUnifiedCatalogDescriptor,
   decodeUnifiedCatalogRecord,
+  encodeUnifiedCatalogDescriptor,
   encodeTxtCandidateRecordLine,
   encodeCatalogOverlayDescriptor,
   encodeUnifiedCatalogRecordLine,
@@ -225,6 +226,67 @@ describe("hybrid catalog contracts", () => {
       candidateSha256: HASH_B,
       sourcePath: "/private/source.txt",
     }))).toThrow(new HybridCatalogError("hybrid-record-invalid"));
+  });
+
+  it("keeps schema-1 descriptors readable and strictly carries scope in schema 2", () => {
+    const overlayV2 = {
+      schemaVersion: 2,
+      overlayId: "overlay-v2",
+      sourceImportSha256: HASH_A,
+      verificationGeneration: 3,
+      cloudRootSha256: HASH_B,
+      topLevelGroupId: `group:${HASH_B}`,
+      completedAt: 200,
+      recordCount: 1,
+      differenceCount: 0,
+      supersededCount: 0,
+      recordsSha256: HASH_A,
+      differencesSha256: HASH_B,
+      supersededSha256: HASH_A,
+    } as const;
+    expect(decodeCatalogOverlayDescriptor(JSON.stringify(overlayV2))).toEqual(overlayV2);
+    expect(encodeCatalogOverlayDescriptor(overlayV2)).toBe(JSON.stringify(overlayV2));
+
+    const unifiedV2 = {
+      schemaVersion: 2,
+      snapshotId: "unified-v2",
+      sourceImportSha256: HASH_A,
+      verificationScope: {
+        generation: 3,
+        sourceImportSha256: HASH_A,
+        cloudRootSha256: HASH_B,
+      },
+      completedAt: 201,
+      recordCount: 1,
+      differenceCount: 0,
+      catalogSha256: HASH_A,
+      differencesSha256: HASH_B,
+    } as const;
+    expect(decodeUnifiedCatalogDescriptor(JSON.stringify(unifiedV2))).toEqual(unifiedV2);
+    expect(encodeUnifiedCatalogDescriptor(unifiedV2)).toBe(JSON.stringify(unifiedV2));
+    expect(decodeUnifiedCatalogDescriptor(JSON.stringify({
+      ...unifiedV2,
+      verificationScope: null,
+    }))).toEqual({ ...unifiedV2, verificationScope: null });
+
+    for (const invalid of [
+      { ...overlayV2, verificationGeneration: 0 },
+      { ...overlayV2, cloudRootSha256: "bad" },
+      { ...overlayV2, verificationScope: unifiedV2.verificationScope },
+    ]) {
+      expect(() => decodeCatalogOverlayDescriptor(JSON.stringify(invalid)))
+        .toThrow(new HybridCatalogError("hybrid-record-invalid"));
+    }
+    for (const invalid of [
+      {
+        ...unifiedV2,
+        verificationScope: { ...unifiedV2.verificationScope, sourceImportSha256: HASH_B },
+      },
+      { ...unifiedV2, verificationGeneration: 3 },
+    ]) {
+      expect(() => decodeUnifiedCatalogDescriptor(JSON.stringify(invalid)))
+        .toThrow(new HybridCatalogError("hybrid-record-invalid"));
+    }
   });
 
   it("emits canonical single-line NDJSON with one trailing LF", () => {
